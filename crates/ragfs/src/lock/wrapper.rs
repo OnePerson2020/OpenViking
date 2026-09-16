@@ -118,8 +118,7 @@ impl FileSystem for PathLockWrappedFS {
         let lease = self
             .manager
             .acquire_exact(path, self.manager.default_lock_timeout(), None)
-            .await
-            .map_err(|e| crate::core::Error::internal(format!("lock error: {e}")))?;
+            .await?;
         let result = self.inner.create(path).await;
         let release = self.manager.release(&lease).await;
         Self::merge_operation_and_release(result, release)
@@ -143,8 +142,7 @@ impl FileSystem for PathLockWrappedFS {
         let lease = self
             .manager
             .acquire_exact(path, self.manager.default_lock_timeout(), None)
-            .await
-            .map_err(|e| crate::core::Error::internal(format!("lock error: {e}")))?;
+            .await?;
         let result = self.inner.remove(path).await;
         let release = self.manager.release(&lease).await;
         Self::merge_operation_and_release(result, release)
@@ -164,8 +162,7 @@ impl FileSystem for PathLockWrappedFS {
         let lease = self
             .manager
             .acquire_tree(path, self.manager.default_lock_timeout(), None)
-            .await
-            .map_err(|e| crate::core::Error::internal(format!("lock error: {e}")))?;
+            .await?;
         let result = self.inner.remove_all(path).await;
         let release = self.manager.release(&lease).await;
         Self::merge_operation_and_release(result, release)
@@ -195,8 +192,7 @@ impl FileSystem for PathLockWrappedFS {
         let lease = self
             .manager
             .acquire_exact(path, self.manager.default_lock_timeout(), None)
-            .await
-            .map_err(|e| crate::core::Error::internal(format!("lock error: {e}")))?;
+            .await?;
         let result = self.inner.write(path, data, offset, flags).await;
         let release = self.manager.release(&lease).await;
         Self::merge_operation_and_release(result, release)
@@ -263,8 +259,7 @@ impl FileSystem for PathLockWrappedFS {
         let lease = self
             .manager
             .acquire_batch(&requests, self.manager.default_lock_timeout(), None)
-            .await
-            .map_err(|e| crate::core::Error::internal(format!("lock error: {e}")))?;
+            .await?;
         let result = self.inner.rename(old_path, new_path).await;
         let release = self.manager.release(&lease).await;
         Self::merge_operation_and_release(result, release)
@@ -291,8 +286,7 @@ impl FileSystem for PathLockWrappedFS {
         let lease = self
             .manager
             .acquire_batch(&requests, self.manager.default_lock_timeout(), None)
-            .await
-            .map_err(|e| crate::core::Error::internal(format!("lock error: {e}")))?;
+            .await?;
         let result = self.inner.replace(src_path, dst_path).await;
         let release = self.manager.release(&lease).await;
         Self::merge_operation_and_release(result, release)
@@ -316,8 +310,7 @@ impl FileSystem for PathLockWrappedFS {
         let lease = self
             .manager
             .acquire_exact(path, self.manager.default_lock_timeout(), None)
-            .await
-            .map_err(|e| crate::core::Error::internal(format!("lock error: {e}")))?;
+            .await?;
         let result = self.inner.truncate(path, size).await;
         let release = self.manager.release(&lease).await;
         Self::merge_operation_and_release(result, release)
