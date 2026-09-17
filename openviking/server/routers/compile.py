@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Compile task creation API."""
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Header, status
 
 from openviking.server.auth import get_request_context
 from openviking.server.dependencies import get_service
@@ -17,8 +17,12 @@ router = APIRouter(prefix="/api/v1", tags=["compile"])
 async def create_compile(
     body: CompileRequest,
     ctx: RequestContext = Depends(get_request_context),
+    x_request_id: str | None = Header(None),
 ):
     connection = {"api_key": ctx.api_key} if ctx.api_key else {}
+    # Persist the submission's request ID for all asynchronous Runtime calls.
+    if x_request_id:
+        connection["request_id"] = x_request_id
     task = await get_service().compile.create(body, connection=connection, ctx=ctx)
     return Response(status="ok", result=task.to_dict())
 
