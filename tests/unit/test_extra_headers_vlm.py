@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 from openai import OpenAI
+import pytest
+from volcenginesdkarkruntime._exceptions import ArkAPIStatusError
 
 from openviking.models.vlm.backends.litellm_vlm import (
     LiteLLMVLMProvider,
@@ -344,13 +346,31 @@ class TestOpenAIVLMClientRetries:
         assert call_kwargs["timeout"] == 12.0
         assert call_kwargs["max_retries"] == 0
 
+    @pytest.mark.parametrize(
+        ("status_code", "message", "expected_attempts"),
+        [
+            (400, "Total tokens of multi-modal content and text exceed max message tokens.", 1),
+            (400, "The parameter model is invalid.", 1),
+            (401, "Unauthorized", 1),
+            (503, "Service Unavailable", 6),
+        ],
+    )
     @patch("volcenginesdkarkruntime.AsyncArk")
-    def test_volcengine_async_client_applies_timeout_and_disables_sdk_retries(
-        self,
-        mock_async_ark_class,
+    def test_volcengine_async_client_uses_shared_retry_policy(
+        self, mock_async_ark_class, status_code, message, expected_attempts
     ):
-        mock_async_ark_class.return_value = MagicMock()
-
+        error = ArkAPIStatusError(
+            f"Error code: {status_code} - {message}",
+            response=httpx.Response(
+                status_code,
+                request=httpx.Request("POST", "https://example.invalid/chat/completions"),
+            ),
+            body={"error": {"message": message}},
+            request_id="test-request",
+        )
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(side_effect=error)
+        mock_async_ark_class.return_value = mock_client
         vlm = VolcEngineVLM(
             {
                 "api_key": "sk-test",
@@ -360,10 +380,13 @@ class TestOpenAIVLMClientRetries:
             }
         )
 
-        _ = vlm._build_async_client()
+        with patch("openviking.utils.model_retry.asyncio.sleep", new=AsyncMock()):
+            with pytest.raises(ArkAPIStatusError) as raised:
+                asyncio.run(vlm.get_completion_async("hello"))
 
-        mock_async_ark_class.assert_called_once()
-        call_kwargs = mock_async_ark_class.call_args[1]
+        assert raised.value is error
+        assert mock_client.chat.completions.create.await_count == expected_attempts
+        call_kwargs = mock_async_ark_class.call_args.kwargs
         assert call_kwargs["timeout"] == 12.0
         assert call_kwargs["max_retries"] == 0
 

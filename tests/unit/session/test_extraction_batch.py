@@ -133,26 +133,36 @@ async def test_working_memory_no_vlm_fallback_uses_all_messages(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_working_memory_prompt_fallback_uses_all_messages(monkeypatch):
-    session = Session(viking_fs=None)
-    messages = [_message("u1"), _message("u2"), _message("u3")]
-    vlm = type("VLM", (), {"is_available": lambda self: True})()
-    config = type("Config", (), {"vlm": vlm})()
-    monkeypatch.setattr("openviking.session.session.get_openviking_config", lambda: config)
-
-    def unavailable_prompt():
-        raise ImportError("prompt module unavailable")
-
-    monkeypatch.setattr("openviking.session.session._load_render_prompt", unavailable_prompt)
-
-    limits = ExtractionBatchLimits(max_messages=1)
-    result = await session._generate_archive_summary_with_batching(
-        plan_extraction_batches(messages, limits),
-        latest_archive_overview="",
-        limits=limits,
+@pytest.mark.parametrize("path", ["create", "update", "fallback"])
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Error code: 400 - InvalidParameter: Total tokens of multi-modal content "
+        "and text exceed max message tokens.",
+        "503 Service Unavailable",
+    ],
+)
+async def test_working_memory_propagates_model_errors(monkeypatch, path, message):
+    error = RuntimeError(message)
+    completion = AsyncMock(side_effect=["no tool call", error] if path == "fallback" else error)
+    vlm = SimpleNamespace(is_available=lambda: True, get_completion_async=completion)
+    monkeypatch.setattr(
+        "openviking.session.session.get_openviking_config",
+        lambda: SimpleNamespace(vlm=vlm, output_language_override="en"),
     )
+    session = Session(viking_fs=None)
 
-    assert result == "# Session Summary\n\n**Overview**: 3 turns, 3 messages"
+    async def summarize():
+        return await session._generate_archive_summary_async(
+            [_message("u1")],
+            latest_archive_overview="" if path == "create" else "## Current State\nPrevious work",
+        )
+
+    with pytest.raises(RuntimeError) as raised:
+        await summarize()
+
+    assert raised.value is error
+    assert completion.await_count == (2 if path == "fallback" else 1)
 
 
 @pytest.mark.asyncio

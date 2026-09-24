@@ -213,6 +213,10 @@ def test_quota_exceeded_case_insensitive():
     "message",
     [
         "BadRequestError: 400 maximum context length is 8192 tokens",
+        (
+            "Error code: 400 - InvalidParameter: Total tokens of multi-modal content "
+            "and text exceed max message tokens."
+        ),
         "Error code: 413 - Payload Too Large",
         (
             "Error code: 500 - {'error': {'code': 500, 'message': "
@@ -225,17 +229,32 @@ def test_classify_input_too_large_errors(message):
     assert classify_api_error(RuntimeError(message)) == ERROR_CLASS_INPUT_TOO_LARGE
 
 
-def test_retry_sync_does_not_retry_input_too_large():
+@pytest.mark.parametrize(
+    "message",
+    [
+        "expected maxLength: 50000, actual: 75000",
+        "Error code: 400 - InvalidParameter: Total tokens of multi-modal content "
+        "and text exceed max message tokens.",
+    ],
+)
+def test_input_too_large_does_not_retry_or_trip_breaker(message):
+    from openviking.utils.circuit_breaker import CircuitBreaker
+
+    breaker = CircuitBreaker()
     attempts = {"count": 0}
 
     def _call():
         attempts["count"] += 1
-        raise RuntimeError("expected maxLength: 50000, actual: 75000")
+        error = RuntimeError(message)
+        breaker.record_failure(error)
+        raise error
 
-    with pytest.raises(RuntimeError, match="expected maxLength"):
+    with pytest.raises(RuntimeError) as raised:
         retry_sync(_call, max_retries=5)
 
+    assert str(raised.value) == message
     assert attempts["count"] == 1
+    breaker.check()
 
 
 # --- numeric pattern word-boundary tests ---
