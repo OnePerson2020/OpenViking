@@ -3,7 +3,10 @@
 import abc
 import asyncio
 import json
+import math
 import threading
+import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -132,6 +135,11 @@ class NamedQueue:
         self._dequeue_handler = dequeue_handler
         self._task_work_index = task_work_index
         self._initialized = False
+        # A mutable sample follows callbacks dispatched to the service loop,
+        # while ContextVar keeps concurrent deliveries separate.
+        self._duration_outcome: ContextVar[Optional[Dict[str, str]]] = ContextVar(
+            "queue_duration_outcome", default=None
+        )
 
         # Status tracking
         self._lock = threading.Lock()
@@ -167,11 +175,17 @@ class NamedQueue:
 
     def _on_process_requeue(self) -> None:
         """Called when a dequeued message is re-enqueued for later retry."""
+        sample = self._duration_outcome.get()
+        if sample is not None:
+            sample["outcome"] = "requeued"
         with self._lock:
             self._requeue_count += 1
 
     def _on_process_error(self, error_msg: str, data: Optional[Dict[str, Any]] = None) -> None:
         """Called on processing failure."""
+        sample = self._duration_outcome.get()
+        if sample is not None:
+            sample["outcome"] = "failed"
         if self._task_work_index is not None and data is not None:
             metadata = extract_task_metadata(data)
             if metadata is not None:
@@ -354,26 +368,65 @@ class NamedQueue:
         if self._dequeue_handler is None:
             return data
 
-        metadata = extract_task_metadata(data)
-        if metadata is None or self._task_work_index is None:
-            return await self._dequeue_handler.on_dequeue(data)
-
-        active_task = asyncio.current_task()
-        with bind_task_context(metadata.task_id, metadata.account_id, metadata.user_id):
-            if self._task_work_index.cancellation_requested(metadata.task_id):
-                return await self._dequeue_handler.on_cancelled(data)
-            if active_task is not None:
-                self._task_work_index.register_active(metadata.task_id, active_task)
-            try:
+        process_started = time.perf_counter()
+        sample = {"outcome": "success"}
+        token = self._duration_outcome.set(sample)
+        try:
+            metadata = extract_task_metadata(data)
+            if metadata is None or self._task_work_index is None:
                 return await self._dequeue_handler.on_dequeue(data)
-            except asyncio.CancelledError:
+
+            active_task = asyncio.current_task()
+            with bind_task_context(metadata.task_id, metadata.account_id, metadata.user_id):
                 if self._task_work_index.cancellation_requested(metadata.task_id):
-                    self._on_process_success()
-                    return None
-                raise
-            finally:
+                    sample["outcome"] = "cancelled"
+                    return await self._dequeue_handler.on_cancelled(data)
                 if active_task is not None:
-                    self._task_work_index.unregister_active(metadata.task_id, active_task)
+                    self._task_work_index.register_active(metadata.task_id, active_task)
+                try:
+                    return await self._dequeue_handler.on_dequeue(data)
+                except asyncio.CancelledError:
+                    if self._task_work_index.cancellation_requested(metadata.task_id):
+                        sample["outcome"] = "cancelled"
+                        self._on_process_success()
+                        return None
+                    raise
+                finally:
+                    if active_task is not None:
+                        self._task_work_index.unregister_active(metadata.task_id, active_task)
+        except (Exception, asyncio.CancelledError):
+            sample["outcome"] = "exception"
+            raise
+        finally:
+            self._duration_outcome.reset(token)
+            self._publish_duration(data, process_started, sample["outcome"])
+
+    def _publish_duration(self, data: Dict[str, Any], process_started: float, outcome: str) -> None:
+        """Publish best-effort processing and end-to-end timings for one delivery."""
+        from openviking.observability.events import try_publish_event
+
+        payload: Dict[str, Any] = {
+            "queue": self.name,
+            "outcome": str(outcome),
+            "process_duration_seconds": max(0.0, time.perf_counter() - process_started),
+        }
+        enqueued_at = self._extract_enqueued_at(data)
+        if enqueued_at is not None:
+            end_to_end = time.time() - enqueued_at
+            if end_to_end >= 0:
+                payload["end_to_end_duration_seconds"] = end_to_end
+        try_publish_event("queue.processed", payload)
+
+    @staticmethod
+    def _extract_enqueued_at(data: Dict[str, Any]) -> Optional[float]:
+        """Read the QueueFS enqueue timestamp from a dequeued message envelope."""
+        if not isinstance(data, dict) or "id" not in data or "data" not in data:
+            return None
+        try:
+            value = float(data.get("timestamp"))
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) and value >= 0 else None
 
     async def peek(self) -> Optional[Dict[str, Any]]:
         """Peek at head message without removing."""

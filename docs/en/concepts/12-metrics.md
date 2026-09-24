@@ -228,6 +228,8 @@ Notes:
 | `openviking_queue_errors_total` | Counter | `queue` | total error count per queue |
 | `openviking_queue_pending` | Gauge | `queue` | pending queue items |
 | `openviking_queue_in_progress` | Gauge | `queue` | in-progress queue items |
+| `openviking_queue_process_duration_seconds` | Histogram | `queue, outcome` | handler execution time after a worker dequeues a message |
+| `openviking_queue_end_to_end_duration_seconds` | Histogram | `queue, outcome` | enqueue-to-handler-completion latency, including queue wait time |
 | `openviking_lock_active` | Gauge | none | current published lock leases |
 | `openviking_lock_waiting` | Gauge | none | requests currently waiting for locks |
 | `openviking_lock_stale` | Gauge | none | cumulative count of stale lock tokens removed |
@@ -236,9 +238,12 @@ Notes:
 | `openviking_lock_descendant_scans_total` | Counter | none | completed descendant scans |
 | `openviking_lock_descendant_scan_duration_seconds_total` | Counter | none | cumulative descendant scan duration |
 
+The queue duration `outcome` label is one of `success`, `failed`, `requeued`, `cancelled`, or `exception`. `failed` means the handler reported a failure through its callback and returned normally, allowing acknowledgement, while `exception` means processing raised and the current message is left unacknowledged.
+
 These help answer:
 
 - Is there queue backlog?
+- Which queue is slow, and is the latency caused by waiting or processing?
 - Is there lock contention or stale locking?
 
 ### RAGFS

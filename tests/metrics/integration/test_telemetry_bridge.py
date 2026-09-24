@@ -1,9 +1,73 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
 
+import asyncio
+import time
+from unittest.mock import AsyncMock
+
+import pytest
+
 from openviking.metrics.datasources.telemetry_bridge import TelemetryBridgeEventDataSource
 from openviking.metrics.global_api import init_metrics_from_server_config, shutdown_metrics
 from openviking.server.config import MetricsConfig, ObservabilityConfig, ServerConfig
+from openviking.service.task_work_index import TaskWorkIndex
+from openviking.storage.queuefs.named_queue import DequeueHandlerBase, NamedQueue
+
+
+@pytest.mark.asyncio
+async def test_queue_duration_event_is_wired_to_metrics_registry(registry, render_prometheus):
+    class Handler(DequeueHandlerBase):
+        async def on_dequeue(self, data):
+            # Production handlers dispatch callbacks to a different service loop.
+            return await asyncio.to_thread(asyncio.run, self.process(data))
+
+        async def process(self, data):
+            outcome = data["data"]["task_id"]
+            if outcome == "failed":
+                self.report_error("failed delivery", data)
+                await asyncio.sleep(0)
+                return None
+            if outcome == "requeued":
+                self.report_requeue()
+            await asyncio.sleep(0)
+            if outcome == "exception":
+                raise RuntimeError("unsettled delivery")
+            self.report_success()
+            return None
+
+    work_index = TaskWorkIndex()
+    work_index.set_callbacks(
+        finalize_before_ack=AsyncMock(),
+        is_cancellation_requested=lambda task_id: task_id == "cancelled",
+    )
+    queue = NamedQueue(
+        object(), "/queue", "SessionCommit", dequeue_handler=Handler(), task_work_index=work_index
+    )
+    init_metrics_from_server_config(
+        ServerConfig(observability=ObservabilityConfig(metrics=MetricsConfig(enabled=True))),
+        app=None,
+        registry=registry,
+    )
+    try:
+        outcomes = ["success", "failed", "requeued", "cancelled", "exception"]
+        messages = [
+            {"id": outcome, "data": {"task_id": outcome}, "timestamp": time.time() - 2}
+            for outcome in outcomes
+        ]
+        for _ in messages:
+            queue._on_dequeue_start()
+        results = await asyncio.gather(
+            *(queue.process_dequeued(message) for message in messages), return_exceptions=True
+        )
+        assert results[:4] == [None] * 4
+        assert isinstance(results[4], RuntimeError)
+        text = render_prometheus(registry)
+        for outcome in outcomes:
+            labels = f'outcome="{outcome}",queue="SessionCommit"'
+            assert f"openviking_queue_process_duration_seconds_count{{{labels}}} 1" in text
+            assert f"openviking_queue_end_to_end_duration_seconds_count{{{labels}}} 1" in text
+    finally:
+        shutdown_metrics()
 
 
 def test_telemetry_bridge_records_operation_and_resource_metrics(registry, render_prometheus):

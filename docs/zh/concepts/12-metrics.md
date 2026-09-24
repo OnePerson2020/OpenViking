@@ -231,6 +231,8 @@ scrape_configs:
 | `openviking_queue_errors_total` | Counter | `queue` | 队列累计错误量 |
 | `openviking_queue_pending` | Gauge | `queue` | 队列待处理数 |
 | `openviking_queue_in_progress` | Gauge | `queue` | 队列执行中数量 |
+| `openviking_queue_process_duration_seconds` | Histogram | `queue, outcome` | 消息被 worker 取出后到 handler 结束的处理耗时 |
+| `openviking_queue_end_to_end_duration_seconds` | Histogram | `queue, outcome` | 消息从入队到 handler 结束的端到端耗时，包含排队时间 |
 | `openviking_lock_active` | Gauge | 无 | 当前已发布的锁租约数 |
 | `openviking_lock_waiting` | Gauge | 无 | 当前等待锁的请求数 |
 | `openviking_lock_stale` | Gauge | 无 | 累计已清理的过期锁 token 数 |
@@ -239,9 +241,12 @@ scrape_configs:
 | `openviking_lock_descendant_scans_total` | Counter | 无 | 已完成的后代锁扫描次数 |
 | `openviking_lock_descendant_scan_duration_seconds_total` | Counter | 无 | 后代锁扫描累计耗时 |
 
+队列耗时指标中的 `outcome` 可取 `success`、`failed`、`requeued`、`cancelled`、`exception`。其中 `failed` 表示 handler 通过回调报告失败后正常返回，消息仍会 ACK，`exception` 表示处理过程抛出异常，当前消息不会 ACK。
+
 这些指标适合回答：
 
 - 是否有队列堆积？
+- 哪个队列处理慢，以及耗时是否主要来自排队？
 - 是否有锁竞争或 stale lock？
 
 
