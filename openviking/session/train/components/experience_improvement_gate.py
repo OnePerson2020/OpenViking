@@ -184,22 +184,17 @@ class ExperienceImprovementGate:
             }
 
         replay = _replay_summary(instance, actions=actions, waiting=waiting)
-        rollout_passed = bool(gate_context.get("passed"))
-        if rollout_passed:
-            passed = instance.state == "completed"
-            reason = (
-                "candidate preserves the successful trajectory"
-                if passed
-                else "candidate no longer completes for a successful trajectory"
-            )
+        trajectory_passed = bool(gate_context.get("passed"))
+        rollout_passed = bool(gate_context.get("rollout_passed", trajectory_passed))
+        if trajectory_passed and instance.state == "completed":
             return {
                 "trajectory_uri": trajectory_uri,
-                "passed": passed,
-                "reason": reason,
+                "passed": True,
+                "reason": "candidate preserves the successful trajectory",
                 "replay": replay,
             }
 
-        if instance.state == "completed":
+        if not trajectory_passed and instance.state == "completed":
             return {
                 "trajectory_uri": trajectory_uri,
                 "passed": False,
@@ -211,6 +206,14 @@ class ExperienceImprovementGate:
                 "trajectory_uri": trajectory_uri,
                 "passed": False,
                 "reason": "candidate detects an incomplete path but emits no corrective action",
+                "replay": replay,
+            }
+
+        if trajectory_passed and rollout_passed:
+            return {
+                "trajectory_uri": trajectory_uri,
+                "passed": False,
+                "reason": "candidate no longer completes for a successful rollout",
                 "replay": replay,
             }
 
@@ -228,15 +231,20 @@ class ExperienceImprovementGate:
                 "reason": f"candidate corrective-action validation failed: {exc}",
                 "replay": replay,
             }
+        relevant = relevance >= self.config.noul_true_threshold
+        reattributed = trajectory_passed and not rollout_passed
         return {
             "trajectory_uri": trajectory_uri,
-            "passed": relevance >= self.config.noul_true_threshold,
+            "passed": relevant,
             "reason": (
-                "candidate catches the failed trajectory with a relevant corrective action"
-                if relevance >= self.config.noul_true_threshold
+                "candidate correction is attributable to the failed rollout"
+                if relevant and reattributed
+                else "candidate catches the failed trajectory with a relevant corrective action"
+                if relevant
                 else "candidate corrective action does not address the evaluation failure"
             ),
             "corrective_action_score": relevance,
+            "failure_reattributed": reattributed and relevant,
             "replay": replay,
         }
 

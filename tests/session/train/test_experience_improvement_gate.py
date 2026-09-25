@@ -27,11 +27,12 @@ report = tell("{instruction}")
 known.then(report)'''
 
 
-def _context(*, passed: bool) -> dict:
+def _context(*, passed: bool, rollout_passed: bool | None = None) -> dict:
     return {
         "trajectory_uri": TRAJECTORY_URI,
         "trajectory_summary": "The agent reported 708 instead of 1628.",
         "passed": passed,
+        "rollout_passed": passed if rollout_passed is None else rollout_passed,
         "score": 1.0 if passed else 0.0,
         "feedback": [] if passed else ["Information 1628 was not communicated."],
         "experience_execution": {},
@@ -46,7 +47,12 @@ def _context(*, passed: bool) -> dict:
     }
 
 
-def _gradient(source: str, *, passed: bool) -> PatchSemanticGradient:
+def _gradient(
+    source: str,
+    *,
+    passed: bool,
+    rollout_passed: bool | None = None,
+) -> PatchSemanticGradient:
     file = MemoryFile(
         uri=EXPERIENCE_URI,
         content=source,
@@ -67,7 +73,9 @@ def _gradient(source: str, *, passed: bool) -> PatchSemanticGradient:
             )
         ],
         confidence=0.8,
-        metadata={EXPERIENCE_GATE_CONTEXTS_KEY: [_context(passed=passed)]},
+        metadata={
+            EXPERIENCE_GATE_CONTEXTS_KEY: [_context(passed=passed, rollout_passed=rollout_passed)]
+        },
     )
 
 
@@ -184,6 +192,36 @@ async def test_successful_trajectory_requires_candidate_to_complete():
 
     assert len(result.items) == 1
     assert result.metadata["experience_improvement_gate"]["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_failed_rollout_can_reattribute_mislabeled_successful_trajectory():
+    jev = SimpleNamespace(
+        evaluate=AsyncMock(
+            return_value={
+                "improvement_effective": {"type": "noul", "noul": 0.93},
+            }
+        )
+    )
+    gate = ExperienceImprovementGate(
+        config=DagDeciderConfig(provider="jev"),
+        dag_decider=StopsAtReportDecider(),
+        jev=jev,
+    )
+    source = _source("Report the total 1628 required by the failed rollout")
+
+    result = await gate.validate(
+        _plan(source),
+        [_gradient(source, passed=True, rollout_passed=False)],
+        PolicySet(root_uri="viking://user/u/memories/experiences", policies=[]),
+        None,
+    )
+
+    replay = result.metadata["experience_improvement_gate"]["candidates"][0]["replays"][0]
+    assert len(result.items) == 1
+    assert replay["passed"] is True
+    assert replay["failure_reattributed"] is True
+    assert replay["reason"] == "candidate correction is attributable to the failed rollout"
 
 
 @pytest.mark.asyncio
