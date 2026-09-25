@@ -141,9 +141,11 @@ improvement gate compiles the final candidate and replays it from an empty insta
 source Trajectory's original conversation and tool-result evidence using Jev. For a successful
 Trajectory, the candidate must still complete. For a failed Trajectory, the candidate must stop
 before accepting the same failure and expose a current action that Jev judges directly relevant
-to the evaluation feedback. Validation is atomic for a merged Experience plan: if one candidate
-or one linked Trajectory fails, no Experience update or replacement delete in that plan is
-applied. Gate diagnostics remain on the training plan for inspection.
+to the evaluation feedback. Validation is scoped to each candidate Experience and its linked
+Trajectories. Passing candidates may be applied when an unrelated candidate fails; a supersede
+delete is applied only with its accepted replacement. Unattributed merge-only deletes require
+every candidate in that merged plan to pass. Gate diagnostics remain on the training plan for
+inspection.
 
 Agent Evolution is enabled by default. An account-level explicit `false` still disables
 Case/Trajectory/Experience learning for that account. Tau2's no-memory mode also disables

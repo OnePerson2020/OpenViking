@@ -27,9 +27,14 @@ report = tell("{instruction}")
 known.then(report)'''
 
 
-def _context(*, passed: bool, rollout_passed: bool | None = None) -> dict:
+def _context(
+    *,
+    passed: bool,
+    rollout_passed: bool | None = None,
+    trajectory_uri: str = TRAJECTORY_URI,
+) -> dict:
     return {
-        "trajectory_uri": TRAJECTORY_URI,
+        "trajectory_uri": trajectory_uri,
         "trajectory_summary": "The agent reported 708 instead of 1628.",
         "passed": passed,
         "rollout_passed": passed if rollout_passed is None else rollout_passed,
@@ -52,9 +57,11 @@ def _gradient(
     *,
     passed: bool,
     rollout_passed: bool | None = None,
+    experience_uri: str = EXPERIENCE_URI,
+    trajectory_uri: str = TRAJECTORY_URI,
 ) -> PatchSemanticGradient:
     file = MemoryFile(
-        uri=EXPERIENCE_URI,
+        uri=experience_uri,
         content=source,
         memory_type="experiences",
         extra_fields={"experience_name": "cancel"},
@@ -66,33 +73,45 @@ def _gradient(
         rationale="reflection",
         links=[
             StoredLink(
-                from_uri=EXPERIENCE_URI,
-                to_uri=TRAJECTORY_URI,
+                from_uri=experience_uri,
+                to_uri=trajectory_uri,
                 link_type="derived_from",
                 weight=1.0,
             )
         ],
         confidence=0.8,
         metadata={
-            EXPERIENCE_GATE_CONTEXTS_KEY: [_context(passed=passed, rollout_passed=rollout_passed)]
+            EXPERIENCE_GATE_CONTEXTS_KEY: [
+                _context(
+                    passed=passed,
+                    rollout_passed=rollout_passed,
+                    trajectory_uri=trajectory_uri,
+                )
+            ]
         },
     )
 
 
-def _plan(source: str) -> PolicyUpdatePlan:
+def _plan(
+    source: str,
+    *,
+    experience_uri: str = EXPERIENCE_URI,
+    trajectory_uri: str = TRAJECTORY_URI,
+    target_name: str = "cancel",
+) -> PolicyUpdatePlan:
     return PolicyUpdatePlan(
         items=[
             PolicyPlanItem(
                 kind="upsert",
                 memory_type="experiences",
-                target_name="cancel",
-                target_uri=EXPERIENCE_URI,
+                target_name=target_name,
+                target_uri=experience_uri,
                 before_content=None,
                 after_content=source,
                 links=[
                     StoredLink(
-                        from_uri=EXPERIENCE_URI,
-                        to_uri=TRAJECTORY_URI,
+                        from_uri=experience_uri,
+                        to_uri=trajectory_uri,
                         link_type="derived_from",
                         weight=1.0,
                     )
@@ -222,6 +241,51 @@ async def test_failed_rollout_can_reattribute_mislabeled_successful_trajectory()
     assert replay["passed"] is True
     assert replay["failure_reattributed"] is True
     assert replay["reason"] == "candidate correction is attributable to the failed rollout"
+
+
+@pytest.mark.asyncio
+async def test_merged_plan_keeps_independently_passing_candidate():
+    second_experience = "viking://user/u/memories/experiences/refund.md"
+    second_trajectory = "viking://user/u/memories/trajectories/refund.md"
+    source = _source()
+    plan = PolicyUpdatePlan(
+        items=[
+            *_plan(source).items,
+            *_plan(
+                source,
+                experience_uri=second_experience,
+                trajectory_uri=second_trajectory,
+                target_name="refund",
+            ).items,
+        ]
+    )
+    gate = ExperienceImprovementGate(
+        config=DagDeciderConfig(provider="jev"),
+        dag_decider=CompletesDecider(),
+        jev=SimpleNamespace(evaluate=AsyncMock()),
+    )
+
+    result = await gate.validate(
+        plan,
+        [
+            _gradient(source, passed=True),
+            _gradient(
+                source,
+                passed=False,
+                experience_uri=second_experience,
+                trajectory_uri=second_trajectory,
+            ),
+        ],
+        PolicySet(root_uri="viking://user/u/memories/experiences", policies=[]),
+        None,
+    )
+
+    assert [item.target_uri for item in result.items] == [EXPERIENCE_URI]
+    diagnostic = result.metadata["experience_improvement_gate"]
+    assert diagnostic["passed"] is False
+    assert diagnostic["atomic"] is False
+    assert diagnostic["accepted_count"] == 1
+    assert diagnostic["rejected_count"] == 1
 
 
 @pytest.mark.asyncio

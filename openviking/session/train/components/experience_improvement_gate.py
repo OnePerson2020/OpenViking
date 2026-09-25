@@ -61,7 +61,9 @@ class ExperienceImprovementGate:
                     **dict(plan.metadata or {}),
                     "experience_improvement_gate": {
                         "passed": False,
-                        "atomic": True,
+                        "atomic": False,
+                        "accepted_count": 0,
+                        "rejected_count": len(upserts),
                         "candidates": [],
                         "reason": "shared Jev configuration is missing",
                     },
@@ -112,19 +114,35 @@ class ExperienceImprovementGate:
             )
 
         passed = bool(diagnostics) and all(item["passed"] for item in diagnostics)
+        accepted_upserts = {
+            _plan_item_identity(item)
+            for item, diagnostic in zip(upserts, diagnostics, strict=True)
+            if diagnostic["passed"]
+        }
+        accepted_items = [
+            item
+            for item in plan.items
+            if _keep_plan_item(
+                item,
+                accepted_upserts=accepted_upserts,
+                all_upserts_passed=passed,
+                candidate_upserts=upserts,
+            )
+        ]
         tracer.set("experience.gate.candidate_count", len(diagnostics))
+        tracer.set("experience.gate.accepted_count", len(accepted_upserts))
         tracer.set("experience.gate.passed", passed)
         metadata = {
             **dict(plan.metadata or {}),
             "experience_improvement_gate": {
                 "passed": passed,
-                "atomic": True,
+                "atomic": False,
+                "accepted_count": len(accepted_upserts),
+                "rejected_count": len(diagnostics) - len(accepted_upserts),
                 "candidates": diagnostics,
             },
         }
-        # Experience updates and their replacement deletes form one atomic plan. A
-        # rejected candidate must not delete or partially update any live memory.
-        return PolicyUpdatePlan(items=list(plan.items) if passed else [], metadata=metadata)
+        return PolicyUpdatePlan(items=accepted_items, metadata=metadata)
 
     async def _validate_candidate(
         self,
@@ -313,6 +331,31 @@ def _gate_contexts_by_trajectory(
             if trajectory_uri:
                 result.setdefault(trajectory_uri, []).append(gate_context)
     return result
+
+
+def _plan_item_identity(item: Any) -> str:
+    return str(item.target_uri or item.target_name or "")
+
+
+def _keep_plan_item(
+    item: Any,
+    *,
+    accepted_upserts: set[str],
+    all_upserts_passed: bool,
+    candidate_upserts: list[Any],
+) -> bool:
+    if item.memory_type != "experiences":
+        return True
+    if item.kind == "upsert":
+        return _plan_item_identity(item) in accepted_upserts
+    if item.kind != "delete":
+        return False
+    superseded_by = {str(value) for value in item.metadata.get("superseded_by", []) if value}
+    if superseded_by:
+        return bool(superseded_by & accepted_upserts)
+    # A merge-only delete cannot be attributed to one candidate. Preserve it only
+    # when every candidate in this merged plan passed its own replay.
+    return all_upserts_passed and bool(candidate_upserts)
 
 
 def _parse_evidence(value: Any) -> list[DagEvidenceRef]:
