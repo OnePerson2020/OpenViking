@@ -405,6 +405,15 @@ async def test_experience_gradient_estimator_runs_extract_loop(monkeypatch):
                 "passed": True,
                 "score": 1.0,
                 "feedback": ["The transfer happened before flight status was checked."],
+                "criteria": [
+                    {
+                        "criterion_name": "done",
+                        "passed": True,
+                        "score": 1.0,
+                        "feedback": [],
+                        "evidence": ["evidence"],
+                    }
+                ],
             },
             "execution": analysis.metadata["experience_execution"],
         },

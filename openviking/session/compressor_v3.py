@@ -60,6 +60,7 @@ from openviking.session.skill.session_skill_context_provider import (
 )
 from openviking.session.train import (
     Case,
+    CriterionResult,
     ExperienceGradientContext,
     ExperienceGradientEstimator,
     ExperienceImprovementGate,
@@ -76,6 +77,7 @@ from openviking.session.train import (
     RolloutTrainingResult,
     Rubric,
     RubricCriterion,
+    RubricEvaluation,
     SkillPolicyUpdater,
     SkillSetLoader,
     StreamingPolicyTrainerConfig,
@@ -101,6 +103,7 @@ _EVENTS_MEMORY_TYPE = EVENT_MEMORY_TYPE
 _AGENT_MEMORY_TYPES = EXECUTION_MEMORY_TYPES
 _TRAINING_CASE_SPEC_PROTOCOL = "openviking.batch_train.case_spec.v1"
 _TRAINING_CASE_SPEC_HEADER = "# OpenViking Batch Training CaseSpec v1"
+_TRAINING_EVALUATION_HEADER = "# OpenViking OutcomeEvaluation"
 _TRAINING_FAST_PATH_MEMORY_TYPES = frozenset({"cases", "trajectories", "experiences"})
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 _EXPERIENCE_TRAJECTORY_MAP_PREFIX = "OpenViking-Experience-Trajectory-Map: "
@@ -1046,6 +1049,7 @@ class SessionCompressorV3:
             )
 
             case_uri_map = dict(case_uri_by_name or {})
+            rollout_evaluation = _training_evaluation_from_messages(messages)
 
             for case in cases:
                 case_uri = _case_uri_for_case(case, case_uri_map)
@@ -1053,6 +1057,7 @@ class SessionCompressorV3:
                     case=case,
                     messages=list(messages),
                     policy_snapshot_id=policy_snapshot_id,
+                    evaluation=rollout_evaluation,
                     metadata={
                         "experience_execution": dict(
                             case.metadata.get("experience_execution") or {}
@@ -1388,6 +1393,71 @@ def _training_case_spec_payload_from_message(message: Message) -> dict[str, Any]
     if not text.startswith(_TRAINING_CASE_SPEC_HEADER):
         return None
     return _parse_training_case_spec_payload(text)
+
+
+def _training_evaluation_from_messages(
+    messages: list[Message],
+) -> RubricEvaluation | None:
+    for message in reversed(messages):
+        text = _message_text(message).strip()
+        if not text.startswith(_TRAINING_EVALUATION_HEADER):
+            continue
+        match = _JSON_FENCE_RE.search(text)
+        raw_payload = (
+            match.group(1).strip()
+            if match
+            else text.removeprefix(_TRAINING_EVALUATION_HEADER).strip()
+        )
+        if not raw_payload:
+            raise ValueError("Training OutcomeEvaluation payload is empty")
+        try:
+            payload = JsonUtils.loads(raw_payload)
+        except Exception as exc:
+            raise ValueError("Training OutcomeEvaluation payload is not valid JSON") from exc
+        raw_evaluation = payload.get("evaluation") if isinstance(payload, dict) else None
+        if raw_evaluation is None:
+            return None
+        if not isinstance(raw_evaluation, dict):
+            raise ValueError("Training OutcomeEvaluation evaluation must be an object or null")
+        criterion_results: list[CriterionResult] = []
+        raw_criteria = raw_evaluation.get("criterion_results")
+        for index, raw_criterion in enumerate(
+            raw_criteria if isinstance(raw_criteria, list) else []
+        ):
+            if not isinstance(raw_criterion, dict):
+                raise ValueError("Training OutcomeEvaluation criteria must be objects")
+            criterion_results.append(
+                CriterionResult(
+                    criterion_name=str(
+                        raw_criterion.get("criterion_name") or f"criterion_{index + 1}"
+                    ),
+                    passed=bool(raw_criterion.get("passed", False)),
+                    score=float(raw_criterion.get("score") or 0.0),
+                    feedback=_string_list(raw_criterion.get("feedback")),
+                    evidence=_string_list(raw_criterion.get("evidence")),
+                    metadata=(
+                        dict(raw_criterion.get("metadata") or {})
+                        if isinstance(raw_criterion.get("metadata"), dict)
+                        else {}
+                    ),
+                )
+            )
+        return RubricEvaluation(
+            passed=bool(raw_evaluation.get("passed", False)),
+            score=float(raw_evaluation.get("score") or 0.0),
+            criterion_results=criterion_results,
+            feedback=_string_list(raw_evaluation.get("feedback")),
+            metadata=(
+                dict(raw_evaluation.get("metadata") or {})
+                if isinstance(raw_evaluation.get("metadata"), dict)
+                else {}
+            ),
+        )
+    return None
+
+
+def _string_list(value: Any) -> list[str]:
+    return [str(item) for item in value] if isinstance(value, list) else []
 
 
 def _message_text(message: Message) -> str:

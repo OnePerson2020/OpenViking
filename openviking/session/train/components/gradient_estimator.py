@@ -181,6 +181,16 @@ def _dag_execution_feedback(analysis: RolloutAnalysis | None) -> dict[str, Any] 
             "passed": analysis.evaluation.passed,
             "score": analysis.evaluation.score,
             "feedback": analysis.evaluation.feedback,
+            "criteria": [
+                {
+                    "criterion_name": criterion.criterion_name,
+                    "passed": criterion.passed,
+                    "score": criterion.score,
+                    "feedback": criterion.feedback,
+                    "evidence": criterion.evidence,
+                }
+                for criterion in analysis.evaluation.criterion_results
+            ],
         },
         "execution": execution,
     }

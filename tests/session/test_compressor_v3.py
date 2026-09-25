@@ -20,6 +20,7 @@ from openviking.session.compressor_v3 import (
     _experience_snapshot_provenance,
     _experience_trajectory_map,
     _report_extraction_telemetry,
+    _training_evaluation_from_messages,
     _visible_experience_snapshot_uris,
 )
 from openviking.session.memory.dataclass import (
@@ -34,6 +35,7 @@ from openviking.session.memory.memory_updater import MemoryUpdateResult
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking.session.train import (
     Case,
+    CriterionResult,
     ExperienceSet,
     PolicyApplyResult,
     PolicyPlanItem,
@@ -47,7 +49,10 @@ from openviking.session.train import (
     StreamingPolicyTrainerConfig,
     Trajectory,
 )
-from openviking.session.train.components.session_commit import _case_spec_message_to_request
+from openviking.session.train.components.session_commit import (
+    _case_spec_message_to_request,
+    _evaluation_message_to_request,
+)
 from openviking.telemetry import OperationTelemetry, bind_telemetry
 from openviking_cli.exceptions import ConflictError
 from openviking_cli.session.user_id import UserIdentifier
@@ -1231,6 +1236,41 @@ def test_training_case_spec_carries_compact_experience_execution():
     assert execution[experience_uri]["executed_nodes"] == ["known"]
     assert execution[experience_uri]["current_nodes"] == ["report"]
     assert "evidence" not in execution[experience_uri]
+
+
+def test_training_outcome_evaluation_round_trips_to_server_rollout():
+    evaluation = RubricEvaluation(
+        passed=False,
+        score=0.25,
+        criterion_results=[
+            CriterionResult(
+                criterion_name="communicate_total",
+                passed=False,
+                score=0.0,
+                feedback=["Information 1628 was not communicated."],
+                evidence=["assistant said 708"],
+                metadata={"reward_basis": "COMMUNICATE"},
+            )
+        ],
+        feedback=["tau2 reward is below 1.0"],
+        metadata={"reward": 0.25},
+    )
+    rollout = Rollout(
+        case=_training_case(),
+        messages=[],
+        policy_snapshot_id="snapshot-1",
+        evaluation=evaluation,
+    )
+    request = _evaluation_message_to_request(rollout)
+    message = Message(
+        id="evaluation",
+        role="user",
+        parts=[TextPart(text=request["parts"][0]["text"])],
+    )
+
+    restored = _training_evaluation_from_messages([message])
+
+    assert restored == evaluation
 
 
 @pytest.mark.asyncio
