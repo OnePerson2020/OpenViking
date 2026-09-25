@@ -22,8 +22,8 @@
 Add tests that assert:
 
 ```python
-def test_agent_evolution_is_disabled_by_default():
-    assert ServerConfig().agent_evolution.enabled is False
+def test_agent_evolution_is_enabled_by_default():
+    assert ServerConfig().agent_evolution.enabled is True
 
 
 def test_agent_evolution_can_be_enabled_for_the_server():

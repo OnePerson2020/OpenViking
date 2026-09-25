@@ -882,6 +882,19 @@ class MemoryUpdater:
                 result.add_error("unknown", ValueError(error))
             return result
 
+        # A malformed replacement must not allow a following supersedes/delete
+        # to remove the valid original experience.
+        from openviking.session.memory.experience_dag_compiler import compile_dag
+
+        for operation in operations.upsert_operations:
+            if operation.memory_type == "experiences" and "content" in operation.memory_fields:
+                try:
+                    compile_dag(operation.memory_fields["content"])
+                except (ValueError, TypeError, AttributeError) as exc:
+                    result.add_error(operation.uris[0] if operation.uris else "experiences", exc)
+        if result.errors:
+            return result
+
         applicable_upserts: List[ResolvedOperation] = []
         has_unresolved_upserts = False
         for resolved_op in operations.upsert_operations:
@@ -1113,6 +1126,7 @@ class MemoryUpdater:
                 old_content = resolved_op.old_memory_file_content
 
             metadata: Dict[str, Any] = dict(resolved_op.memory_fields)
+            metadata["memory_type"] = memory_type
             source = getattr(resolved_op, "source", None)
             source_extraction_id = getattr(source, "extraction_id", None) if source else None
             if source_extraction_id:
@@ -1146,6 +1160,13 @@ class MemoryUpdater:
                             metadata[field.name] = current_value
                         continue
                     metadata[field.name] = new_value
+
+            if memory_type == "experiences":
+                from openviking.session.memory.experience_dag_compiler import compile_dag
+
+                compile_dag(
+                    metadata.get("content") or (old_content.plain_content() if old_content else "")
+                )
 
             # Preserve system-managed metadata from the old file that is not
             # covered by the schema. These fields are written by the system,

@@ -1154,6 +1154,22 @@ class VikingClient:
         client = await self._session_client_for_user(user_id)
         return await client.get_session(session_id)
 
+    async def search_exp(
+        self,
+        session_id: str,
+        context: str,
+        evidence: list[dict[str, Any]],
+        *,
+        limit: int = 3,
+    ) -> Dict[str, Any]:
+        client = await self._session_client_for_user(None)
+        return await client.search_exp(
+            session_id,
+            context,
+            evidence=evidence,
+            limit=limit,
+        )
+
     async def get_session_context(
         self, session_id: str, token_budget: int, user_id: Optional[str] = None
     ) -> Dict[str, Any]:

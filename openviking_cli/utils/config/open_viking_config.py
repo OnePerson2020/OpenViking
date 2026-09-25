@@ -32,6 +32,7 @@ from .git_config import GitConfig
 from .glob_config import GlobConfig
 from .grep_config import GrepConfig
 from .ingest_config import IngestConfig
+from .jev_config import JevConfig
 from .log_config import LogConfig
 from .memory_config import MemoryConfig
 from .oauth_config import OAuthConfig
@@ -444,6 +445,11 @@ class OpenVikingConfig(BaseModel):
     agent_evolution: AgentEvolutionConfig = RuntimeField(
         default_factory=AgentEvolutionConfig,
         description="Dynamic cluster default for Agent Evolution.",
+    )
+
+    jev: Optional[JevConfig] = Field(
+        default=None,
+        description="Shared Jev System One decision service configuration.",
     )
 
     oauth: OAuthConfig = Field(

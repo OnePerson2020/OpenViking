@@ -41,13 +41,21 @@ from openviking_cli.exceptions import (
     NotInitializedError,
 )
 from openviking_cli.utils import get_logger
-from openviking_cli.utils.config.agent_evolution_config import AgentEvolutionConfig
+from openviking_cli.utils.config.agent_evolution_config import (
+    AgentEvolutionConfig,
+    DagDeciderConfig,
+)
+from openviking_cli.utils.config.jev_config import JevConfig
 from openviking_cli.utils.config.memory_config import SessionAutoCommitConfig
 
 logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from openviking.config.vlm import VLMResolver
+    from openviking.service.experience_runtime import (
+        SearchExperienceRequest,
+        SearchExperienceResult,
+    )
     from openviking.session.compressor_v3 import SessionCompressorV3
     from openviking.usage_reporter import UsageReporter
 
@@ -66,6 +74,8 @@ class SessionService:
         self._session_compressor = session_compressor
         self._tool_output_externalization_config = ToolOutputExternalizationConfig()
         self._agent_evolution_default_enabled = AgentEvolutionConfig().enabled
+        self._agent_evolution_default_dag_decider: Optional[DagDeciderConfig] = None
+        self._jev_config: Optional[JevConfig] = None
         self._runtime_config_manager: Optional[Any] = None
         self._vlm_resolver: Optional["VLMResolver"] = None
         self._default_user_memory_policy: Optional[Dict[str, Any]] = None
@@ -116,6 +126,11 @@ class SessionService:
     def set_agent_evolution_config(self, config: AgentEvolutionConfig) -> None:
         """Set the default used when an account has no persisted override."""
         self._agent_evolution_default_enabled = config.enabled
+        self._agent_evolution_default_dag_decider = config.dag_decider
+
+    def set_jev_config(self, config: Optional[JevConfig]) -> None:
+        """Set the shared Jev decision-service connection."""
+        self._jev_config = config.model_copy(deep=True) if config is not None else None
 
     def set_runtime_config_manager(self, manager: Any) -> None:
         """Bind the authoritative account runtime-config reader."""
@@ -130,6 +145,18 @@ class SessionService:
             "agent_evolution",
         )
         return self._agent_evolution_default_enabled if setting is None else setting.enabled
+
+    async def get_dag_decider_config(self, account_id: str) -> Optional[DagDeciderConfig]:
+        """Resolve account decision policy with the cluster policy as field fallback."""
+        if self._runtime_config_manager is not None:
+            setting = await self._runtime_config_manager.get_account(
+                account_id,
+                "agent_evolution",
+            )
+            configured = getattr(setting, "dag_decider", None)
+            if configured is not None:
+                return configured
+        return self._agent_evolution_default_dag_decider
 
     def set_usage_reporter(self, usage_reporter: Optional["UsageReporter"]) -> None:
         """Set the usage reporter for newly created sessions."""
@@ -343,6 +370,23 @@ class SessionService:
             logger.debug("Failed to list sessions", exc_info=True)
 
         return list(sessions_by_id.values())
+
+    async def search_exp(
+        self, session_id: str, request: "SearchExperienceRequest", ctx: RequestContext
+    ) -> "SearchExperienceResult":
+        """Select Experience DAGs from context and return their current instructions."""
+        from openviking.service.experience_runtime import ExperienceRuntime
+
+        self._ensure_initialized()
+        if self._vlm_resolver is None:
+            raise NotInitializedError("Account VLM resolver")
+        session = await self.get(session_id, ctx, auto_create=False)
+        return await ExperienceRuntime(
+            self._viking_fs,
+            self._vlm_resolver,
+            dag_decider_config=await self.get_dag_decider_config(ctx.account_id),
+            jev_config=self._jev_config,
+        ).search(session._session_uri, request, ctx)
 
     async def delete(self, session_id: str, ctx: RequestContext) -> bool:
         """Delete a session.
@@ -566,9 +610,7 @@ class SessionService:
                     return False
                 self._auto_commit_inflight.add(claim)
         except Exception:
-            logger.debug(
-                "Skipped auto-commit scheduling for %s", session_id, exc_info=True
-            )
+            logger.debug("Skipped auto-commit scheduling for %s", session_id, exc_info=True)
             return False
 
         task = asyncio.create_task(self.run_auto_commit(session_id, ctx, reason=reason_hint))

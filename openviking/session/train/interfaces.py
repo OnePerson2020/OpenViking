@@ -65,6 +65,18 @@ class PolicyOptimizer(Protocol):
     ) -> PolicyUpdatePlan: ...
 
 
+class PolicyUpdateGate(Protocol):
+    """Validates an optimized policy plan before it is applied."""
+
+    async def validate(
+        self,
+        plan: PolicyUpdatePlan,
+        gradients: list[SemanticGradient],
+        policy_set: PolicySet,
+        context: Any,
+    ) -> PolicyUpdatePlan: ...
+
+
 class PolicyUpdater(Protocol):
     """Applies a policy update plan to a PolicySet."""
 

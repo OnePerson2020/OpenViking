@@ -15,6 +15,7 @@ from openviking.session import create_session_compressor
 from openviking.session.compressor_v3 import (
     SessionCompressorV3,
     _commit_experience_snapshot,
+    _experience_gate_skipped_operations,
     _experience_root_uri,
     _experience_snapshot_provenance,
     _experience_trajectory_map,
@@ -215,6 +216,43 @@ async def test_memory_diff_includes_intentionally_skipped_operations(monkeypatch
         "total_deletes": 0,
         "total_skipped": 1,
     }
+
+
+def test_experience_gate_rejection_is_serialized_as_skipped_operation():
+    skipped = _experience_gate_skipped_operations(
+        {
+            "chunks": [
+                {
+                    "experience_improvement_gate": {
+                        "passed": False,
+                        "candidates": [
+                            {
+                                "target_uri": ("viking://user/u/memories/experiences/cancel.md"),
+                                "passed": False,
+                                "replays": [
+                                    {
+                                        "reason": (
+                                            "candidate still accepts the failed trajectory "
+                                            "as complete"
+                                        )
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+    )
+
+    assert skipped == [
+        {
+            "memory_type": "experiences",
+            "uri": "viking://user/u/memories/experiences/cancel.md",
+            "reason_code": "experience_gate_rejected",
+            "reason": "candidate still accepts the failed trajectory as complete",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -1153,6 +1191,46 @@ def test_training_case_spec_message_uses_original_case_name_for_trials():
     assert payload["case"]["name"] == "tau2_airline_train_1"
     assert payload["case"]["task_signature"] == "tau2:airline:train:1"
     assert payload["case"]["metadata"]["rollout_case_name"] == "tau2_airline_train_1_t0"
+
+
+def test_training_case_spec_carries_compact_experience_execution():
+    experience_uri = "viking://user/u/memories/experiences/cancel.md"
+    rollout = Rollout(
+        case=_training_case(),
+        messages=[],
+        policy_snapshot_id="snapshot-1",
+        metadata={
+            "dag_runtime": {
+                "session_id": "runtime-1",
+                "events": [
+                    {
+                        "experience_uri": experience_uri,
+                        "state": "running",
+                        "revision": 2,
+                        "executed_nodes": [1],
+                        "current_nodes": [2],
+                        "node_slots": {1: "known", 2: "report"},
+                        "actions": [{"node_id": 2, "slot_name": "report"}],
+                        "evidence": [{"id": "private", "summary": "must not be transported"}],
+                    }
+                ],
+            }
+        },
+    )
+    request = _case_spec_message_to_request(rollout)
+    message = Message(
+        id="case-spec",
+        role="user",
+        parts=[TextPart(text=request["parts"][0]["text"])],
+    )
+    payload = __import__(
+        "openviking.session.compressor_v3", fromlist=["_training_case_spec_payload_from_message"]
+    )._training_case_spec_payload_from_message(message)
+
+    execution = payload["case"]["metadata"]["experience_execution"]
+    assert execution[experience_uri]["executed_nodes"] == ["known"]
+    assert execution[experience_uri]["current_nodes"] == ["report"]
+    assert "evidence" not in execution[experience_uri]
 
 
 @pytest.mark.asyncio

@@ -63,6 +63,19 @@ fields:
       - Generalize identifiers, names, numbers, dates, places, amounts, and raw tool payloads as strictly as content.
     merge_op: immutable
 
+  - name: experience_execution
+    type: string
+    init_value: "{}"
+    description: |
+      Server-populated JSON execution record keyed by canonical Experience URI. Each value
+      contains the latest DAG state, revision, slot_values, slot_evidence, executed_nodes,
+      current_nodes, current actions, completed nodes, and observed action outcomes.
+      The executed_nodes, current_nodes, and waiting_for_context arrays contain stable slot_name
+      values (the Python node variable names), not compiler-assigned numeric node IDs.
+      Omit this argument during extraction; the server writes the authoritative runtime record.
+      An empty object means that no Experience DAG was executed for this rollout.
+    merge_op: immutable
+
   - name: content
     type: string
     description: |

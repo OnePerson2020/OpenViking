@@ -18,6 +18,7 @@ from openviking.service.core import OpenVikingService
 from openviking.service.session_service import SessionService
 from openviking.session import Session
 from openviking_cli.session.user_id import UserIdentifier
+from openviking_cli.utils.config.agent_evolution_config import DagDeciderConfig
 
 
 class _FakeAGFS:
@@ -154,8 +155,8 @@ async def settings_http(fake_viking_fs, monkeypatch):
     OpenVikingConfigSingleton.reset_instance()
 
 
-def test_agent_evolution_is_disabled_by_default():
-    assert ServerConfig().agent_evolution.enabled is False
+def test_agent_evolution_is_enabled_by_default():
+    assert ServerConfig().agent_evolution.enabled is True
 
 
 def test_agent_evolution_can_be_enabled_as_account_default():
@@ -173,6 +174,26 @@ def test_server_agent_evolution_seeds_runtime_cluster_baseline():
 
     assert service._agent_evolution_base_config.enabled is True
     assert sessions._agent_evolution_default_enabled is True
+
+
+async def test_account_enabled_override_keeps_cluster_dag_decider():
+    sessions = SessionService()
+    sessions.set_agent_evolution_config(
+        AgentEvolutionConfig(
+            enabled=True,
+            dag_decider=DagDeciderConfig(provider="jev"),
+        )
+    )
+    runtime_config = _FakeRuntimeConfig()
+    runtime_config.values[("default", "agent_evolution")] = SimpleNamespace(
+        enabled=True,
+        dag_decider=None,
+    )
+    sessions.set_runtime_config_manager(runtime_config)
+
+    resolved = await sessions.get_dag_decider_config("default")
+
+    assert resolved.provider == "jev"
 
 
 async def test_server_agent_evolution_updates_initialized_runtime_baseline():
@@ -200,9 +221,7 @@ async def test_server_agent_evolution_updates_initialized_runtime_baseline():
         OpenVikingConfigSingleton.reset_instance()
 
 
-def test_server_default_memory_policy_is_configured_on_session_service(
-    fake_viking_fs, monkeypatch
-):
+def test_server_default_memory_policy_is_configured_on_session_service(fake_viking_fs, monkeypatch):
     monkeypatch.setattr(
         "openviking.service.session_service.get_default_registry",
         lambda: SimpleNamespace(list_names=lambda **_: ["profile"]),
@@ -289,14 +308,13 @@ async def test_account_settings_admin_api_reads_and_updates_effective_value(
     settings_http,
 ):
     client, service = settings_http
-    service.sessions.set_agent_evolution_config(AgentEvolutionConfig(enabled=False))
 
     initial = await client.get("/api/v1/admin/accounts/default/settings")
     assert initial.status_code == 200, initial.text
     assert initial.json()["result"] == {
         "account_id": "default",
         "settings": {
-            "agent_evolution": {"enabled": False},
+            "agent_evolution": {"enabled": True},
             "acl": {"enabled": False},
         },
         "overrides": {},
@@ -316,9 +334,7 @@ async def test_account_settings_admin_api_reads_and_updates_effective_value(
         "agent_evolution": {"enabled": True},
         "acl": {"enabled": True},
     }
-    assert (
-        await service.runtime_config_manager.get_account("default", "agent_evolution")
-    ).enabled
+    assert (await service.runtime_config_manager.get_account("default", "agent_evolution")).enabled
     assert (await service.runtime_config_manager.get_account("default", "acl")).enabled
     assert await service.viking_fs.acl_manager.is_enabled("default")
 
@@ -380,9 +396,7 @@ async def test_account_configuration_exposes_three_state_layer(settings_http):
         json={"settings": {"acl": None}},
     )
     assert removed.status_code == 200, removed.text
-    assert removed.json()["result"]["settings"] == {
-        "github": {"token": "account-token"}
-    }
+    assert removed.json()["result"]["settings"] == {"github": {"token": "account-token"}}
 
     from openviking.server.auth import get_request_context
 
@@ -423,9 +437,7 @@ async def test_cluster_agent_evolution_override_is_account_fallback(settings_htt
         json={"settings": {"agent_evolution": {"enabled": True}}},
     )
     assert updated.status_code == 200, updated.text
-    assert updated.json()["result"]["settings"] == {
-        "agent_evolution": {"enabled": True}
-    }
+    assert updated.json()["result"]["settings"] == {"agent_evolution": {"enabled": True}}
     assert await service.sessions.get_agent_evolution_enabled("default")
 
     await service.runtime_config_manager.patch_account(
@@ -433,9 +445,7 @@ async def test_cluster_agent_evolution_override_is_account_fallback(settings_htt
     )
     assert not await service.sessions.get_agent_evolution_enabled("default")
 
-    await service.runtime_config_manager.patch_account(
-        "default", {"agent_evolution": None}
-    )
+    await service.runtime_config_manager.patch_account("default", {"agent_evolution": None})
     assert await service.sessions.get_agent_evolution_enabled("default")
 
 
@@ -448,9 +458,9 @@ async def test_legacy_admin_configuration_routes_are_deprecated(settings_http):
     legacy = schema["paths"]["/api/v1/admin/accounts/{account_id}/settings"]
     assert legacy["get"]["deprecated"]
     assert legacy["patch"]["deprecated"]
-    assert not schema["paths"][
-        "/api/v1/admin/accounts/{account_id}/configuration"
-    ]["patch"].get("deprecated", False)
+    assert not schema["paths"]["/api/v1/admin/accounts/{account_id}/configuration"]["patch"].get(
+        "deprecated", False
+    )
     assert "/api/v1/admin/configuration" in schema["paths"]
     assert "/api/v1/admin/settings" not in schema["paths"]
 
@@ -485,9 +495,7 @@ async def test_agent_evolution_endpoint_keeps_name_and_uses_account_settings(
 
     assert response.status_code == 200, response.text
     assert response.json()["result"]["enabled"] is True
-    assert (
-        await service.runtime_config_manager.get_account("default", "agent_evolution")
-    ).enabled
+    assert (await service.runtime_config_manager.get_account("default", "agent_evolution")).enabled
 
 
 def test_deprecated_user_agent_evolution_config_is_not_persisted():

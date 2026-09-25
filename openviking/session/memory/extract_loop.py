@@ -375,7 +375,8 @@ class ExtractLoop:
                         tracer.info(f"Extended max_iterations to {max_iterations} for refetch")
 
                     continue
-                patch_errors = await self._validate_patch_operations(final_operations)
+                dag_errors = self._compile_experience_operations(final_operations)
+                patch_errors = dag_errors + await self._validate_patch_operations(final_operations)
                 if patch_errors and patch_repair_count == 0:
                     patch_repair_count += 1
                     max_iterations += 1
@@ -383,13 +384,23 @@ class ExtractLoop:
                     messages.append(
                         {
                             "role": "user",
-                            "content": self._build_patch_repair_instruction(patch_errors),
+                            "content": (
+                                "DAG construction failed. Re-emit corrected operations with Python "
+                                "programs in experience content. Errors: " + json.dumps(dag_errors)
+                                if dag_errors
+                                else self._build_patch_repair_instruction(patch_errors)
+                            ),
                         }
                     )
                     tracer.info(
                         f"Extended max_iterations to {max_iterations} for retry patch repair"
                     )
                     continue
+                if dag_errors:
+                    self._discard_invalid_experience_operations(final_operations, dag_errors)
+                    tracer.info(
+                        f"Skipping invalid Experience DAG updates after repair: {dag_errors}"
+                    )
                 break
             # If no tool calls either, continue to next iteration (don't break!)
             failure_kind = self._last_llm_failure_kind or "unknown"
@@ -1240,6 +1251,63 @@ class ExtractLoop:
     def _build_final_operations_instruction(self) -> str:
         """Build schema-aware final-iteration instructions for the LLM."""
         return self._output_protocol.render_final_instruction(self._output_context)
+
+    def _compile_experience_operations(
+        self, operations: ResolvedOperations
+    ) -> List[Dict[str, Any]]:
+        from openviking.session.memory.experience_dag_compiler import normalize_dag_source
+
+        compiled = []
+        errors = []
+        for operation in operations.upsert_operations:
+            if operation.memory_type != "experiences":
+                continue
+            code = operation.memory_fields.get("content")
+            if code is None:
+                continue
+            target = operation.uris[0] if operation.uris else str(operation.page_id)
+            try:
+                content = normalize_dag_source(code)
+            except (ValueError, TypeError) as exc:
+                errors.append({"uri": target, "page_id": operation.page_id, "error": str(exc)})
+            else:
+                compiled.append((operation, content))
+        for operation, content in compiled:
+            operation.memory_fields["content"] = content
+        return errors
+
+    @staticmethod
+    def _discard_invalid_experience_operations(
+        operations: ResolvedOperations, errors: List[Dict[str, Any]]
+    ) -> None:
+        invalid_uris = {str(error.get("uri") or "") for error in errors}
+        invalid_page_ids = {error.get("page_id") for error in errors}
+        operations.upsert_operations = [
+            operation
+            for operation in operations.upsert_operations
+            if operation.memory_type != "experiences"
+            or (
+                (operation.uris[0] if operation.uris else str(operation.page_id))
+                not in invalid_uris
+                and operation.page_id not in invalid_page_ids
+            )
+        ]
+        operations.delete_file_contents = [
+            file
+            for file in operations.delete_file_contents
+            if file.memory_type != "experiences"
+            and "/memories/experiences/" not in str(file.uri or "")
+        ]
+        operations.delete_replacements = {
+            old_uri: new_uri
+            for old_uri, new_uri in operations.delete_replacements.items()
+            if old_uri not in invalid_uris and new_uri not in invalid_uris
+        }
+        operations.resolved_links = [
+            link
+            for link in operations.resolved_links
+            if link.from_uri not in invalid_uris and link.to_uri not in invalid_uris
+        ]
 
     async def _validate_patch_operations(
         self,

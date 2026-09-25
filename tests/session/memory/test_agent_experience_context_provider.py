@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from openviking.message import Message
+from openviking.message.part import TextPart
 from openviking.server.identity import RequestContext, Role
 from openviking.session.memory.agent_experience_context_provider import (
     AgentExperienceContextProvider,
@@ -18,8 +20,6 @@ from openviking.session.memory.memory_updater import ExtractContext
 from openviking.session.memory.session_extract_context_provider import (
     SessionExtractContextProvider,
 )
-from openviking.message import Message
-from openviking.message.part import TextPart
 from openviking_cli.session.user_id import UserIdentifier
 
 
@@ -40,6 +40,20 @@ def test_create_tool_context_uses_extract_context_page_id_map():
     assert tool_ctx.page_id_map is extract_context.page_id_map
 
 
+def test_agent_experience_instruction_requires_one_composite_dag_per_trajectory():
+    provider = AgentExperienceContextProvider(
+        messages=[],
+        trajectory_summary="upgrade then cancel one booking",
+        trajectory_uri="viking://user/user_1/memories/trajectories/upgrade_then_cancel.md",
+    )
+
+    instruction = provider.instruction()
+
+    assert "exactly ONE experience entry for this trajectory" in instruction
+    assert "steps, joins, and conditional branches together in one complete DAG" in instruction
+    assert "Split over merge" not in instruction
+
+
 def test_user_memory_provider_splits_but_trajectory_provider_keeps_messages_whole():
     text = "第一句很长很长很长很长很长很长很长很长很长很长很长。" * 8
     messages = [Message(id="1", role="user", parts=[TextPart(text=text)])]
@@ -50,6 +64,8 @@ def test_user_memory_provider_splits_but_trajectory_provider_keeps_messages_whol
     assert len(user_provider.get_extract_context().messages) > 1
     assert len(trajectory_provider.get_extract_context().messages) == 1
     assert trajectory_provider.get_extract_context().messages[0] is messages[0]
+    assert "restricted Python memory SDK code" in trajectory_provider.instruction()
+    assert "output only JSON" not in trajectory_provider.instruction()
 
 
 def test_agent_only_schemas_are_excluded_from_peer_user_memory_extraction():
@@ -108,6 +124,33 @@ async def test_agent_experience_prefetch_starts_with_conversation_and_new_trajec
     assert add_tool_call_pair.call_args_list[0].kwargs["result"]["uri"] == provider.trajectory_uri
     assert messages[-1]["role"] == "user"
     assert "candidate_experience" in messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_agent_experience_prefetch_includes_dag_execution_feedback():
+    feedback = {
+        "outcome": {"passed": False, "score": 0.0},
+        "execution": {"events": [{"completed_nodes": [{"node_id": 2}]}]},
+    }
+    provider = AgentExperienceContextProvider(
+        messages=[],
+        trajectory_summary="order cancellation",
+        trajectory_uri="viking://user/user_1/memories/trajectories/order.md",
+        dag_execution=feedback,
+    )
+    provider._ctx = RequestContext(
+        user=UserIdentifier(account_id="acc", user_id="user_1"), role=Role.USER
+    )
+    provider._viking_fs = AsyncMock()
+    provider._transaction_handle = None
+    provider.search_files = AsyncMock(return_value=[])
+
+    messages = await provider.prefetch()
+
+    feedback_message = next(
+        message for message in messages if "dag_execution_feedback" in message["content"]
+    )
+    assert '"passed": false' in feedback_message["content"]
 
 
 @pytest.mark.asyncio
@@ -177,11 +220,14 @@ async def test_agent_experience_prefetch_missing_experience_dir_returns_empty_ca
     provider._transaction_handle = None
     provider.search_files = AsyncMock(return_value=[])
 
-    with patch(
-        "openviking.session.memory.agent_experience_context_provider.tracer.error"
-    ) as tracer_error, patch(
-        "openviking.session.memory.agent_experience_context_provider.add_tool_call_pair_to_messages"
-    ) as add_tool_call_pair:
+    with (
+        patch(
+            "openviking.session.memory.agent_experience_context_provider.tracer.error"
+        ) as tracer_error,
+        patch(
+            "openviking.session.memory.agent_experience_context_provider.add_tool_call_pair_to_messages"
+        ) as add_tool_call_pair,
+    ):
         messages = await provider.prefetch()
 
     assert messages[-1]["role"] == "user"

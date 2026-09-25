@@ -17,6 +17,7 @@ from openviking.server.identity import RequestContext
 from openviking.server.models import Response
 from openviking.server.responses import error_response
 from openviking.server.telemetry import run_operation
+from openviking.service.experience_runtime import SearchExperienceRequest
 from openviking.telemetry import TelemetryRequest
 from openviking.utils.image_search import is_viking_uri
 from openviking_cli.utils import get_logger
@@ -366,8 +367,8 @@ async def get_session(
     result["pending_tokens"] = int(session.meta.pending_tokens or 0)
     result["auto_commit_policy"] = service.sessions.effective_auto_commit_policy(session)
     result.pop("event_search_tags", None)
-    result["memory_extraction_config"] = (
-        service.sessions.effective_memory_extraction_config(session)
+    result["memory_extraction_config"] = service.sessions.effective_memory_extraction_config(
+        session
     )
     return Response(status="ok", result=result)
 
@@ -400,9 +401,7 @@ async def update_session_config(
     from openviking_cli.exceptions import NotFoundError
 
     service = get_service()
-    event_tags = _event_tags_from_extraction_config(
-        request.memory_extraction_config
-    )
+    event_tags = _event_tags_from_extraction_config(request.memory_extraction_config)
     update_auto_commit_policy = "auto_commit_policy" in request.model_fields_set
     auto_commit_policy = (
         request.auto_commit_policy.model_dump(exclude_none=True)
@@ -434,9 +433,9 @@ async def update_session_config(
         )
     except NotFoundError:
         return error_response("NOT_FOUND", f"Session {session_id} not found")
-    return Response(
-        status="ok", result=execution.result, telemetry=execution.telemetry
-    ).model_dump(exclude_none=True)
+    return Response(status="ok", result=execution.result, telemetry=execution.telemetry).model_dump(
+        exclude_none=True
+    )
 
 
 @router.get("/{session_id}/tool-results")
@@ -535,9 +534,7 @@ async def get_session_archive(
     try:
         result = await session.get_session_archive(archive_id)
     except NotFoundError:
-        return error_response(
-            code="NOT_FOUND", message=f"Archive {archive_id} not found"
-        )
+        return error_response(code="NOT_FOUND", message=f"Archive {archive_id} not found")
     return Response(status="ok", result=_to_jsonable(result))
 
 
@@ -550,6 +547,17 @@ async def delete_session(
     service = get_service()
     await service.sessions.delete(session_id, _ctx)
     return Response(status="ok", result={"session_id": session_id})
+
+
+@router.post("/{session_id}/experiences/search")
+async def search_exp(
+    request: SearchExperienceRequest,
+    session_id: str = Path(..., description="Session ID"),
+    _ctx: RequestContext = Depends(get_session_request_context),
+):
+    """Select applicable Experience DAGs and return current instructions."""
+    result = await get_service().sessions.search_exp(session_id, request, _ctx)
+    return Response(status="ok", result=result.model_dump(mode="json"))
 
 
 class EventExtractionMetadataRequest(BaseModel):

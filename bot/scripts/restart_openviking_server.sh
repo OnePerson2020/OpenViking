@@ -90,7 +90,11 @@ fi
 echo ""
 echo "Step 0b: Deleting data directory $DATA_DIR..."
 if [ -d "$DATA_DIR" ]; then
-    rm -rf "$DATA_DIR"
+    if ! rm -rf "$DATA_DIR"; then
+        echo "  ⏳ Data directory changed during cleanup; retrying..."
+        sleep 1
+        rm -rf "$DATA_DIR"
+    fi
     echo "  ✓ Deleted $DATA_DIR"
 else
     echo "  ✓ Data directory does not exist"

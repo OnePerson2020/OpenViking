@@ -163,6 +163,28 @@ class AsyncHTTPClient(import_openviking_sdk().AsyncHTTPClient):
         )
         return self._handle_response_data(response).get("result", {})
 
+    async def search_exp(
+        self,
+        session_id: str,
+        context: str,
+        *,
+        evidence: list[dict[str, Any]] | None = None,
+        limit: int = 3,
+        score_threshold: float | None = 0.3,
+    ) -> Dict[str, Any]:
+        """Select applicable Experience DAGs and return current instructions."""
+        response = await self._request(
+            "POST",
+            f"/api/v1/sessions/{self._path_segment(session_id)}/experiences/search",
+            json={
+                "context": context,
+                "evidence": evidence or [],
+                "limit": limit,
+                "score_threshold": score_threshold,
+            },
+        )
+        return self._handle_response_data(response).get("result", {})
+
     async def commit_session(
         self,
         session_id: str,
@@ -202,6 +224,25 @@ class SyncHTTPClient(import_openviking_sdk().SyncHTTPClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._async_client = AsyncHTTPClient(*args, **kwargs)
+
+    def search_exp(
+        self,
+        session_id: str,
+        context: str,
+        *,
+        evidence: list[dict[str, Any]] | None = None,
+        limit: int = 3,
+        score_threshold: float | None = 0.3,
+    ) -> Dict[str, Any]:
+        return run_async(
+            self._async_client.search_exp(
+                session_id,
+                context,
+                evidence=evidence,
+                limit=limit,
+                score_threshold=score_threshold,
+            )
+        )
 
     def update_session_config(
         self,

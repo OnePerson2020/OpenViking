@@ -77,7 +77,8 @@ class AgentTrajectoryContextProvider(SessionExtractContextProvider):
     def instruction(self) -> str:
         return (
             "You are an extraction agent. Analyze the archived conversation, use read when "
-            "needed, and output only JSON that matches the schema descriptions."
+            "needed, and output only restricted Python memory SDK code that matches the "
+            "schema descriptions."
         )
 
     def get_memory_schemas(self, ctx: RequestContext) -> List[Any]:

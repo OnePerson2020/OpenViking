@@ -33,6 +33,7 @@ from openviking.session.memory.constants import (
 )
 from openviking.session.memory.dataclass import (
     MemoryFile,
+    MemoryOperationSkipCode,
     MemoryOperationSource,
     ResolvedOperation,
     ResolvedOperations,
@@ -61,6 +62,7 @@ from openviking.session.train import (
     Case,
     ExperienceGradientContext,
     ExperienceGradientEstimator,
+    ExperienceImprovementGate,
     ExperienceSetLoader,
     MemoryFilePolicyUpdater,
     PatchMergePolicyOptimizer,
@@ -147,9 +149,7 @@ def _memory_type_by_uri(operations: ResolvedOperations) -> dict[str, str]:
     for file_content in getattr(operations, "delete_file_contents", []) or []:
         uri = str(getattr(file_content, "uri", "") or "")
         if uri:
-            types_by_uri[uri] = str(
-                getattr(file_content, "memory_type", "") or "unknown"
-            )
+            types_by_uri[uri] = str(getattr(file_content, "memory_type", "") or "unknown")
     return types_by_uri
 
 
@@ -282,9 +282,7 @@ class SessionCompressorV3:
         vlm_config: VLMHandle | None = None,
     ) -> ExtractLoop:
         if vlm_config is None:
-            raise RuntimeError(
-                "SessionCompressorV3 requires an explicitly resolved VLM config"
-            )
+            raise RuntimeError("SessionCompressorV3 requires an explicitly resolved VLM config")
         vlm = vlm_config
         viking_fs = get_viking_fs()
         if context_provider is None:
@@ -701,9 +699,7 @@ class SessionCompressorV3:
             )
 
         if self.vlm_resolver is None:
-            raise RuntimeError(
-                "SessionCompressorV3 requires a VLM resolver for account-owned work"
-            )
+            raise RuntimeError("SessionCompressorV3 requires a VLM resolver for account-owned work")
         vlm_config = await self.vlm_resolver.get_vlm(ctx.account_id)
         context_provider = SessionExtractContextProvider(
             messages=messages,
@@ -989,6 +985,18 @@ class SessionCompressorV3:
                 include_session_skills=skill_enabled,
                 source_archive_uri=archive_uri or "",
             )
+            runtime_config = get_openviking_config()
+            dag_decider_config = runtime_config.agent_evolution.dag_decider
+            experience_gate = (
+                ExperienceImprovementGate(
+                    config=dag_decider_config,
+                    jev_config=runtime_config.jev,
+                )
+                if experiences_allowed
+                and dag_decider_config is not None
+                and dag_decider_config.provider == "jev"
+                else None
+            )
             exp_trainer = await get_streaming_policy_trainer(
                 key=make_streaming_policy_trainer_key(
                     policy_root_uri=exp_root_uri,
@@ -1006,6 +1014,7 @@ class SessionCompressorV3:
                     vlm_resolver=self.vlm_resolver,
                 ),
                 policy_updater=MemoryFilePolicyUpdater(viking_fs=viking_fs, vikingdb=self.vikingdb),
+                policy_update_gate=experience_gate,
                 context=PipelineContext(
                     analysis_context=analysis_context,
                     gradient_context=gradient_context,
@@ -1044,6 +1053,11 @@ class SessionCompressorV3:
                     case=case,
                     messages=list(messages),
                     policy_snapshot_id=policy_snapshot_id,
+                    metadata={
+                        "experience_execution": dict(
+                            case.metadata.get("experience_execution") or {}
+                        )
+                    },
                 )
                 # Analyze once — trajectories + skill patches co-extracted
                 analysis = await self.rollout_analyzer.analyze(rollout, analysis_context)
@@ -1260,6 +1274,7 @@ class SessionCompressorV3:
             adds=adds,
             updates=updates,
             deletes=deletes,
+            skipped_operations=_experience_gate_skipped_operations(training_result.plan.metadata),
         )
 
     async def _link_case_to_training_outputs(
@@ -2150,6 +2165,55 @@ def _serialize_skipped_operations(items: Any) -> list[dict[str, Any]]:
             payload.pop("source", None)
             serialized.append(payload)
     return serialized
+
+
+def _experience_gate_skipped_operations(metadata: Any) -> list[dict[str, Any]]:
+    """Expose rejected candidate updates in the persisted training diff."""
+    gates: list[dict[str, Any]] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            gate = value.get("experience_improvement_gate")
+            if isinstance(gate, dict) and not gate.get("passed", False):
+                gates.append(gate)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(metadata)
+    skipped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for gate in gates:
+        candidates = gate.get("candidates")
+        if not isinstance(candidates, list):
+            candidates = []
+        if not candidates and gate.get("reason"):
+            candidates = [{"target_uri": None, "replays": [{"reason": gate["reason"]}]}]
+        for candidate in candidates:
+            if not isinstance(candidate, dict) or candidate.get("passed", False):
+                continue
+            uri = str(candidate.get("target_uri") or "")
+            reasons = [
+                str(replay.get("reason") or "")
+                for replay in candidate.get("replays") or []
+                if isinstance(replay, dict) and replay.get("reason")
+            ]
+            reason = "; ".join(dict.fromkeys(reasons)) or "Experience improvement gate rejected"
+            dedupe_key = f"{uri}\0{reason}"
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            skipped.append(
+                {
+                    "memory_type": "experiences",
+                    "uri": uri or None,
+                    "reason_code": MemoryOperationSkipCode.EXPERIENCE_GATE_REJECTED.value,
+                    "reason": reason,
+                }
+            )
+    return skipped
 
 
 def _v3_extraction_response(

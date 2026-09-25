@@ -84,6 +84,26 @@ def test_load_server_config_preserves_supported_fields(tmp_path):
     assert config.encryption_enabled is True
 
 
+def test_load_server_config_reads_top_level_agent_evolution(tmp_path):
+    config_path = tmp_path / "ov.conf"
+    config_path.write_text(
+        json.dumps(
+            {
+                "server": {"auth_mode": "trusted"},
+                "agent_evolution": {
+                    "enabled": True,
+                    "dag_decider": {"provider": "jev"},
+                },
+            }
+        )
+    )
+
+    config = load_server_config(str(config_path))
+
+    assert config.agent_evolution.enabled is True
+    assert config.agent_evolution.dag_decider.provider == "jev"
+
+
 def test_load_server_config_defaults_timeout_keep_alive(tmp_path):
     config_path = tmp_path / "ov.conf"
     config_path.write_text(json.dumps({"server": {"host": "0.0.0.0"}}))

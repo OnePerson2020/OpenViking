@@ -331,6 +331,7 @@ class TestCommit:
         )
         assert call_kwargs["agent_evolution_enabled"] is True
         assert call_kwargs["allowed_memory_types"] is None
+        assert call_kwargs["strict_extract_errors"] is False
 
     async def test_commit_reads_latest_user_memory_policy_when_session_has_no_override(
         self, session_with_messages: Session

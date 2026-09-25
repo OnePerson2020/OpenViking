@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
 from . import embedding_config
-from .agent_evolution_config import AgentEvolutionConfig
+from .agent_evolution_config import AgentEvolutionConfig, DagDeciderConfig
 from .agfs_config import AGFSConfig
 from .cache_config import CacheConfig
 from .config_loader import (
@@ -56,6 +56,7 @@ from .embedding_config import EmbeddingConfig
 from .git_config import GitConfig, GitLocalConfig, GitS3Config
 from .glob_config import GlobConfig, GlobEngine
 from .grep_config import GrepConfig, GrepEngine
+from .jev_config import JevConfig
 from .log_config import LogConfig
 from .open_viking_config import (
     CompileApiConfig,
@@ -93,11 +94,13 @@ from .vlm_config import VLMConfig
 __all__ = [
     "AGFSConfig",
     "AgentEvolutionConfig",
+    "DagDeciderConfig",
     "CacheConfig",
     "SYSTEM_CONFIG_DIR",
     "DEFAULT_OV_CONF",
     "DEFAULT_OVCLI_CONF",
     "EmbeddingConfig",
+    "JevConfig",
     "LogConfig",
     "OPENVIKING_CLI_CONFIG_ENV",
     "OPENVIKING_CONFIG_ENV",

@@ -464,7 +464,7 @@ PATCH body 包含其中任一段，立即返回 `403 PERMISSION_DENIED`。ADMIN 
 | 路径 | 类型和约束 | 含义 |
 | --- | --- | --- |
 | `acl.enabled` | boolean，默认 `false` | 是否启用该 Account 的 ACL |
-| `agent_evolution.enabled` | boolean，默认 `false` | 是否启用 Agent Evolution；Account 未设置整个 section 时，为兼容旧行为使用完整 Cluster `agent_evolution` section |
+| `agent_evolution.enabled` | boolean，默认 `true` | 是否启用 Agent Evolution；Account 未设置整个 section 时，为兼容旧行为使用完整 Cluster `agent_evolution` section |
 | `github.token` | string，默认空字符串 | GitHub 访问 token；空字符串表示该 Account 未提供 token |
 | `feishu.app_id` | string，可选 | Account Feishu App ID |
 | `feishu.app_secret` | string，可选 | Account Feishu App Secret |

@@ -1791,7 +1791,7 @@ ov add-resource ./docs --exclude "*.tmp"
 | `user_config_defaults.add_targets.skill_uri` | str | `add_skill` 未传 `target_uri` 时使用的部署级默认技能添加根目录。仅允许 `viking://~/skills` 和 `viking://agent/skills`。 | `null` |
 | `user_config_defaults.memory_policy` | object | Session 和 User 都未显式配置策略时使用的部署级默认记忆抽取策略。 | `null` |
 | `user_config_defaults.auto_commit_policy` | object | 新建 Session 未显式指定策略时使用的部署级自动 Commit 默认策略。 | `null` |
-| `agent_evolution.enabled` | bool | Agent 进化的集群启动默认值，运行时可由 Account 或 Cluster Admin settings 覆盖。开启时，session commit 可按 session `memory_policy` 生成或更新 cases、trajectories 和 experiences；关闭后已有记忆仍可读取和检索。 | `false` |
+| `agent_evolution.enabled` | bool | Agent 进化的集群启动默认值，运行时可由 Account 或 Cluster Admin settings 覆盖。开启时，session commit 可按 session `memory_policy` 生成或更新 cases、trajectories 和 experiences；关闭后已有记忆仍可读取和检索。 | `true` |
 
 省略 `auth_mode`（或设为 `null`）时，配置了非空 `root_api_key` 则选择 `api_key`，否则选择 `dev`。`dev` 仅允许监听 localhost，不进行身份认证。`root_api_key` 不能配置为空字符串。
 

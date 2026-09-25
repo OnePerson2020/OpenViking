@@ -11,18 +11,22 @@ set -euo pipefail
 # Launcher-only options:
 #   --slot N   Run an isolated slot. Slot 0 is the default legacy setup. Slot N>0
 #              uses separate ports, OpenViking config/data, logs, and result dir.
+#   --enable-agent-evolution   Enable Experience/DAG learning for the selected slot account.
+# Tau2 response language follows ov.conf output_language_override (zh* -> zh) unless
+# TAU2_ROLLOUT_LANGUAGE explicitly overrides it.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAU2_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${TAU2_DIR}/../.." && pwd)"
 
 SLOT="${TAU2_TRAIN_SLOT:-0}"
+ENABLE_AGENT_EVOLUTION="${TAU2_ENABLE_AGENT_EVOLUTION:-0}"
 declare -a TRAIN_CLI_ARGS=()
 
 usage() {
   cat <<'USAGE'
 Usage:
-  bash benchmark/tau2/train/restart_vikingbot_train_eval.sh [--slot N] [train/eval args...]
+  bash benchmark/tau2/train/restart_vikingbot_train_eval.sh [--slot N] [--enable-agent-evolution] [train/eval args...]
 
 Launcher options:
   --slot N  Isolated experiment slot. Slot 0 is default/legacy. Slot N>0 uses:
@@ -33,7 +37,12 @@ Launcher options:
             OV data     = ~/.openviking_N/data
             result dir  = result/tau2/train_N
 
+  --enable-agent-evolution
+            Persist Agent Evolution enabled for the selected account after OpenViking starts.
+
 All remaining args are passed to benchmark/tau2/train/run_batch_train_eval.sh.
+Tau2 response language follows ov.conf output_language_override (zh* -> zh); set
+TAU2_ROLLOUT_LANGUAGE=default or zh to override it.
 USAGE
 }
 
@@ -50,6 +59,10 @@ parse_launcher_args() {
         ;;
       --slot=*)
         SLOT="${1#--slot=}"
+        shift 1
+        ;;
+      --enable-agent-evolution)
+        ENABLE_AGENT_EVOLUTION=1
         shift 1
         ;;
       -h|--help)
@@ -139,9 +152,17 @@ stop_existing_listener() {
 
   log "stopping existing ${name} listener(s) on port ${port}: ${pids}"
   kill ${pids} 2>/dev/null || true
-  for _ in {1..20}; do
+  for _ in {1..50}; do
     sleep 0.2
-    if ! lsof -tiTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+    local alive=0
+    local pid
+    for pid in ${pids}; do
+      if kill -0 "${pid}" 2>/dev/null; then
+        alive=1
+        break
+      fi
+    done
+    if [[ "${alive}" == "0" ]] && ! lsof -tiTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
       log "✓ stopped existing ${name} listener(s) on port ${port}"
       return 0
     fi
@@ -255,6 +276,7 @@ wait_for_http_json_ok() {
   local url="$2"
   local required_pattern="$3"
   local log_file="$4"
+  local process_pid="${5:-}"
   local deadline=$((SECONDS + WAIT_TIMEOUT_SECONDS))
   local response=""
 
@@ -264,6 +286,13 @@ wait_for_http_json_ok() {
     if [[ -n "${response}" && "${response//[[:space:]]/}" == *"${required_pattern}"* ]]; then
       log "✓ ${name} is ready"
       return 0
+    fi
+    if [[ -n "${process_pid}" ]] && ! kill -0 "${process_pid}" 2>/dev/null; then
+      if [[ -f "${log_file}" ]]; then
+        log "recent ${name} logs:"
+        tail -80 "${log_file}" >&2 || true
+      fi
+      fail "${name} process exited before becoming ready"
     fi
     sleep 2
   done
@@ -299,19 +328,70 @@ start_openviking_server() {
       --no-kill-all-vikingbot
   ) >"${OPENVIKING_LOG}" 2>&1 &
 
-  echo "$!" > "${LOG_DIR}/openviking-server.pid"
-  log "OpenViking restart wrapper pid: $(cat "${LOG_DIR}/openviking-server.pid")"
+  local wrapper_pid=$!
+  echo "${wrapper_pid}" > "${LOG_DIR}/openviking-server.pid"
+  log "OpenViking restart wrapper pid: ${wrapper_pid}"
 
   wait_for_http_json_ok \
     "OpenViking bot API" \
     "http://127.0.0.1:${OPENVIKING_PORT}/bot/v1/health" \
     '"status":"healthy"' \
-    "${OPENVIKING_LOG}"
+    "${OPENVIKING_LOG}" \
+    "${wrapper_pid}"
+}
+
+enable_agent_evolution() {
+  if [[ "${ENABLE_AGENT_EVOLUTION}" != "1" ]]; then
+    return 0
+  fi
+
+  local api_key
+  api_key="$(python - "${OPENVIKING_CONFIG_FILE}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig"))
+print(str(config.get("server", {}).get("root_api_key", "")))
+PY
+)"
+  if [[ -z "${api_key}" ]]; then
+    fail "--enable-agent-evolution requires server.root_api_key in ${OPENVIKING_CONFIG_FILE}"
+  fi
+
+  local response
+  response="$(curl -fsS \
+    -X PUT "http://127.0.0.1:${OPENVIKING_PORT}/api/v1/admin/agent-evolution" \
+    -H "X-API-Key: ${api_key}" \
+    -H "Content-Type: application/json" \
+    --data '{"enabled":true}')"
+  if [[ "${response//[[:space:]]/}" != *'"enabled":true'* ]]; then
+    fail "failed to enable Agent Evolution: ${response}"
+  fi
+  log "✓ Agent Evolution enabled for this slot"
+}
+
+resolve_rollout_language() {
+  if [[ -n "${TAU2_ROLLOUT_LANGUAGE:-}" ]]; then
+    printf '%s' "${TAU2_ROLLOUT_LANGUAGE}"
+    return
+  fi
+  python - "${OPENVIKING_CONFIG_FILE}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig"))
+language = str(config.get("output_language_override", "")).strip().lower()
+print("zh" if language == "zh" or language.startswith("zh-") else "default")
+PY
 }
 
 start_tau2_service() {
+  local rollout_language
+  rollout_language="$(resolve_rollout_language)"
   log "restarting tau2 service on ${TAU2_SERVICE_HOST}:${TAU2_SERVICE_PORT} backend=${TAU2_ROLLOUT_BACKEND}"
-  log "tau2 service concurrency=${TAU2_MAX_ROLLOUT_CONCURRENCY} rollout_thread_workers=${TAU2_ROLLOUT_THREAD_WORKERS}"
+  log "tau2 service language=${rollout_language} concurrency=${TAU2_MAX_ROLLOUT_CONCURRENCY} rollout_thread_workers=${TAU2_ROLLOUT_THREAD_WORKERS}"
   log "tau2 service log: ${TAU2_SERVICE_LOG}"
   : > "${TAU2_SERVICE_LOG}"
   stop_existing_listener "tau2 rollout service" "${TAU2_SERVICE_PORT}"
@@ -323,19 +403,22 @@ start_tau2_service() {
       --host "${TAU2_SERVICE_HOST}" \
       --port "${TAU2_SERVICE_PORT}" \
       --config "${OPENVIKING_CONFIG_FILE}" \
+      --rollout-language "${rollout_language}" \
       --rollout-backend "${TAU2_ROLLOUT_BACKEND}" \
       --max-rollout-concurrency "${TAU2_MAX_ROLLOUT_CONCURRENCY}" \
       --rollout-thread-workers "${TAU2_ROLLOUT_THREAD_WORKERS}"
   ) >"${TAU2_SERVICE_LOG}" 2>&1 &
 
-  echo "$!" > "${LOG_DIR}/tau2-service.pid"
-  log "tau2 service pid: $(cat "${LOG_DIR}/tau2-service.pid")"
+  local service_pid=$!
+  echo "${service_pid}" > "${LOG_DIR}/tau2-service.pid"
+  log "tau2 service pid: ${service_pid}"
 
   wait_for_http_json_ok \
     "tau2 rollout service" \
     "http://${TAU2_SERVICE_HOST}:${TAU2_SERVICE_PORT}/health" \
     '"status":"ok"' \
-    "${TAU2_SERVICE_LOG}"
+    "${TAU2_SERVICE_LOG}" \
+    "${service_pid}"
 }
 
 run_train_eval() {
@@ -364,8 +447,13 @@ run_train_eval() {
 
 main() {
   start_openviking_server
+  enable_agent_evolution
   start_tau2_service
-  run_train_eval "${TRAIN_CLI_ARGS[@]}"
+  if [[ ${#TRAIN_CLI_ARGS[@]} -gt 0 ]]; then
+    run_train_eval "${TRAIN_CLI_ARGS[@]}"
+  else
+    run_train_eval
+  fi
 }
 
 main

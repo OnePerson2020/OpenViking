@@ -35,6 +35,7 @@ from openviking.session.memory.utils.line_numbers import (
 _PYTHON_FENCE_RE = re.compile(r"```python[ \t]*\r?\n(?P<code>[\s\S]*?)```", re.IGNORECASE)
 _PYTHON_FENCE_START_RE = re.compile(r"```python[ \t]*\r?\n", re.IGNORECASE)
 _HIDDEN_MEMORY_FIELDS = {
+    "experience_execution",
     "source_extraction_id",
     "source_extraction_ids",
     "last_update_trace_id",
@@ -184,9 +185,15 @@ class PythonExtractionOutputProtocol(ExtractionOutputProtocol):
     ) -> list[str]:
         fields = _protocol_fields(context, schema)
         type_alias = _identifier_alias(schema.memory_type)
-        signature = ", ".join(
-            f"{_identifier_alias(name)}: {type_name}" for name, type_name, _description in fields
-        )
+        schema_fields = {field.name: field for field in schema.fields}
+        signature_parts = []
+        for name, type_name, _description in fields:
+            part = f"{_identifier_alias(name)}: {type_name}"
+            field_schema = schema_fields.get(name)
+            if field_schema is not None and field_schema.init_value is not None:
+                part += f" = {field_schema.init_value!r}"
+            signature_parts.append(part)
+        signature = ", ".join(signature_parts)
         verb = "create" if schema.filename_has_variables() else "set"
         identity_fields = _model_visible_identity_fields(context, schema)
         identity_label = (
@@ -921,6 +928,9 @@ class _PythonProgramCompiler:
                     f"field edits (obj.field.edit/drop) cannot be used when {action} a memory; "
                     "pass the complete field value",
                 )
+            for field in schema.fields:
+                if field.name not in kwargs and field.init_value is not None:
+                    kwargs[field.name] = field.init_value
             missing_fields = [field.name for field in schema.fields if field.name not in kwargs]
             if missing_fields:
                 self._error(
@@ -1533,8 +1543,9 @@ def _protocol_fields(
     static_fields = [
         (field.name, _field_type_name(field.field_type), field.description)
         for field in schema.fields
+        if field.name not in _HIDDEN_MEMORY_FIELDS
     ]
-    static_names = {name for name, _type, _description in static_fields}
+    static_names = {field.name for field in schema.fields}
     operations_field = context.operations_model.model_fields.get(schema.memory_type)
     annotation = getattr(operations_field, "annotation", None)
     model_type = get_args(annotation)[0] if get_origin(annotation) is list else annotation

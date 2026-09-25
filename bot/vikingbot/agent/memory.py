@@ -35,8 +35,8 @@ _MEMORY_TYPE_DESCRIPTIONS = {
         "follow direct deterministic links to experiences when available."
     ),
     "experiences": (
-        "Reusable agent experiences distilled from prior tasks. Apply them only when their "
-        "Situation and policy gates match the current task."
+        "Reusable agent experiences distilled from prior tasks. Apply their DAG only when its "
+        "applicability matches the current task."
     ),
     "trajectories": (
         "Diagnostic trajectory memories from evaluated rollouts. Use them as read-only "

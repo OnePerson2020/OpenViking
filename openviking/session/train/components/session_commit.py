@@ -12,6 +12,9 @@ from typing import Any
 from uuid import uuid4
 
 from openviking.session.train.components.progress import run_with_progress
+from openviking.session.train.components.trajectory_analyzer import (
+    experience_execution_from_runtime,
+)
 from openviking.session.train.context import PipelineContext
 from openviking.session.train.domain import (
     CriterionResult,
@@ -84,8 +87,7 @@ class SessionCommitPolicyTrainer:
             label="train_start",
             enabled=self.show_progress,
             description=(
-                f"Processing {len(rollout_list)} rollouts, "
-                f"concurrency={self.commit_concurrency}"
+                f"Processing {len(rollout_list)} rollouts, concurrency={self.commit_concurrency}"
             ),
             concurrency=self.commit_concurrency,
         )
@@ -232,7 +234,6 @@ class SessionCommitPolicyTrainer:
                 "error": str(exc),
             }
 
-
     async def _record_event(
         self,
         event: str,
@@ -370,6 +371,7 @@ def _rollout_score(rollout: Rollout) -> float:
         return 0.0
     return float(rollout.evaluation.score)
 
+
 def _task_error(task: dict[str, Any] | None) -> str | None:
     if task is None:
         return None
@@ -480,6 +482,11 @@ def _stable_case_metadata(rollout: Rollout) -> dict[str, Any]:
     metadata = dict(rollout.case.metadata or {})
     metadata.setdefault("rollout_case_name", rollout.case.name)
     metadata.setdefault("rollout_task_signature", rollout.case.task_signature)
+    experience_execution = experience_execution_from_runtime(
+        dict(rollout.metadata or {}).get("dag_runtime")
+    )
+    if experience_execution:
+        metadata["experience_execution"] = experience_execution
     return metadata
 
 

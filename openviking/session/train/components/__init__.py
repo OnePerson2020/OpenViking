@@ -3,6 +3,9 @@
 """Default replaceable components for the session train framework."""
 
 from openviking.session.train.components.case_loader import ListCaseLoader
+from openviking.session.train.components.experience_improvement_gate import (
+    ExperienceImprovementGate,
+)
 from openviking.session.train.components.gradient_estimator import (
     ExperienceGradientContext,
     ExperienceGradientEstimator,
@@ -50,6 +53,7 @@ __all__ = [
     "ListCaseLoader",
     "ExperienceGradientEstimator",
     "ExperienceGradientContext",
+    "ExperienceImprovementGate",
     "TrajectoryRolloutAnalyzer",
     "TrajectoryAnalyzerContext",
     "DryRunPolicyUpdater",

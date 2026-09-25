@@ -16,6 +16,7 @@ from openviking.session.memory.dataclass import (
     ResolvedOperations,
     WikiLink,
 )
+from openviking.session.memory.experience_dag_compiler import compile_dag
 from openviking.session.memory.extract_loop import ExtractLoop
 from openviking.session.memory.extraction_output_protocol import (
     create_extraction_output_protocol,
@@ -26,6 +27,9 @@ from openviking.session.memory.page_id_map import PageIdMap
 
 class AttrDict(dict):
     __getattr__ = dict.get
+
+
+_EXPERIENCE_PROGRAM = 'dag = workflow("report")\ndone = tell("Report the result")'
 
 
 class TestResolveOperations:
@@ -574,11 +578,7 @@ class TestResolveOperations:
         )
 
         operations, _ = await loop.resolve_operations(
-            AttrDict(
-                entities=[
-                    {"name": "Ignored", "owner": "Bob", "count": 3, "page_id": 7}
-                ]
-            )
+            AttrDict(entities=[{"name": "Ignored", "owner": "Bob", "count": 3, "page_id": 7}])
         )
 
         operation = operations.upsert_operations[0]
@@ -1077,9 +1077,7 @@ class TestResolutionRepair:
         context_provider.get_memory_schemas.return_value = [event_schema, profile_schema]
         context_provider.get_output_language.return_value = "zh-CN"
         context_provider.get_tools.return_value = []
-        context_provider.get_extract_context.return_value = SimpleNamespace(
-            page_id_map=PageIdMap()
-        )
+        context_provider.get_extract_context.return_value = SimpleNamespace(page_id_map=PageIdMap())
         context_provider.prefetch = AsyncMock(return_value=[])
         context_provider.read_file_contents = {}
         context_provider.instruction.return_value = "base instruction"
@@ -1183,7 +1181,9 @@ class TestPageIdInstruction:
             return_value=(
                 [],
                 AttrDict(
-                    experiences=[{"experience_name": "chat", "content": "updated", "page_id": 100}]
+                    experiences=[
+                        {"experience_name": "chat", "content": _EXPERIENCE_PROGRAM, "page_id": 100}
+                    ]
                 ),
             )
         )
@@ -1257,7 +1257,9 @@ class TestPageIdInstruction:
             return_value=(
                 [],
                 AttrDict(
-                    experiences=[{"experience_name": "chat", "content": "updated", "page_id": 100}],
+                    experiences=[
+                        {"experience_name": "chat", "content": _EXPERIENCE_PROGRAM, "page_id": 100}
+                    ],
                     links=[],
                 ),
             )
@@ -1294,7 +1296,9 @@ class TestFinalOperationsHydration:
     @pytest.mark.asyncio
     async def test_run_logs_final_operations_after_old_memory_file_is_hydrated(self):
         old_file = MemoryFile(
-            uri="viking://user/Caroline/memories/experiences/chat.md", content="old"
+            uri="viking://user/Caroline/memories/experiences/chat.md",
+            content=_EXPERIENCE_PROGRAM,
+            memory_type="experiences",
         )
 
         context_provider = Mock()
@@ -1325,7 +1329,9 @@ class TestFinalOperationsHydration:
             return_value=(
                 [],
                 AttrDict(
-                    experiences=[{"experience_name": "chat", "content": "updated", "page_id": 1}]
+                    experiences=[
+                        {"experience_name": "chat", "content": _EXPERIENCE_PROGRAM, "page_id": 1}
+                    ]
                 ),
             )
         )

@@ -555,7 +555,7 @@ dynamic and both ROOT and the target Account's ADMIN can read and write them:
 | Path | Type and constraints | Meaning |
 | --- | --- | --- |
 | `acl.enabled` | Boolean, default `false` | Whether ACL is enabled for this Account |
-| `agent_evolution.enabled` | Boolean, default `false` | Whether Agent Evolution is enabled; when the Account omits the whole section, the complete Cluster `agent_evolution` section is used for legacy compatibility |
+| `agent_evolution.enabled` | Boolean, default `true` | Whether Agent Evolution is enabled; when the Account omits the whole section, the complete Cluster `agent_evolution` section is used for legacy compatibility |
 | `github.token` | String, default empty string | GitHub access token; an empty string means the Account provides no token |
 | `feishu.app_id` | String, optional | Account Feishu App ID |
 | `feishu.app_secret` | String, optional | Account Feishu App Secret |

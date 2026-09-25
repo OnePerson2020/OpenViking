@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -92,6 +93,7 @@ class TrajectoryRolloutAnalyzer:
             evaluation=evaluation,
             enabled=evaluation is not None and context.inject_evaluation_feedback,
         )
+        experience_execution = _experience_execution_from_rollout(rollout)
         result = await self.extract_trajectory_memories(
             messages=extraction_messages,
             ctx=context.request_context,
@@ -100,6 +102,7 @@ class TrajectoryRolloutAnalyzer:
             include_session_skills=context.include_session_skills,
             case_name=getattr(rollout.case, "name", ""),
             source_archive_uri=context.source_archive_uri,
+            experience_execution=experience_execution,
         )
         contexts = list((result or {}).get("contexts", []))
         skill_gradients = list((result or {}).get("skill_gradients", []))
@@ -124,6 +127,7 @@ class TrajectoryRolloutAnalyzer:
                 "policy_snapshot_id": rollout.policy_snapshot_id,
                 "rollout_messages": rollout.messages,
                 "extraction_message_count": len(extraction_messages),
+                "experience_execution": experience_execution,
             },
         )
 
@@ -149,6 +153,7 @@ class TrajectoryRolloutAnalyzer:
         include_session_skills: bool = False,
         case_name: str = "",
         source_archive_uri: str = "",
+        experience_execution: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, list[Any]]:
         """Extract trajectory and/or reusable skill operations from rollout messages.
 
@@ -168,8 +173,7 @@ class TrajectoryRolloutAnalyzer:
         if self.vlm is None:
             if self.vlm_resolver is None:
                 raise RuntimeError(
-                    "TrajectoryRolloutAnalyzer requires a VLM resolver "
-                    "for account-owned work"
+                    "TrajectoryRolloutAnalyzer requires a VLM resolver for account-owned work"
                 )
             vlm_config = await self.vlm_resolver.get_vlm(ctx.account_id)
 
@@ -180,7 +184,14 @@ class TrajectoryRolloutAnalyzer:
             include_session_skills=include_session_skills,
             vlm_config=vlm_config,
         )
-        consumed_experience_uris = collect_read_experience_uris(messages, ctx=ctx)
+        consumed_experience_uris = list(
+            dict.fromkeys(
+                [
+                    *collect_read_experience_uris(messages, ctx=ctx),
+                    *(experience_execution or {}).keys(),
+                ]
+            )
+        )
         phase_result = await self._run_trajectory_extract_phase(
             provider=provider,
             messages=messages,
@@ -191,6 +202,7 @@ class TrajectoryRolloutAnalyzer:
             case_name=case_name,
             source_archive_uri=source_archive_uri,
             consumed_experience_uris=consumed_experience_uris,
+            experience_execution=experience_execution,
         )
         if phase_result is None:
             return empty_result
@@ -210,6 +222,7 @@ class TrajectoryRolloutAnalyzer:
         case_name: str = "",
         source_archive_uri: str = "",
         consumed_experience_uris: list[str] | None = None,
+        experience_execution: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[list[str], list[str], list[Context], list[PatchSemanticGradient]] | None:
         if self.vlm is None:
             vlm_config = provider._vlm_config
@@ -272,6 +285,7 @@ class TrajectoryRolloutAnalyzer:
 
             _ensure_trajectory_case_name(traj_ops, case_name=case_name)
             _apply_trajectory_source_archive_uri(traj_ops, source_archive_uri)
+            _apply_trajectory_experience_execution(traj_ops, experience_execution)
 
             memory_result = MemoryUpdateResult()
             if include_trajectories:
@@ -438,6 +452,89 @@ def _apply_trajectory_source_archive_uri(
         if not isinstance(fields, dict):
             continue
         fields["source_archive_uri"] = source_archive_uri
+
+
+def _apply_trajectory_experience_execution(
+    operations: ResolvedOperations,
+    experience_execution: dict[str, dict[str, Any]] | None,
+) -> None:
+    serialized = json.dumps(experience_execution or {}, ensure_ascii=False, sort_keys=True)
+    for op in getattr(operations, "upsert_operations", []) or []:
+        if getattr(op, "memory_type", None) != _TRAJECTORY_MEMORY_TYPE:
+            continue
+        fields = getattr(op, "memory_fields", None)
+        if isinstance(fields, dict):
+            fields["experience_execution"] = serialized
+
+
+def _experience_execution_from_rollout(rollout: Rollout) -> dict[str, dict[str, Any]]:
+    """Build the final per-Experience DAG snapshots recorded with a trajectory."""
+    metadata = getattr(rollout, "metadata", {})
+    precomputed = metadata.get("experience_execution")
+    if isinstance(precomputed, dict):
+        return {
+            str(uri): dict(snapshot)
+            for uri, snapshot in precomputed.items()
+            if uri and isinstance(snapshot, dict)
+        }
+    return experience_execution_from_runtime(metadata.get("dag_runtime"))
+
+
+def experience_execution_from_runtime(runtime: Any) -> dict[str, dict[str, Any]]:
+    """Collapse runtime events into one factual final snapshot per Experience."""
+    events = runtime.get("events") if isinstance(runtime, dict) else None
+    if not isinstance(events, list):
+        return {}
+
+    snapshot_fields = (
+        "state",
+        "revision",
+        "slot_values",
+        "slot_evidence",
+        "executed_nodes",
+        "current_nodes",
+        "waiting_for_context",
+        "actions",
+        "completed_nodes",
+        "action_outcomes",
+        "error",
+    )
+    snapshots: dict[str, dict[str, Any]] = {}
+    node_slots_by_experience: dict[str, dict[int, str]] = {}
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        experience_uri = str(event.get("experience_uri") or "").strip()
+        if not experience_uri:
+            continue
+        snapshot = snapshots.setdefault(experience_uri, {})
+        node_slots = node_slots_by_experience.setdefault(experience_uri, {})
+        for node_id, slot_name in dict(event.get("node_slots") or {}).items():
+            try:
+                node_slots[int(node_id)] = str(slot_name)
+            except (TypeError, ValueError):
+                continue
+        for collection_name in ("actions", "completed_nodes", "action_outcomes"):
+            for node in event.get(collection_name) or []:
+                if not isinstance(node, dict) or not node.get("slot_name"):
+                    continue
+                try:
+                    node_slots[int(node.get("node_id"))] = str(node["slot_name"])
+                except (TypeError, ValueError):
+                    continue
+        snapshot["experience_name"] = (
+            experience_uri.rstrip("/").rsplit("/", 1)[-1].removesuffix(".md")
+        )
+        for field_name in snapshot_fields:
+            if field_name in event:
+                snapshot[field_name] = event[field_name]
+    for experience_uri, snapshot in snapshots.items():
+        node_slots = node_slots_by_experience.get(experience_uri, {})
+        for field_name in ("executed_nodes", "current_nodes", "waiting_for_context"):
+            node_ids = snapshot.get(field_name)
+            if isinstance(node_ids, list):
+                snapshot[field_name] = [node_slots.get(node_id, node_id) for node_id in node_ids]
+    return snapshots
 
 
 def _trajectory_search_tags_by_uri(

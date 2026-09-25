@@ -1824,7 +1824,7 @@ When running OpenViking as an HTTP service, add a `server` section to `ov.conf`:
 | `user_config_defaults.add_targets.skill_uri` | str | Deployment default skill add root used when `add_skill` omits `target_uri`. Only `viking://~/skills` and `viking://agent/skills` are accepted. | `null` |
 | `user_config_defaults.memory_policy` | object | Deployment default memory extraction policy used when neither the Session nor the User has an explicit policy. | `null` |
 | `user_config_defaults.auto_commit_policy` | object | Deployment default auto-commit policy for newly created sessions without an explicit policy. | `null` |
-| `agent_evolution.enabled` | bool | Startup cluster default for Agent Evolution. Account and Cluster Admin settings may override it at runtime. When enabled, session commits may generate or update cases, trajectories, and experiences according to the session `memory_policy`. Existing memories remain readable and searchable when disabled. | `false` |
+| `agent_evolution.enabled` | bool | Startup cluster default for Agent Evolution. Account and Cluster Admin settings may override it at runtime. When enabled, session commits may generate or update cases, trajectories, and experiences according to the session `memory_policy`. Existing memories remain readable and searchable when disabled. | `true` |
 
 Omitting `auth_mode` (or setting it to `null`) selects `api_key` when a non-empty `root_api_key` is configured, and `dev` otherwise. `dev` is allowed only on localhost and accepts requests without authentication. An empty-string `root_api_key` is invalid.
 

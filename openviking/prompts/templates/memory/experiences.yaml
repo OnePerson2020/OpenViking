@@ -1,7 +1,6 @@
 memory_type: experiences
 description: |
-  A generalizable, reusable insight distilled from agent execution — not a process record.
-  Captures a transferable pattern: what situation triggers it, what approach works, and why.
+  A reusable SOP DAG distilled from agent execution, stored as a complete Python program.
 
 directory: "viking://user/{{ user_space }}/memories/experiences"
 filename_template: "{{ experience_name }}.md"
@@ -23,35 +22,68 @@ fields:
   - name: content
     type: string
     description: |
-      Structured experience extraction in EXACTLY this 3-section format. This output will be injected directly into an autonomous agent's system prompt, so it MUST be written as strict, executable machine instructions:
-
-      ## Situation
-      <markdown bullets: Entry Conditions. Describe the generalized context, user intent, or overarching scenario that dictates when this entire rule block becomes relevant>
-
-      ## Approach
-      <markdown bullets: Active Execution Logic (The "DOs"). The step-by-step optimized path to success. Use direct imperative commands and explicit IF/THEN/ELSE statements for conditional execution. Do NOT place negative constraints or failure warnings here.>
-
-      ## Reflect
-      <markdown bullets: Hard Guardrails & Principles (The "DON'Ts"). Strict negative rules (e.g., "NEVER do Z"), boundary conditions, and failure-prevention heuristics to avoid past mistakes.>
-
-      Rules:
-      - MUTUAL EXCLUSIVITY (NO REDUNDANCY): Strictly separate active steps from constraints to eliminate redundant information. 'Approach' is ONLY for actionable, positive execution steps to advance the task. 'Reflect' is ONLY for negative boundaries, limits, and "what not to do." Do not repeat the same concept across both sections.
-      - OPTIMIZED EXECUTION PATH: You MUST critically analyze the original trajectory and aggressively trim away conversational noise, redundant retry loops, false starts, and irrelevant setup actions. Outline only the essential, efficient path in 'Approach'.
-      - MACHINE READABILITY (IMPERATIVE VOICE): Address the future agent directly using commanding imperatives (e.g., "Ask the user for X", "Call tool Y").
-      - ABSTRACTION MANDATE: Strip away specific entities, IDs, user names, or raw text from the past trajectory. Use generalized abstract descriptions so the rule applies universally.
-      - FAILURE INTEGRATION: Translate past mistakes into strict negative constraints. These MUST be placed exclusively in the 'Reflect' section.
-      - EXECUTION-FIRST PRINCIPLE: 'Approach' steps MUST describe direct tool invocations only. Strip all "I will now do X" / "I have completed X" communication steps.
-      - CONDITIONAL BRANCH PRESERVATION: Capture full decision trees as explicit IF/THEN/ELSE branches. NEVER collapse divergent user-driven branches into a single terminal action.
-      - ATOMIC SCOPE: Each experience MUST cover exactly ONE user intent and its associated tool-invocation sequence. Multiple distinct user intents → SEPARATE experiences. A 'Situation' listing more than one user goal is a violation: split immediately. Hard limit: if 'Approach' would exceed 8 bullets, STOP and split.
-      - STRICT FORMATTING: Use exactly the 3 headings above in this order. Use concise markdown bullets (-) for every section. No numbered lists, no introductory sentences, no conversational filler, and no closing paragraphs. Token efficiency is critical.
+      Output one complete, standalone Python program as this string field. Do NOT output
+      Markdown or DAG JSON. Persisted content is this Python source and must rebuild the DAG
+      from an empty graph: always start with `dag = workflow("...")` and include every
+      node that the final DAG needs. Existing candidate contents are Python source; rewrite the
+      complete source when updating rather than outputting only a mutation.
+      Node factories derive the stable slot name from their Python variable:
+      - ask("information to obtain")
+      - call("available_tool", "parameter suggestion")
+      - check("condition to observe in context")
+      - tell("action to perform")
+      - choose("question whose answer selects one named case")
+      Relationship methods use node object variables, never IDs:
+      - source.then(target1, target2) creates one-to-many fan-out.
+      - condition.if_true(target), condition.if_false(target) define boolean branches.
+      - choice.case("label", target), choice.default(target) define named branches.
+      A complete conditional looks like:
+      eligible = check("Check eligibility")
+      cancel = call("cancel_reservation", "Use the confirmed reservation")
+      transfer = call("transfer_to_human_agents", "Include the reason")
+      eligible.if_true(cancel)
+      eligible.if_false(transfer)
+      Declare all node variables before relation calls. Every final source needs exactly one
+      `dag = workflow(...)` assignment. The compiler generates internal node IDs and reverse
+      dependencies. Multiple `.then(target)` edges to the same target are an AND join: that
+      target waits for every source node to complete.
+      Only node declarations and these relation calls are allowed. No imports, loops, functions,
+      arbitrary method calls, attribute access, expressions or real tool execution.
+      Graphs must be acyclic and nonempty (a single node is allowed), with at most 256 nodes.
+      Predecessors have AND semantics: a node with multiple incoming edges waits until every
+      predecessor completes. Use fan-out when later steps are independent.
+      Boolean branch slots come from any node connected with `if_true/if_false`; use this form for
+      yes/no confirmations so a false answer follows the explicit false edge or terminates that
+      branch. Named branch slots come from `choose(...).case/default`.
+      Every non-choice slot has a boolean value suitable for a Noul decision. AskUser is true
+      only after the requested information appears in context; CallTool is true only after a
+      successful matching tool result; TellAgent is true only after the instruction was carried
+      out; Check is true only when its condition holds. False or unknown does not advance a
+      non-branch node. Never store the actual user answer or tool-result object in slot values;
+      those values remain in conversation evidence for the agent to use.
+      A choose slot contains exactly one declared `.case(...)` label. When `.default(...)` applies,
+      its value is the reserved label `__default__`. Checks are passive; use ask/call when missing
+      information requires an action.
+      Memory retrieval and lifecycle operations are outside the business DAG. Never create
+      nodes for `search_exp`, `search_experience` or `read_experience`.
+      Each DAG covers one intent. Generalize instance-specific identifiers and use only tools
+      observed in the input. Preserve alternate paths and put guard conditions before actions.
+      Natural-language descriptions must be in {{ language }}; constructor names stay in English.
+      Example content:
+      dag = workflow("User asks to check an order")
+      order_id = ask("What is the order ID?")
+      order = call("query_order", "Use order_id from context")
+      order_id.then(order)
 
     merge_op: replace
 
   - name: supersedes
     type: string
+    init_value: ""
     description: |
       The experience_name of an existing experience that this one supersedes.
       Set ONLY when this experience replaces a narrower existing experience with a DIFFERENT name.
       The system will automatically delete the old experience and inherit its trajectory history.
-      Leave empty for a new experience or when updating an experience with the same name.
+      Omit this argument for a new experience or when updating an experience with the same name;
+      it defaults to an empty string.
     merge_op: replace

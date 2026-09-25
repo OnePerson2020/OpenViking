@@ -57,6 +57,13 @@ def _is_tool_result_success(result: Any) -> bool:
     return bool(text) and not text.startswith("Error:")
 
 
+def _is_stop_tool_result_success(result: Any) -> bool:
+    """A stop tool may intentionally return no payload after successful execution."""
+    if isinstance(result, Exception):
+        return False
+    return not str(result or "").lstrip().startswith("Error:")
+
+
 def _compact_msg_chars(messages: list[dict]) -> int:
     return sum(len(json.dumps(m, ensure_ascii=False, default=str)) for m in messages)
 
@@ -1350,6 +1357,7 @@ class AgentLoop:
         inject_write_experience: bool = True,
         context_compact_budget: int | None = None,
         status_note_provider: Any | None = None,
+        experience_context_provider: Any | None = None,
         skill_runtime: Any | None = None,
     ) -> tuple[str | None, str | None, list[dict], dict[str, int], int]:
         """
@@ -1392,6 +1400,8 @@ class AgentLoop:
                 every model call. Compile uses this to inject the per-iteration budget
                 countdown and read/unread summary; ordinary chat leaves it ``None`` so its
                 behavior is unchanged.
+            experience_context_provider: Optional async callback accepting the current messages
+                and returning fresh server-side experience guidance before each model call.
 
         Returns:
             tuple of (final_content, final_reasoning_content, tools_used, token_usage, iteration)
@@ -1411,6 +1421,7 @@ class AgentLoop:
             "cache_read_input_tokens": 0,
         }
         write_exp_injected = False
+        experience_note = None
         stop_tools = set(stop_tool_names or [])
 
         def accumulate_token_usage(response: Any) -> None:
@@ -1448,6 +1459,15 @@ class AgentLoop:
                 note = await status_note_provider(iteration)
                 if note:
                     messages.append({"role": "user", "content": note})
+
+            if experience_context_provider is not None:
+                note = await experience_context_provider(messages)
+                if experience_note is not None:
+                    messages = [m for m in messages if m is not experience_note]
+                    experience_note = None
+                if note:
+                    experience_note = {"role": "user", "content": note}
+                    messages.append(experience_note)
 
             tool_definitions = active_tools.get_definitions(
                 ov_tools_enable=ov_tools_enable,
@@ -1720,6 +1740,11 @@ class AgentLoop:
                         messages, tool_call.id, tool_call.name, model_result
                     )
 
+                    execute_success = (
+                        _is_stop_tool_result_success(result)
+                        if tool_call.name in stop_tools
+                        else _is_tool_result_success(result)
+                    )
                     tool_used_dict = {
                         "tool_call_id": tool_call.id,
                         "tool_name": tool_call.name,
@@ -1727,7 +1752,7 @@ class AgentLoop:
                         "resolved_args": outcome.effective_params,
                         "result": recorded_result,
                         "duration": tool_execute_duration,
-                        "execute_success": _is_tool_result_success(result),
+                        "execute_success": execute_success,
                         "input_token": tool_call.tokens,
                         "output_token": cal_str_tokens(result_text, text_type="mixed"),
                     }
@@ -1748,7 +1773,7 @@ class AgentLoop:
                     )
 
                 if any(
-                    tool_call.name in stop_tools and _is_tool_result_success(_outcome.result)
+                    tool_call.name in stop_tools and _is_stop_tool_result_success(_outcome.result)
                     for _idx, tool_call, _outcome, _duration in results
                 ):
                     final_content = ""
@@ -2037,7 +2062,9 @@ class AgentLoop:
             if msg.metadata.get("studio_managed"):
                 from vikingbot.studio.policy import disabled_group_tools
 
-                disabled_tools = list(set(disabled_tools) | set(disabled_group_tools(self.tools.tool_names)))
+                disabled_tools = list(
+                    set(disabled_tools) | set(disabled_group_tools(self.tools.tool_names))
+                )
             openviking_connection = getattr(msg, "openviking_connection", None)
             if not isinstance(openviking_connection, dict):
                 openviking_connection = None

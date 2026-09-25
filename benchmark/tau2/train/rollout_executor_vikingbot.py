@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import posixpath
 import re
 import time
 from collections.abc import Callable
@@ -199,275 +198,6 @@ def _make_tau2_tool(
     return Tau2Tool(schema, provider)
 
 
-def _make_search_experience_tool():
-    Tool = _vikingbot_imports()["Tool"]
-
-    class SearchExperienceTool(Tool):
-        @property
-        def name(self) -> str:
-            return "search_experience"
-
-        @property
-        def description(self) -> str:
-            return (
-                "Search OpenViking case memories under the current user, read each matched "
-                "case's Linked Experiences section, and return candidate case summaries plus "
-                "linked experience URIs. Use read_experience to open selected experience URIs."
-            )
-
-        @property
-        def parameters(self) -> dict[str, Any]:
-            return {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Natural-language query describing the current task intent, target object, operation, policy/tool keywords.",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum candidate cases to inspect and return.",
-                        "default": 10,
-                    },
-                },
-                "required": ["query"],
-            }
-
-        async def execute(
-            self, tool_context: Any, query: str, limit: int = 10, **kwargs: Any
-        ) -> str:
-            del kwargs
-            client = None
-            try:
-                from vikingbot.openviking_mount.ov_server import VikingClient
-
-                client = await VikingClient.create()
-                target_uri = _current_cases_uri(client)
-                result = await client.search(query, target_uri=target_uri, limit=max(1, int(limit)))
-                memories = result.get("memories", []) if isinstance(result, dict) else []
-                candidates = [
-                    await _experience_search_summary(client, item, rank)
-                    for rank, item in enumerate(memories, start=1)
-                ]
-                return json.dumps(
-                    {
-                        "query": query,
-                        "target_uri": target_uri,
-                        "count": len(candidates),
-                        "candidates": candidates,
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            except Exception as exc:
-                logger.warning("search_experience failed: %s", exc)
-                return f"Error searching experience candidates: {exc}"
-            finally:
-                if client is not None:
-                    await client.close()
-
-    return SearchExperienceTool()
-
-
-def _make_read_experience_tool():
-    Tool = _vikingbot_imports()["Tool"]
-
-    class ReadExperienceTool(Tool):
-        @property
-        def name(self) -> str:
-            return "read_experience"
-
-        @property
-        def description(self) -> str:
-            return "Read one OpenViking experience memory by full URI. Returns Markdown."
-
-        @property
-        def parameters(self) -> dict[str, Any]:
-            return {
-                "type": "object",
-                "properties": {
-                    "experience_uri": {
-                        "type": "string",
-                        "description": "Full Viking URI of the experience memory to read.",
-                    },
-                },
-                "required": ["experience_uri"],
-            }
-
-        async def execute(self, tool_context: Any, experience_uri: str, **kwargs: Any) -> str:
-            del tool_context, kwargs
-            client = None
-            try:
-                from vikingbot.openviking_mount.ov_server import VikingClient
-
-                client = await VikingClient.create()
-                experience_uri = str(experience_uri or "").strip()
-                if "/memories/experiences/" not in experience_uri:
-                    return f"Error: URI is not an experience memory: {experience_uri}"
-                content = await client.read_content(experience_uri, level="read")
-                if not content:
-                    return (
-                        "# Loaded Experience\n\n"
-                        f"Experience URI: `{experience_uri}`\n\n"
-                        "Error: experience content not found."
-                    )
-                return "\n".join(
-                    [
-                        "# Loaded Experience",
-                        "",
-                        f"Experience URI: `{experience_uri}`",
-                        "",
-                        content.rstrip(),
-                    ]
-                ).rstrip()
-            except Exception as exc:
-                logger.warning("read_experience failed: %s", exc)
-                return f"Error reading experience memory: {exc}"
-            finally:
-                if client is not None:
-                    await client.close()
-
-    return ReadExperienceTool()
-
-
-def _current_cases_uri(client: Any) -> str:
-    return f"{client._memory_target_uri(None).rstrip('/')}/cases"
-
-
-def _case_uri(item: Any) -> str:
-    if isinstance(item, dict):
-        return str(item.get("uri") or "")
-    return str(getattr(item, "uri", "") or "")
-
-
-def _case_score(item: Any) -> float:
-    value = item.get("score", 0.0) if isinstance(item, dict) else getattr(item, "score", 0.0)
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _case_abstract(item: Any) -> str:
-    return str(
-        item.get("abstract", "") if isinstance(item, dict) else getattr(item, "abstract", "") or ""
-    )
-
-
-def _filename_name(uri: str) -> str:
-    return str(uri or "").rstrip("/").rsplit("/", 1)[-1].removesuffix(".md")
-
-
-def _markdown_section(content: str, heading: str) -> str:
-    match = re.search(
-        rf"(?ims)^##\s+{re.escape(heading)}\s*\n(.*?)(?=^##\s+|\Z)",
-        content or "",
-    )
-    return match.group(1).strip() if match else ""
-
-
-def _parse_json_object(value: str) -> dict[str, Any]:
-    try:
-        parsed = json.loads(str(value or "").strip())
-    except Exception:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def _shorten(value: Any, limit: int = 240) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    return text if len(text) <= limit else text[: max(0, limit - 1)].rstrip() + "…"
-
-
-def _linked_experience_count(content: str) -> int:
-    section = _markdown_section(content, "Linked Experiences")
-    if not section:
-        return 0
-    links = re.findall(r"\[[^\]]+\]\(([^)\s]+)\)", section)
-    if links:
-        return len(links)
-    return sum(1 for line in section.splitlines() if line.strip().startswith("- "))
-
-
-async def _experience_search_summary(client: Any, item: Any, rank: int) -> dict[str, Any]:
-    case_uri = _case_uri(item)
-    summary: dict[str, Any] = {
-        "rank": rank,
-        "score": round(_case_score(item), 6),
-        "case_name": _filename_name(case_uri),
-        "case_uri": case_uri,
-        "case_abstract": _shorten(_case_abstract(item), 360),
-        "experiences": [],
-    }
-    if not case_uri:
-        return summary
-    try:
-        content = await client.read_content(case_uri, level="read")
-    except Exception:
-        return summary
-    input_text = _markdown_section(content, "Input")
-    input_obj = _parse_json_object(input_text)
-    exp_uris = _linked_experience_uris(content, source_uri=case_uri)
-    # ponytail: fetch Situation snippet per experience so agent can gate read_experience on applicability.
-    experiences: list[dict[str, Any]] = []
-    for idx, exp_uri in enumerate(exp_uris, start=1):
-        exp_entry: dict[str, Any] = {
-            "index": idx,
-            "name": _filename_name(exp_uri),
-            "uri": exp_uri,
-            "situation": "",
-        }
-        try:
-            exp_content = await client.read_content(exp_uri, level="read")
-        except Exception:
-            exp_content = ""
-        situation = _markdown_section(exp_content, "Situation") if exp_content else ""
-        # ponytail: cap at ~600 chars per exp to bound search-result tokens; exclusions ("不适用于"/"not apply") are preserved.
-        exp_entry["situation"] = _shorten(situation, 600)
-        experiences.append(exp_entry)
-    summary.update(
-        {
-            "task_signature": _shorten(_markdown_section(content, "Task Signature")),
-            "input_summary": _shorten(input_obj.get("summary") if input_obj else input_text),
-            "experiences": experiences,
-        }
-    )
-    return summary
-
-
-def _linked_experience_uris(content: str, *, source_uri: str) -> list[str]:
-    section = _markdown_section(content, "Linked Experiences")
-    if not section:
-        return []
-    targets = re.findall(r"\[[^\]]+\]\(([^)\s]+)\)", section)
-    if not targets:
-        targets = [
-            line.lstrip("- ").strip()
-            for line in section.splitlines()
-            if line.strip().startswith("- ")
-        ]
-    uris: list[str] = []
-    for target in targets:
-        uri = _resolve_case_link_uri(target, source_uri=source_uri)
-        if "/memories/experiences/" in uri and uri not in uris:
-            uris.append(uri)
-    return uris
-
-
-def _resolve_case_link_uri(target: str, *, source_uri: str) -> str:
-    target = str(target or "").strip()
-    if not target:
-        return ""
-    if "://" in target:
-        return target
-    if "/" not in target:
-        target = f"../experiences/{target.removesuffix('.md')}.md"
-    if not source_uri.startswith("viking://"):
-        return target
-    source_dir = source_uri.removeprefix("viking://").rsplit("/", 1)[0]
-    return "viking://" + posixpath.normpath(f"{source_dir}/{target}")
-
-
 class _AsyncRWLock:
     """A simple asyncio reader/writer lock.
 
@@ -646,8 +376,6 @@ class VikingBotTau2RolloutExecutor:
             token_usage,
             iteration,
             memory_content,
-            experience_reminder,
-            experience_loader_skill,
         ) = await _run_agent(
             agent=agent,
             system_prompt=system_prompt,
@@ -689,7 +417,6 @@ class VikingBotTau2RolloutExecutor:
                 final_content=final_content,
                 evaluation_result=evaluation_result,
                 reward=reward,
-                experience_reminder=experience_reminder,
                 artifact_created_at=_tau2_policy_current_time_iso(system_prompt),
             ),
             policy_snapshot_id=context.policy_snapshot_id,
@@ -718,7 +445,12 @@ class VikingBotTau2RolloutExecutor:
                 "keep_default_tools": self.keep_default_tools,
                 "ov_tools_enable": False,
                 "experience_recall_enable": self.keep_default_tools,
-                "experience_loader_skill": experience_loader_skill,
+                "dag_runtime": {
+                    "session_id": agent._tau2_dag_runtime.session_id,
+                    "events": agent._tau2_dag_runtime.events,
+                }
+                if getattr(agent, "_tau2_dag_runtime", None)
+                else None,
                 "execution_metadata": dict(context.metadata),
             },
         )
@@ -789,7 +521,7 @@ def _append_final_answer_for_tau2_evaluation(provider_env: Any, final_content: s
 
 
 # Tokens tau2's user simulator emits to signal that the conversation should end.
-_TAU2_USER_STOP_TOKENS = ("###STOP###",)
+_TAU2_USER_STOP_TOKENS = ("###STOP###", "Task Terminated")
 _TAU2_USER_TRANSFER_TOKENS = ("###TRANSFER###",)
 
 
@@ -930,12 +662,12 @@ def _configure_tools(
     # Tau2 rollout may keep generic VikingBot tools, but OpenViking access is
     # restricted to automatic experience recall during prompt construction.
     # No openviking_* tool should be callable by the agent.
-    del keep_default_tools
+    from benchmark.tau2.train.dag_experience_runtime import Tau2DagExperienceRuntime
+
     for tool_name in list(agent.tools.tool_names):
         if str(tool_name).startswith("openviking_"):
             agent.tools.unregister(tool_name)
-    agent.tools.register(_make_search_experience_tool())
-    agent.tools.register(_make_read_experience_tool())
+    agent._tau2_dag_runtime = Tau2DagExperienceRuntime() if keep_default_tools else None
     tool_lock = _AsyncRWLock()
     write_tool_names = _classify_write_tools(provider)
     for schema in provider.list_openai_tools():
@@ -1035,11 +767,7 @@ def _build_system_prompt(policy: str, *, keep_default_tools: bool, rollout_langu
         instructions.append(policy)
     instructions.append("Use the provided tools to interact with the environment.")
     instructions.append(
-        "Before taking task actions, you MUST use the required `experience_loader` skill. "
-        "It explains how to search OpenViking case memories with the `search_experience` tool, return linked experience URIs, and read selected experiences using the `read_experience` tool."
-    )
-    instructions.append(
-        "Loaded experiences are guidance from prior training runs. "
+        "Relevant experience instructions may be inserted automatically before each decision. "
         "Use them only when their situation and applicability boundaries match the current "
         "task; current policy, current tool results, and current user facts override prior "
         "experience."
@@ -1066,128 +794,6 @@ def _build_system_prompt(policy: str, *, keep_default_tools: bool, rollout_langu
     return "\n".join(instructions)
 
 
-EXPERIENCE_LOADER_TEMPLATE_DIR = Path(__file__).resolve().parent / "experience_loader_template"
-EXPERIENCE_LOADER_SKILL_PATH = "skills/experience_loader/SKILL.md"
-
-
-async def _prepare_experience_loader_skill(
-    *,
-    agent: Any,
-    session_key: Any,
-) -> Any:
-    """Install the generic experience_loader skill into the rollout sandbox.
-
-    The loader does not contain per-task memory. It instructs the LLM to use the
-    tau2-only `search_experience` and `read_experience` tools to search case-linked experiences and load selected experience memories.
-    """
-
-    imports = _vikingbot_imports()
-    sandbox_manager = getattr(agent, "sandbox_manager", None)
-    workspace_path = (
-        sandbox_manager.get_workspace_path(session_key)
-        if sandbox_manager
-        else agent.context.workspace
-    )
-    skill_content = _read_experience_loader_template_file("SKILL.md")
-    if sandbox_manager:
-        try:
-            sandbox = await sandbox_manager.get_sandbox(session_key)
-            await sandbox.write_file(EXPERIENCE_LOADER_SKILL_PATH, skill_content)
-        except Exception as exc:
-            logger.warning("failed to write experience_loader skill to sandbox: %s", exc)
-            _write_experience_loader_files(
-                workspace_path=workspace_path,
-                skill_content=skill_content,
-            )
-    else:
-        _write_experience_loader_files(
-            workspace_path=workspace_path,
-            skill_content=skill_content,
-        )
-
-    context_builder = imports["ContextBuilder"](
-        workspace_path,
-        sandbox_manager=sandbox_manager,
-        eval=True,
-    )
-    context_builder.latest_experience_loader_skill_content = skill_content
-    return context_builder
-
-
-def _read_experience_loader_template_file(relative_path: str) -> str:
-    return (EXPERIENCE_LOADER_TEMPLATE_DIR / relative_path).read_text(encoding="utf-8")
-
-
-def _write_experience_loader_files(
-    *,
-    workspace_path: Path,
-    skill_content: str,
-) -> None:
-    skill_dir = workspace_path / "skills" / "experience_loader"
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    skill_dir.joinpath("SKILL.md").write_text(skill_content, encoding="utf-8")
-
-
-async def _execute_required_experience_loader_read(
-    *,
-    agent: Any,
-    messages: list[dict[str, Any]],
-    session_key: Any,
-    sender_id: str,
-) -> dict[str, Any]:
-    """Force-load the generic experience_loader skill before task actions."""
-
-    path = EXPERIENCE_LOADER_SKILL_PATH
-    tool_id = "required-experience-loader-skill-read"
-    messages.append(
-        {
-            "role": "assistant",
-            "content": "Reading required experience_loader skill before task actions.",
-            "tool_calls": [
-                {
-                    "id": tool_id,
-                    "type": "function",
-                    "function": {
-                        "name": "read_file",
-                        "arguments": json.dumps({"path": path}, ensure_ascii=False),
-                    },
-                }
-            ],
-        }
-    )
-    started_at = time.perf_counter()
-    result = await agent.tools.execute(
-        "read_file",
-        {"path": path},
-        session_key=session_key,
-        sandbox_manager=agent.sandbox_manager,
-        sender_id=sender_id,
-    )
-    duration_ms = _elapsed_ms(started_at)
-    messages.append(
-        {
-            "role": "tool",
-            "tool_call_id": tool_id,
-            "name": "read_file",
-            "content": result,
-        }
-    )
-    execute_success = not (isinstance(result, str) and result.lstrip().startswith("Error"))
-    if not execute_success:
-        logger.warning("required experience_loader skill read failed: %s", str(result)[:300])
-    return {
-        "tool_name": "read_file",
-        "args": json.dumps({"path": path}, ensure_ascii=False),
-        "result": result,
-        "duration": duration_ms,
-        "execute_success": execute_success,
-        "input_token": 0,
-        "output_token": 0,
-        "auto": True,
-        "required_skill": "experience_loader",
-    }
-
-
 async def _run_agent(
     *,
     agent: Any,
@@ -1202,15 +808,6 @@ async def _run_agent(
     stage_started_at = time.perf_counter()
     message_context = agent.context
     del case_lookup
-    message_context = await _prepare_experience_loader_skill(
-        agent=agent,
-        session_key=session_key,
-    )
-    experience_loader_skill = getattr(
-        message_context,
-        "latest_experience_loader_skill_content",
-        None,
-    )
     messages = await message_context.build_messages(
         history=[],
         current_message=user_prompt,
@@ -1229,54 +826,44 @@ async def _run_agent(
         business_current_time=_tau2_policy_current_time_display(system_prompt),
     )
     user_memory = None
-    experience_reminder_text = None  # 完整的 [Experience Reminder] 消息文本（用于 messages.json）
     for msg in messages:
         content = msg.get("content", "") if isinstance(msg, dict) else ""
         if not isinstance(content, str):
-            continue
-        # Experience Reminder (经验记忆) - role=user, starts with [Experience Reminder]
-        if "[Experience Reminder]" in content and "## Relevant Agent Experience" in content:
-            experience_reminder_text = content
             continue
         # User memory (用户记忆) - starts with "## Current Session"
         if content.startswith("## Current Session"):
             user_memory = _extract_memory_content(content)
 
-    # 合并用户记忆 + 经验记忆正文，去重
-    exp_content = (
-        _extract_experience_content(experience_reminder_text) if experience_reminder_text else None
-    )
-    memory_content = _merge_memories(user_memory, exp_content)
+    memory_content = _merge_memories(user_memory, None)
     stage_started_at = time.perf_counter()
-    required_skill_tool = None
-    if experience_loader_skill and experience_loader_skill.strip():
-        required_skill_tool = await _execute_required_experience_loader_read(
-            agent=agent,
-            messages=messages,
-            session_key=session_key,
-            sender_id=sender_id,
-        )
     plain_text_router = _make_tau2_plain_text_router(
         publish_events=False,
         bus=getattr(agent, "bus", None),
         session_key=session_key,
     )
-    result = await agent._run_agent_loop(
-        messages=messages,
-        session_key=session_key,
-        publish_events=False,
-        sender_id=sender_id,
-        ov_tools_enable=False,
-        stop_tool_names=["done"],
-        on_plain_text=plain_text_router,
-    )
+    runtime = getattr(agent, "_tau2_dag_runtime", None)
+    runtime_kwargs = {"experience_context_provider": runtime.search_exp} if runtime else {}
+    try:
+        result = await agent._run_agent_loop(
+            messages=messages,
+            session_key=session_key,
+            publish_events=False,
+            sender_id=sender_id,
+            ov_tools_enable=False,
+            stop_tool_names=["done"],
+            on_plain_text=plain_text_router,
+            inject_write_experience=False,
+            **runtime_kwargs,
+        )
+    finally:
+        if runtime:
+            await runtime.close()
     if timings is not None:
         timings.record("agent_loop", stage_started_at)
     final_content, final_reasoning_content, tools_used, token_usage, iteration = result
-    if required_skill_tool is not None:
-        tools_used = [required_skill_tool, *tools_used]
-    case_memory_context = _case_memory_context_from_tools(tools_used)
-    memory_content = _merge_memories(memory_content, case_memory_context)
+    if runtime and runtime.events:
+        guidance = "[DAG Experience Guidance]\n" + json.dumps(runtime.events, ensure_ascii=False)
+        memory_content = _merge_memories(memory_content, guidance)
     if _last_tool_name(tools_used) == "done":
         final_content = None
         final_reasoning_content = None
@@ -1287,8 +874,6 @@ async def _run_agent(
         token_usage,
         iteration,
         memory_content,
-        experience_reminder_text,
-        experience_loader_skill,
     )
 
 
@@ -1425,46 +1010,6 @@ def _extract_memory_content(content: str) -> str | None:
     return content[start:end]
 
 
-def _extract_experience_content(content: str) -> str | None:
-    """从 Experience Reminder 消息中提取经验记忆正文。"""
-    prefix = "[Experience Reminder]\n## Relevant Agent Experience\n"
-    start = content.find(prefix)
-    if start == -1:
-        return None
-    start += len(prefix)
-    return content[start:].strip() or None
-
-
-def _case_memory_context_from_tools(tools_used: list[dict] | None) -> str:
-    blocks: list[str] = []
-    for tool in tools_used or []:
-        if not isinstance(tool, dict) or tool.get("tool_name") != "read_experience":
-            continue
-        result = str(tool.get("result") or "").strip()
-        if not result:
-            continue
-        args = tool.get("args")
-        blocks.append(
-            "\n".join(
-                [
-                    "## Loaded Experience",
-                    "",
-                    "Tool: `read_experience`",
-                    "",
-                    "Args:",
-                    "```json",
-                    str(args or "{}"),
-                    "```",
-                    "",
-                    result,
-                ]
-            )
-        )
-    if not blocks:
-        return ""
-    return "# Experience Loader Context\n\n" + "\n\n---\n\n".join(blocks)
-
-
 def _merge_memories(user_memory: str | None, exp_memory: str | None) -> str | None:
     """合并用户记忆和经验记忆，去重。
 
@@ -1488,7 +1033,6 @@ def _build_rollout_messages(
     final_content: str | None,
     evaluation_result: Any,
     reward: Any,
-    experience_reminder: str | None = None,
     artifact_created_at: str | None = None,
 ) -> list[Message]:
     messages = [
@@ -1498,11 +1042,6 @@ def _build_rollout_messages(
             created_at=artifact_created_at,
         ),
     ]
-    # Experience Reminder 放在 system 之后、user 之前，与 agent 实际看到的顺序一致
-    if experience_reminder:
-        messages.append(
-            _message("tau2-experience", "user", experience_reminder, created_at=artifact_created_at)
-        )
     messages.append(_message("tau2-user", "user", user_prompt, created_at=artifact_created_at))
     if isinstance(tools_used, list):
         for idx, tool_info in enumerate(tools_used):

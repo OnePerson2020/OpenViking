@@ -1649,7 +1649,10 @@ class Session:
         """
         # ponytail: reuse archive ordering; no second session identity or context store.
         newest = f"{self._session_uri}/history/archive_{self._compression.compression_index:03d}"
-        if self._compression.compression_index > 0 and await self._archives.is_context_reset_archive(newest):
+        if (
+            self._compression.compression_index > 0
+            and await self._archives.is_context_reset_archive(newest)
+        ):
             return  # Context is already empty; no second boundary needed.
         self._compression.compression_index += 1
         archive_uri = (
@@ -2127,7 +2130,9 @@ class Session:
                             archive_uri,
                             {
                                 "completed_memory_steps": (
-                                    self._archives.serialize_completed_memory_steps(completed_memory_steps)
+                                    self._archives.serialize_completed_memory_steps(
+                                        completed_memory_steps
+                                    )
                                 )
                             },
                         )
@@ -2189,7 +2194,7 @@ class Session:
                                     user=self.user,
                                     session_id=self.session_id,
                                     ctx=self.ctx,
-                                    strict_extract_errors=True,
+                                    strict_extract_errors=False,
                                     latest_archive_overview=latest_archive_overview,
                                     archive_uri=archive_uri,
                                     allowed_memory_types=long_term_memory_types,
@@ -2673,7 +2678,9 @@ class Session:
                     archive["archive_uri"],
                 )
 
-        merged_messages = self._archives.stable_deduplicate_messages(archive_messages + list(self._messages))
+        merged_messages = self._archives.stable_deduplicate_messages(
+            archive_messages + list(self._messages)
+        )
         merged_messages = await self._checkpoints.insert_terminal_checkpoints(
             merged_messages,
             terminal if terminal_state == "completed" else None,

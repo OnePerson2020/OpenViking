@@ -18,6 +18,9 @@ from openviking.session.train.components.event_recorder import (
     JsonlEventRecorder,
     JsonlPipelineEventHook,
 )
+from openviking.session.train.components.experience_improvement_gate import (
+    ExperienceImprovementGate,
+)
 from openviking.session.train.components.gradient_estimator import (
     ExperienceGradientContext,
     ExperienceGradientEstimator,
@@ -101,6 +104,7 @@ from openviking.session.train.interfaces import (
     PolicyOptimizer,
     PolicySnapshotter,
     PolicyTrainer,
+    PolicyUpdateGate,
     PolicyUpdater,
     RolloutAnalyzer,
     RolloutEvaluator,
@@ -128,6 +132,7 @@ __all__ = [
     "BatchPolicyTrainer",
     "ExperienceGradientEstimator",
     "ExperienceGradientContext",
+    "ExperienceImprovementGate",
     "TrajectoryRolloutAnalyzer",
     "TrajectoryAnalyzerContext",
     "PatchMergePolicyOptimizer",
@@ -170,6 +175,7 @@ __all__ = [
     "PolicyPlanItemKind",
     "PolicyOptimizationPipeline",
     "PolicyOptimizer",
+    "PolicyUpdateGate",
     "PolicySnapshotter",
     "PolicyStatus",
     "PolicyUpdatePlan",

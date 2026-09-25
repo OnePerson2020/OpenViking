@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,7 @@ from openviking.session.train import (
 from openviking.session.train.components.trajectory_analyzer import (
     TrajectoryAnalyzerContext,
     TrajectoryRolloutAnalyzer,
+    _experience_execution_from_rollout,
 )
 
 
@@ -195,6 +197,31 @@ async def test_trajectory_rollout_analyzer_extracts_and_persists_trajectory(monk
     )
 
     rollout = _rollout()
+    experience_uri = "viking://user/u/memories/experiences/exchange.md"
+    rollout.metadata["dag_runtime"] = {
+        "session_id": "tau2_dag_1",
+        "events": [
+            {
+                "experience_uri": experience_uri,
+                "state": "running",
+                "revision": 1,
+                "slot_values": {"reservation_known": True},
+                "slot_evidence": {"reservation_known": ["message:1"]},
+                "executed_nodes": [1],
+                "current_nodes": [2],
+                "waiting_for_context": [3],
+                "node_slots": {
+                    1: "reservation_known",
+                    2: "cancel",
+                    3: "confirmation",
+                },
+                "actions": [{"node_id": 2, "slot_name": "cancel"}],
+                "completed_nodes": [{"node_id": 1, "slot_name": "reservation_known"}],
+                "action_outcomes": [{"node_id": 2, "slot_name": "cancel", "status": "issued"}],
+                "evidence": [{"id": "message:1", "summary": "private raw context"}],
+            }
+        ],
+    }
     rollout.messages.append(
         Message(
             id="tool-result",
@@ -203,7 +230,7 @@ async def test_trajectory_rollout_analyzer_extracts_and_persists_trajectory(monk
                 ToolPart(
                     tool_id="read-1",
                     tool_name="read",
-                    tool_input={"uri": "viking://user/u/memories/experiences/exchange.md"},
+                    tool_input={"uri": experience_uri},
                     tool_output="experience body",
                     tool_status="completed",
                 )
@@ -228,6 +255,7 @@ async def test_trajectory_rollout_analyzer_extracts_and_persists_trajectory(monk
     assert (
         '"source_archive_uri": "viking://user/u/sessions/s1/history/archive_001"' in fs.writes[0][1]
     )
+    assert '"experience_execution": "{' in fs.writes[0][1]
     assert '"source_experience_uris"' not in fs.writes[0][1]
     assert '"source_session_id"' not in fs.writes[0][1]
     assert '"source_messages_uri"' not in fs.writes[0][1]
@@ -239,8 +267,80 @@ async def test_trajectory_rollout_analyzer_extracts_and_persists_trajectory(monk
     assert traj.outcome == "success"
     assert traj.retrieval_anchor == "Stage: final"
     assert traj.metadata["case_name"] == "case"
+    execution = json.loads(traj.metadata["experience_execution"])
+    assert execution[experience_uri] == {
+        "action_outcomes": [{"node_id": 2, "slot_name": "cancel", "status": "issued"}],
+        "actions": [{"node_id": 2, "slot_name": "cancel"}],
+        "completed_nodes": [{"node_id": 1, "slot_name": "reservation_known"}],
+        "current_nodes": ["cancel"],
+        "executed_nodes": ["reservation_known"],
+        "experience_name": "exchange",
+        "revision": 1,
+        "slot_evidence": {"reservation_known": ["message:1"]},
+        "slot_values": {"reservation_known": True},
+        "state": "running",
+        "waiting_for_context": ["confirmation"],
+    }
+    assert "private raw context" not in traj.metadata["experience_execution"]
+    assert analysis.metadata["experience_execution"] == execution
     assert analysis.evaluation.passed is True
     assert analysis.metadata["policy_snapshot_id"] == "snapshot"
+
+
+def test_experience_execution_uses_latest_snapshot_per_experience():
+    rollout = _rollout()
+    uri = "viking://user/u/memories/experiences/cancel.md"
+    rollout.metadata["dag_runtime"] = {
+        "events": [
+            {
+                "experience_uri": uri,
+                "state": "running",
+                "revision": 1,
+                "executed_nodes": [1],
+                "current_nodes": [2],
+                "slot_values": {"known": True},
+                "node_slots": {1: "known", 2: "cancel"},
+            },
+            {
+                "experience_uri": uri,
+                "state": "completed",
+                "revision": 2,
+                "executed_nodes": [1, 2],
+                "current_nodes": [],
+                "slot_values": {"known": True, "cancelled": True},
+                "node_slots": {1: "known", 2: "cancelled"},
+            },
+            {"state": "search_failed", "error": "no Experience URI"},
+        ]
+    }
+
+    assert _experience_execution_from_rollout(rollout) == {
+        uri: {
+            "experience_name": "cancel",
+            "state": "completed",
+            "revision": 2,
+            "executed_nodes": ["known", "cancelled"],
+            "current_nodes": [],
+            "slot_values": {"known": True, "cancelled": True},
+        }
+    }
+
+
+def test_experience_execution_accepts_precomputed_commit_snapshot():
+    rollout = _rollout()
+    expected = {
+        "viking://user/u/memories/experiences/cancel.md": {
+            "state": "running",
+            "executed_nodes": ["known"],
+            "current_nodes": ["cancel"],
+        }
+    }
+    rollout.metadata = {
+        "experience_execution": expected,
+        "dag_runtime": {"events": [{"experience_uri": "ignored"}]},
+    }
+
+    assert _experience_execution_from_rollout(rollout) == expected
 
 
 @pytest.mark.asyncio

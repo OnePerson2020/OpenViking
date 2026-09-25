@@ -304,6 +304,55 @@ def test_python_protocol_compiles_extracted_code_from_fence():
     assert compiled == ["sdk.commit()"]
 
 
+def test_python_create_uses_schema_initial_value_for_omitted_optional_field():
+    registry = MemoryTypeRegistry(load_schemas=False)
+    registry.load_from_yaml(str(resolve_memory_templates_dir() / "experiences.yaml"))
+    schema = registry.get("experiences")
+    context = _context([schema], template_context={"language": "en"})
+    protocol = create_extraction_output_protocol("python")
+
+    contract = protocol.render_contract(context)
+    operations, error = protocol.parse(
+        "sdk.create_experiences(experience_name='cancel_booking', content='dag source')\n"
+        "sdk.commit()",
+        context,
+    )
+
+    assert error is None
+    assert operations is not None
+    assert "supersedes: str = ''" in contract
+    assert operations.model_dump()["experiences"] == [
+        {
+            "page_id": 100,
+            "experience_name": "cancel_booking",
+            "content": "dag source",
+            "supersedes": "",
+        }
+    ]
+
+
+def test_python_create_populates_hidden_trajectory_execution_from_schema_default():
+    registry = MemoryTypeRegistry(load_schemas=False)
+    registry.load_from_yaml(str(resolve_memory_templates_dir() / "trajectories.yaml"))
+    schema = registry.get("trajectories")
+    context = _context([schema], template_context={"language": "en"})
+    protocol = create_extraction_output_protocol("python")
+
+    contract = protocol.render_contract(context)
+    operations, error = protocol.parse(
+        "sdk.create_trajectories("
+        "trajectory_name='cancel_booking', outcome='success', task_query='Cancel it', "
+        "retrieval_anchor='Stage: final', content='# cancel_booking')\n"
+        "sdk.commit()",
+        context,
+    )
+
+    assert error is None
+    assert operations is not None
+    assert "experience_execution" not in contract
+    assert operations.model_dump()["trajectories"][0]["experience_execution"] == "{}"
+
+
 def test_json_protocol_preserves_tool_result_context_shape():
     context = _context([_preference_schema()])
     protocol = create_extraction_output_protocol("json")
@@ -541,9 +590,7 @@ def test_python_reserved_existing_retry_explains_new_replacement_binding():
 def test_python_string_literal_retry_pushes_triple_quotes():
     protocol = create_extraction_output_protocol("python")
 
-    retry = protocol.render_format_retry(
-        "Line 33: invalid syntax. Perhaps you forgot a comma?"
-    )
+    retry = protocol.render_format_retry("Line 33: invalid syntax. Perhaps you forgot a comma?")
 
     assert "offending line is shown above" in retry
     assert 'triple-quoted string ("""...""")' in retry
@@ -727,7 +774,7 @@ def test_python_syntax_error_includes_offending_source_line():
 
     assert error is not None
     assert "invalid Python syntax" in error
-    assert 'Little Women' in error
+    assert "Little Women" in error
     assert "^" in error
 
 
@@ -1683,7 +1730,7 @@ def test_python_rejects_fstring_width_format_spec():
     # A width format spec turns a small integer literal into a huge padded string
     # with no repeat operator; format specs are disallowed.
     operations, error = protocol.parse(
-        'sdk.set_profile(content=f"{\'x\':>1000001}")\nsdk.commit()',
+        "sdk.set_profile(content=f\"{'x':>1000001}\")\nsdk.commit()",
         context,
     )
 

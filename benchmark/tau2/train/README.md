@@ -16,6 +16,16 @@ service yourself.
 bash benchmark/tau2/train/restart_vikingbot_train_eval.sh
 ```
 
+For a single isolated DAG-experience smoke run (training + same-task evaluation), use:
+
+```bash
+bash benchmark/tau2/train/run_dag_experience_smoke.sh
+```
+
+It defaults to slot `7` and task index `0`; override them with `--slot` and
+`--task-index`. The wrapper keeps the run isolated, bounds rollout concurrency,
+and enables Agent Evolution through the normal launcher.
+
 What the launcher does:
 
 1. prepares the OpenViking config/data directory for the selected slot;
@@ -25,6 +35,11 @@ What the launcher does:
 5. waits for `http://127.0.0.1:<tau2-port>/health`;
 6. runs `benchmark/tau2/train/run_batch_train_eval.sh` with the matching
    `--config`, `--server-url`, `--benchmark-service-url`, and result directory.
+
+Experience recall is automatic. Before each model decision, the runtime sends the current
+conversation and tool evidence to OpenViking `search_exp`; OpenViking selects matching
+Experience DAGs and returns only their current instructions for prompt injection. Recall is
+not exposed through agent tools.
 
 Default train/eval arguments, when no custom train/eval args are passed, are:
 
@@ -167,6 +182,11 @@ result/tau2/<result-dir-name>/service_logs/
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--slot N` | `0` | Run an isolated experiment slot. Must appear before train/eval args. |
+| `--enable-agent-evolution` | off | Enable Case, Trajectory, and Experience learning for the selected account. |
+
+The launcher maps `output_language_override: "zh-CN"` in the selected `ov.conf`
+to Tau2 `--rollout-language zh`. Set `TAU2_ROLLOUT_LANGUAGE=default` or `zh` to
+override this mapping for one run.
 
 ### Common train/eval options
 

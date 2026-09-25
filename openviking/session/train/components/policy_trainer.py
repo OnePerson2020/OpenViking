@@ -34,6 +34,7 @@ from openviking.session.train.engine import PolicyTrainingEngine
 from openviking.session.train.interfaces import (
     GradientEstimator,
     PolicyOptimizer,
+    PolicyUpdateGate,
     PolicyUpdater,
     RolloutAnalyzer,
     SemanticGradient,
@@ -53,6 +54,7 @@ class BatchPolicyTrainer:
     gradient_estimator: GradientEstimator
     policy_optimizer: PolicyOptimizer
     policy_updater: PolicyUpdater
+    policy_update_gate: PolicyUpdateGate | None = None
     _engine: PolicyTrainingEngine = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -61,6 +63,7 @@ class BatchPolicyTrainer:
             gradient_estimator=self.gradient_estimator,
             policy_optimizer=self.policy_optimizer,
             policy_updater=self.policy_updater,
+            policy_update_gate=self.policy_update_gate,
         )
 
     @tracer("train.batch_policy_trainer.train_rollouts", ignore_result=True, ignore_args=True)
@@ -144,6 +147,7 @@ class StreamingPolicyTrainer:
     gradient_estimator: GradientEstimator
     policy_optimizer: PolicyOptimizer
     policy_updater: PolicyUpdater
+    policy_update_gate: PolicyUpdateGate | None = None
     context: PipelineContext | Any = None
     config: StreamingPolicyTrainerConfig = field(default_factory=StreamingPolicyTrainerConfig)
     _core: PolicyTrainingEngine = field(init=False, repr=False)
@@ -160,6 +164,7 @@ class StreamingPolicyTrainer:
             gradient_estimator=self.gradient_estimator,
             policy_optimizer=self.policy_optimizer,
             policy_updater=self.policy_updater,
+            policy_update_gate=self.policy_update_gate,
         )
         self._batcher = StreamingBatcher(
             name="openviking-streaming-policy-trainer",
@@ -277,8 +282,7 @@ class StreamingPolicyTrainer:
                 metadata={"no_op": True, "gradient_count": 0},
             )
         tracer.info(
-            "StreamingPolicyTrainer buffered gradients "
-            f"new_gradients={len(gradients)}",
+            f"StreamingPolicyTrainer buffered gradients new_gradients={len(gradients)}",
             console=self.config.trace_console,
         )
         buffered = _BufferedRolloutTraining(
@@ -290,7 +294,6 @@ class StreamingPolicyTrainer:
         result = await self._batcher.submit(buffered)
         self._last_apply_result = result.apply_result
         return _scope_training_result_to_submitter(result, buffered)
-
 
     @tracer("train.streaming_policy_trainer.train_rollouts", ignore_result=True, ignore_args=True)
     async def train_rollouts(
@@ -317,9 +320,7 @@ class StreamingPolicyTrainer:
         analyses = _unique_by_identity(
             [item.analysis for item in items if item.analysis is not None]
         )
-        rollouts = _unique_by_identity(
-            [item.rollout for item in items if item.rollout is not None]
-        )
+        rollouts = _unique_by_identity([item.rollout for item in items if item.rollout is not None])
         tracer.info(
             "StreamingPolicyTrainer flush started "
             f"reason={reason} "
@@ -572,8 +573,12 @@ def _scope_apply_result_to_plan(
     )
     return PolicyApplyResult(
         updated_policy_set=apply_result.updated_policy_set,
-        written_uris=[uri for uri in getattr(apply_result, "written_uris", []) or [] if uri in plan_uris],
-        deleted_uris=[uri for uri in getattr(apply_result, "deleted_uris", []) or [] if uri in plan_uris],
+        written_uris=[
+            uri for uri in getattr(apply_result, "written_uris", []) or [] if uri in plan_uris
+        ],
+        deleted_uris=[
+            uri for uri in getattr(apply_result, "deleted_uris", []) or [] if uri in plan_uris
+        ],
         errors=list(getattr(apply_result, "errors", []) or []),
         metadata=metadata,
     )
@@ -627,6 +632,7 @@ async def get_streaming_policy_trainer(
     gradient_estimator: GradientEstimator,
     policy_optimizer: PolicyOptimizer,
     policy_updater: PolicyUpdater,
+    policy_update_gate: PolicyUpdateGate | None = None,
     context: PipelineContext | Any = None,
     config: StreamingPolicyTrainerConfig | None = None,
 ) -> StreamingPolicyTrainer:
@@ -642,6 +648,7 @@ async def get_streaming_policy_trainer(
             gradient_estimator=gradient_estimator,
             policy_optimizer=policy_optimizer,
             policy_updater=policy_updater,
+            policy_update_gate=policy_update_gate,
             context=context,
             config=config or StreamingPolicyTrainerConfig(),
         )
@@ -696,7 +703,9 @@ def _combine_training_results(
             analyses=[],
             gradients=[],
             plan=PolicyUpdatePlan(metadata={"empty": True}),
-            apply_result=PolicyApplyResult(updated_policy_set=ExperienceSet(root_uri="", policies=[])),
+            apply_result=PolicyApplyResult(
+                updated_policy_set=ExperienceSet(root_uri="", policies=[])
+            ),
             metadata={
                 "source": source,
                 "rollout_count": 0,

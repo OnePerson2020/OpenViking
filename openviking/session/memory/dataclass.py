@@ -182,6 +182,7 @@ class MemoryOperationSkipCode(str, Enum):
     AMBIGUOUS_TARGET = "ambiguous_target"
     NO_WRITABLE_TARGET = "no_writable_target"
     PAGE_ID_TYPE_MISMATCH = "page_id_type_mismatch"
+    EXPERIENCE_GATE_REJECTED = "experience_gate_rejected"
 
 
 class MemoryOperationSkip(BaseModel):
@@ -297,6 +298,10 @@ class MemoryFile(BaseModel):
     extra_fields: Dict[str, Any] = {}
 
     def plain_content(self) -> str:
+        if self.memory_type == "experiences":
+            # Experience source is executable data, including literal text that
+            # may resemble Markdown links. Never rewrite its string values.
+            return self.content
         from openviking.session.memory.utils.link_renderer import LinkRenderer
 
         return LinkRenderer.strip_links(self.content)

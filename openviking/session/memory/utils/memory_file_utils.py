@@ -155,6 +155,12 @@ class MemoryFileUtils:
     ) -> str:
         """Serialize a MemoryFile as plain-text body plus MEMORY_FIELDS metadata."""
         metadata = memory_file.to_metadata()
+        if memory_file.memory_type == "experiences":
+            # Graph JSON is authoritative. Relations remain in MEMORY_FIELDS;
+            # Markdown templates/linkification must not mutate executable data.
+            content_template = None
+            account_content_template_type = None
+            render_links = False
         return _serialize_with_metadata(
             metadata,
             content_template=content_template,

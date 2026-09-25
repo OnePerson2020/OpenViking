@@ -7,6 +7,7 @@ import asyncio
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -239,6 +240,12 @@ def test_tau2_rollout_messages_omit_empty_final_after_done():
     assert rollout_messages[-1].id == "tau2-reward"
 
 
+def test_tau2_task_terminated_reply_stops_plain_text_loop():
+    from benchmark.tau2.train.rollout_executor_vikingbot import _tau2_user_reply_terminates
+
+    assert _tau2_user_reply_terminates("Task Terminated") is True
+
+
 def test_tau2_reward_info_is_json_safe_in_rollout_messages_and_evaluation():
     import json
 
@@ -434,11 +441,7 @@ def test_tau2_configure_tools_removes_only_openviking_tools():
 
     assert agent.tools.unregistered == ["openviking_search", "openviking_memory_commit"]
     assert agent.tools.tool_names == ["read_file", "web_search"]
-    assert agent.tools.registered == [
-        "search_experience",
-        "read_experience",
-        "get_user_details",
-    ]
+    assert agent.tools.registered == ["get_user_details"]
 
 
 def test_tau2_rollout_backend_factory_defaults_to_native():
@@ -592,77 +595,6 @@ async def test_tau2_vikingbot_rollout_runs_on_current_event_loop():
 
 
 @pytest.mark.asyncio
-async def test_tau2_prepare_experience_loader_skill_writes_required_skill(tmp_path):
-    import benchmark.tau2.train.rollout_executor_vikingbot as module
-
-    class FakeSandbox:
-        def __init__(self):
-            self.writes = []
-
-        async def write_file(self, path, content):
-            self.writes.append((path, content))
-            target = tmp_path / path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-
-    fake_sandbox = FakeSandbox()
-
-    class FakeSandboxManager:
-        def get_workspace_path(self, session_key):
-            return tmp_path
-
-        def to_workspace_id(self, session_key):
-            return "workspace"
-
-        async def get_sandbox(self, session_key):
-            return fake_sandbox
-
-    class FakeAgent:
-        sandbox_manager = FakeSandboxManager()
-        context = SimpleNamespace(workspace=tmp_path)
-
-    context_builder = await module._prepare_experience_loader_skill(
-        agent=FakeAgent(),
-        session_key=SimpleNamespace(),
-    )
-
-    skill_path = tmp_path / "skills" / "experience_loader" / "SKILL.md"
-    content = skill_path.read_text(encoding="utf-8")
-    assert context_builder.workspace == tmp_path
-    assert "name: experience_loader" in content
-    assert "search_experience" in content
-    assert "read_experience" in content
-    assert fake_sandbox.writes
-    assert fake_sandbox.writes[0][0] == "skills/experience_loader/SKILL.md"
-    assert context_builder.latest_experience_loader_skill_content == content
-
-
-@pytest.mark.asyncio
-async def test_tau2_experience_loader_skill_is_required_with_relative_read_path(tmp_path):
-    from vikingbot.config.schema import SessionKey
-
-    import benchmark.tau2.train.rollout_executor_vikingbot as module
-
-    module._write_experience_loader_files(
-        workspace_path=tmp_path,
-        skill_content="# experience_loader\n\nUse search_experience then read_experience.",
-    )
-
-    from vikingbot.agent.context import ContextBuilder
-
-    context_builder = ContextBuilder(tmp_path, eval=True)
-    system_prompt = await context_builder.build_system_prompt(
-        SessionKey(type="cli", channel_id="tau2", chat_id="case"),
-        ov_tools_enable=False,
-    )
-
-    assert "Required skill: before taking any task action" in system_prompt
-    assert "`skills/experience_loader/SKILL.md`" in system_prompt
-    assert "<location>skills/experience_loader/SKILL.md</location>" in system_prompt
-    assert f"<location>{tmp_path}" not in system_prompt
-
-
-@pytest.mark.asyncio
 async def test_tau2_vikingbot_blocking_setup_and_reward_are_offloaded(monkeypatch):
     import benchmark.tau2.train.rollout_executor_vikingbot as module
     from benchmark.tau2.train.rollout_executor_vikingbot import VikingBotTau2RolloutExecutor
@@ -697,7 +629,7 @@ async def test_tau2_vikingbot_blocking_setup_and_reward_are_offloaded(monkeypatc
     async def fake_run_agent(**kwargs):
         calls.append(("run_agent", threading.get_ident()))
         calls.append(("case_lookup", kwargs.get("case_lookup")))
-        return "final", None, [], {}, 1, None, None, None
+        return "final", None, [], {}, 1, None
 
     monkeypatch.setattr(module, "_tool_provider_cls", lambda: FakeTau2BenchToolProvider)
     monkeypatch.setattr(module, "_build_agent", lambda *args, **kwargs: FakeAgent())
@@ -753,7 +685,7 @@ async def test_tau2_vikingbot_blocking_setup_and_reward_are_offloaded(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_tau2_run_agent_force_loads_experience_loader_skill_before_task_actions(monkeypatch):
+async def test_tau2_run_agent_injects_experience_without_loader_tool(monkeypatch):
     from vikingbot.providers.base import LLMResponse, ToolCallRequest
 
     import benchmark.tau2.train.rollout_executor_vikingbot as module
@@ -786,7 +718,6 @@ async def test_tau2_run_agent_force_loads_experience_loader_skill_before_task_ac
         def __init__(self, workspace, *, sandbox_manager=None, eval=False, **kwargs):
             self.workspace = workspace
             self.sandbox_manager = sandbox_manager
-            self.latest_experience_loader_skill_content = ""
 
         async def build_messages(self, **kwargs):
             return [
@@ -794,9 +725,7 @@ async def test_tau2_run_agent_force_loads_experience_loader_skill_before_task_ac
                 {"role": "user", "content": kwargs["current_message"]},
             ]
 
-        def add_assistant_message(
-            self, messages, content, tool_calls=None, reasoning_content=None
-        ):
+        def add_assistant_message(self, messages, content, tool_calls=None, reasoning_content=None):
             msg = {"role": "assistant", "content": content or "[tool call]"}
             if tool_calls:
                 msg["tool_calls"] = tool_calls
@@ -817,7 +746,11 @@ async def test_tau2_run_agent_force_loads_experience_loader_skill_before_task_ac
             return messages
 
     class FakeProvider:
+        def __init__(self):
+            self.call_count = 0
+
         async def chat(self, messages, tools=None, **kwargs):
+            self.call_count += 1
             observed["llm_messages"] = list(messages)
             return LLMResponse(
                 content=None,
@@ -845,7 +778,12 @@ async def test_tau2_run_agent_force_loads_experience_loader_skill_before_task_ac
             self.provider = FakeProvider()
             self.model = "fake"
             self.temperature = None
-            self.max_iterations = 1
+            self.max_iterations = 3
+            self._tau2_dag_runtime = SimpleNamespace(
+                search_exp=AsyncMock(return_value="[DAG Experience Guidance]\n[]"),
+                close=AsyncMock(),
+                events=[],
+            )
 
         _chat_with_stream_events = real_imports["AgentLoop"]._chat_with_stream_events
         _run_agent_loop = real_imports["AgentLoop"]._run_agent_loop
@@ -885,8 +823,9 @@ async def test_tau2_run_agent_force_loads_experience_loader_skill_before_task_ac
         lambda: {**real_imports, "ContextBuilder": FakeContextBuilder},
     )
 
+    agent = FakeAgent()
     result = await module._run_agent(
-        agent=FakeAgent(),
+        agent=agent,
         system_prompt="tau2 policy",
         user_prompt="user query",
         session_key=SimpleNamespace(safe_name=lambda: "session"),
@@ -897,21 +836,9 @@ async def test_tau2_run_agent_force_loads_experience_loader_skill_before_task_ac
 
     tools_used = result[2]
     messages = observed["llm_messages"]
-    read_call_index = next(
-        i
-        for i, msg in enumerate(messages)
-        if msg.get("role") == "assistant" and "read_file" in str(msg.get("tool_calls"))
-    )
-    tool_result_index = next(
-        i
-        for i, msg in enumerate(messages)
-        if msg.get("role") == "tool" and msg.get("name") == "read_file"
-    )
-
-    assert observed["sandbox_writes"][0][0] == "skills/experience_loader/SKILL.md"
-    assert observed["sandbox_reads"] == ["skills/experience_loader/SKILL.md"]
-    assert read_call_index < tool_result_index
-    assert "search_experience" in messages[tool_result_index]["content"]
-    assert "read_experience" in messages[tool_result_index]["content"]
-    assert tools_used[0]["tool_name"] == "read_file"
-    assert tools_used[0]["required_skill"] == "experience_loader"
+    assert not observed.get("sandbox_writes")
+    assert not observed.get("sandbox_reads")
+    assert any("[DAG Experience Guidance]" in str(msg.get("content")) for msg in messages)
+    assert [tool["tool_name"] for tool in tools_used] == ["done"]
+    assert tools_used[0]["execute_success"] is True
+    assert agent.provider.call_count == 1

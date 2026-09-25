@@ -451,6 +451,11 @@ def load_server_config(config_path: Optional[str] = None) -> ServerConfig:
         server_data = {}
     if not isinstance(server_data, dict):
         raise ValueError(f"Invalid server config in {path}: 'server' section must be an object")
+    server_data = dict(server_data)
+    # Agent Evolution is a top-level OpenViking setting but the HTTP runtime
+    # also consumes it through ServerConfig during lifespan initialization.
+    if "agent_evolution" in data and "agent_evolution" not in server_data:
+        server_data["agent_evolution"] = data["agent_evolution"]
 
     # Convert auth_mode string — built-in enums are converted to their string
     # value; custom modes are kept as-is for plugin extensibility.

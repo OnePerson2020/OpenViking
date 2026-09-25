@@ -18,6 +18,7 @@ from openviking.session.train.domain import (
 from openviking.session.train.interfaces import (
     GradientEstimator,
     PolicyOptimizer,
+    PolicyUpdateGate,
     PolicyUpdater,
     RolloutAnalyzer,
     SemanticGradient,
@@ -32,6 +33,7 @@ class PolicyTrainingEngine:
     gradient_estimator: GradientEstimator
     policy_optimizer: PolicyOptimizer
     policy_updater: PolicyUpdater
+    policy_update_gate: PolicyUpdateGate | None = None
 
     async def analyze_estimate_plan_apply(
         self,
@@ -91,6 +93,13 @@ class PolicyTrainingEngine:
                 latest_policy_set,
                 ctx.optimization_context,
             )
+            if self.policy_update_gate is not None:
+                plan = await self.policy_update_gate.validate(
+                    plan,
+                    gradients,
+                    latest_policy_set,
+                    ctx.gradient_context,
+                )
             apply_result = await self.policy_updater.apply(
                 plan,
                 latest_policy_set,
