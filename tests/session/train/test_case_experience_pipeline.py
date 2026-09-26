@@ -140,13 +140,14 @@ async def test_two_sessions_merge_one_case_experience_and_preserve_archives(monk
         dag_decider=Decider(),
         jev=SimpleNamespace(evaluate=AsyncMock(side_effect=judge)),
     )
+    analyzer = SessionRolloutAnalyzer(viking_fs=fs)
+    estimator = ExperienceGradientEstimator(viking_fs=fs)
     trainer = StreamingPolicyTrainer(
         policy_set=policy_set,
-        rollout_analyzer=SessionRolloutAnalyzer(viking_fs=fs),
-        gradient_estimator=ExperienceGradientEstimator(viking_fs=fs),
+        rollout_analyzer=analyzer,
+        gradient_estimator=estimator,
         policy_optimizer=PatchMergePolicyOptimizer(viking_fs=fs),
         policy_updater=MemoryFilePolicyUpdater(viking_fs=fs),
-        policy_update_gate=gate,
         context=PipelineContext(
             analysis_context=SessionAnalyzerContext(ctx),
             gradient_context=ExperienceGradientContext(ctx, []),
@@ -156,7 +157,27 @@ async def test_two_sessions_merge_one_case_experience_and_preserve_archives(monk
         config=StreamingPolicyTrainerConfig(max_gradients_per_update=2, max_wait_seconds=1),
     )
     try:
-        first, second = await asyncio.gather(*(trainer.submit_rollout(r) for r in rollouts))
+        analyses = [
+            await analyzer.analyze(rollout, SessionAnalyzerContext(ctx)) for rollout in rollouts
+        ]
+        proposals = [
+            await estimator.estimate(analysis, policy_set, ExperienceGradientContext(ctx, []))
+            for analysis in analyses
+        ]
+        validated = [
+            (await gate.validate_proposals(proposal, policy_set, None))[0] for proposal in proposals
+        ]
+        assert all(len(batch) == 1 for batch in validated)
+        first, second = await asyncio.gather(
+            *(
+                trainer.submit_gradients(
+                    gradients,
+                    analysis=analysis,
+                    rollout=rollout,
+                )
+                for gradients, analysis, rollout in zip(validated, analyses, rollouts, strict=True)
+            )
+        )
     finally:
         await trainer.close()
     assert first.batch_result is second.batch_result

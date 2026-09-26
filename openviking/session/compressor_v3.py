@@ -1019,7 +1019,6 @@ class SessionCompressorV3:
                     vlm_resolver=self.vlm_resolver,
                 ),
                 policy_updater=MemoryFilePolicyUpdater(viking_fs=viking_fs, vikingdb=self.vikingdb),
-                policy_update_gate=experience_gate,
                 context=PipelineContext(
                     analysis_context=analysis_context,
                     gradient_context=gradient_context,
@@ -1044,6 +1043,9 @@ class SessionCompressorV3:
             skill_submitted = int(skill_result.get("skill_submitted", 0))
             skill_uris = list(skill_result.get("skill_uris", []))
             filtered_exp_gradient_count = 0
+            proposed_exp_gradient_count = 0
+            accepted_exp_gradient_count = 0
+            persisted_experience_count = 0
             memory_diffs: list[dict[str, Any]] = []
             policy_snapshot_id = _commit_policy_snapshot_id(
                 session_id=session_id,
@@ -1076,10 +1078,21 @@ class SessionCompressorV3:
                     viking_fs=viking_fs,
                     vlm_resolver=self.vlm_resolver,
                 ).estimate(analysis, exp_trainer.policy_set, gradient_context)
+                proposed_exp_gradient_count += len(exp_gradients)
+                exp_gradients, proposal_gate_metadata = await experience_gate.validate_proposals(
+                    exp_gradients,
+                    exp_trainer.policy_set,
+                    gradient_context,
+                )
+                filtered_exp_gradient_count += int(
+                    proposal_gate_metadata["experience_improvement_gate"]["rejected_count"]
+                )
+                accepted_exp_gradient_count += len(exp_gradients)
                 exp_training_result = _empty_training_result(
                     analysis=analysis,
                     rollout=rollout,
                     policy_set=exp_trainer.policy_set,
+                    plan_metadata=proposal_gate_metadata,
                 )
                 if exp_gradients:
                     source_session_uris = {archive_uri}
@@ -1115,6 +1128,7 @@ class SessionCompressorV3:
                         rollout=rollout,
                         batch_finalizer=commit_experience_batch,
                     )
+                    persisted_experience_count += len(exp_training_result.apply_result.written_uris)
                 if exp_training_result.apply_result.errors:
                     raise ExperienceTrainingError(
                         "; ".join(exp_training_result.apply_result.errors)
@@ -1156,6 +1170,9 @@ class SessionCompressorV3:
                 "skill_submitted": skill_submitted,
                 "skill_uris": skill_uris,
                 "filtered_exp_gradient_count": filtered_exp_gradient_count,
+                "proposed_exp_gradient_count": proposed_exp_gradient_count,
+                "accepted_exp_gradient_count": accepted_exp_gradient_count,
+                "persisted_experience_count": persisted_experience_count,
             }
             if collect_memory_diff:
                 response["memory_diff"] = _merge_memory_diffs(
@@ -2106,13 +2123,17 @@ def _empty_training_result(
     analysis: RolloutAnalysis,
     rollout: Rollout,
     policy_set: Any,
+    plan_metadata: Optional[dict[str, Any]] = None,
 ) -> RolloutTrainingResult:
     """Return a typed no-op result retaining source Session attribution."""
 
     return RolloutTrainingResult(
         analyses=[analysis],
         gradients=[],
-        plan=PolicyUpdatePlan(items=[], metadata={"no_experience_gradients": True}),
+        plan=PolicyUpdatePlan(
+            items=[],
+            metadata={"no_experience_gradients": True, **dict(plan_metadata or {})},
+        ),
         apply_result=PolicyApplyResult(
             updated_policy_set=policy_set,
             written_uris=[],

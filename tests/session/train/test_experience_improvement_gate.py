@@ -740,104 +740,6 @@ async def test_unknown_session_requires_grounding_without_claiming_improvement()
 
 
 @pytest.mark.asyncio
-async def test_gate_reads_historical_session_archive_and_rejects_regression():
-    from openviking.message import Message, TextPart
-    from openviking.session.train.domain import Policy
-
-    source = _source()
-    archived_uri = "viking://session/previous/archives/1"
-    message = Message(id="old", role="assistant", parts=[TextPart(text="completed correctly")])
-    fs = SimpleNamespace(read_file=AsyncMock(return_value=json.dumps(message.to_dict())))
-    policy = Policy(
-        "cancel",
-        EXPERIENCE_URI,
-        2,
-        "draft",
-        source,
-        metadata={"source_sessions": [{"source_session_uri": archived_uri, "passed": True}]},
-    )
-    gate = ExperienceImprovementGate(
-        config=DagDeciderConfig(provider="jev"),
-        dag_decider=BatchStopsAtReportDecider(),
-        jev=SimpleNamespace(
-            evaluate=AsyncMock(
-                return_value={
-                    "improvement_effective": {"noul": 0.99},
-                    "preservation_0": {"noul": 0.99},
-                }
-            )
-        ),
-    )
-    result = await gate.validate(
-        _plan(source, before_source=source),
-        [_gradient(source, passed=False)],
-        PolicySet("viking://user/u/memories/experiences", [policy], viking_fs=fs),
-        None,
-    )
-    assert result.items == []
-    fs.read_file.assert_awaited_once_with(archived_uri + "/messages.jsonl", ctx=None)
-    replays = result.metadata["experience_improvement_gate"]["candidates"][0]["replays"]
-    assert any("no longer completes" in item["reason"] for item in replays)
-
-
-@pytest.mark.asyncio
-async def test_missing_archived_tool_evidence_rejects_historical_replay(monkeypatch):
-    from openviking.message import Message, ToolPart
-    from openviking.session.tool_result_store import ToolResultStore
-    from openviking.session.train.domain import Policy
-
-    source = _source()
-    archived_uri = "viking://user/u/sessions/previous/history/archive_001"
-    message = Message(
-        id="tool",
-        role="assistant",
-        parts=[
-            ToolPart(
-                tool_id="t1",
-                tool_name="get_reservation",
-                tool_status="completed",
-                tool_output="preview",
-                tool_output_ref="viking://user/u/sessions/previous/tool-results/t1",
-                tool_output_truncated=True,
-            )
-        ],
-    )
-    fs = SimpleNamespace(read_file=AsyncMock(return_value=json.dumps(message.to_dict())))
-    monkeypatch.setattr(
-        ToolResultStore, "read", AsyncMock(side_effect=FileNotFoundError("missing evidence"))
-    )
-    policy = Policy(
-        "cancel",
-        EXPERIENCE_URI,
-        2,
-        "draft",
-        source,
-        metadata={"source_sessions": [{"source_session_uri": archived_uri, "passed": True}]},
-    )
-    gate = ExperienceImprovementGate(
-        config=DagDeciderConfig(provider="jev"),
-        dag_decider=BatchStopsAtReportDecider(),
-        jev=SimpleNamespace(
-            evaluate=AsyncMock(
-                return_value={
-                    "improvement_effective": {"noul": 0.99},
-                    "preservation_0": {"noul": 0.99},
-                }
-            )
-        ),
-    )
-    result = await gate.validate(
-        _plan(source, before_source=source),
-        [_gradient(source, passed=False)],
-        PolicySet("root", [policy], viking_fs=fs),
-        None,
-    )
-    assert result.items == []
-    replays = result.metadata["experience_improvement_gate"]["candidates"][0]["replays"]
-    assert any("missing tool evidence" in item["reason"] for item in replays)
-
-
-@pytest.mark.asyncio
 async def test_failed_session_completion_never_counts_as_improvement():
     source = _source()
 
@@ -876,3 +778,83 @@ async def test_empty_session_evidence_cannot_pass_gate():
         "no replay evidence"
         in result.metadata["experience_improvement_gate"]["candidates"][0]["replays"][0]["reason"]
     )
+
+
+@pytest.mark.asyncio
+async def test_proposal_gate_validates_only_its_source_session():
+    source = _source("Report the verified total 1628")
+    gradient = _gradient(source, passed=False)
+    gate = ExperienceImprovementGate(
+        config=DagDeciderConfig(provider="jev"),
+        dag_decider=StopsAtReportDecider(),
+        jev=SimpleNamespace(
+            evaluate=AsyncMock(
+                return_value={
+                    "improvement_effective": {"noul": 0.99},
+                    "preservation_0": {"noul": 0.99},
+                }
+            )
+        ),
+    )
+
+    accepted, metadata = await gate.validate_proposals(
+        [gradient],
+        PolicySet(root_uri="viking://user/u/memories/experiences", policies=[]),
+        None,
+    )
+
+    assert accepted == [gradient]
+    source_session = gradient.metadata["validated_source_sessions"][0]
+    assert source_session["source_session_uri"] == SESSION_URI
+    assert source_session["passed"] is False
+    assert source_session["score"] == 0.0
+    assert source_session["feedback"] == ["Information 1628 was not communicated."]
+    diagnostic = metadata["experience_improvement_gate"]
+    assert diagnostic["stage"] == "proposal"
+    assert diagnostic["accepted_count"] == 1
+    assert diagnostic["rejected_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_proposal_gate_does_not_replay_historical_sessions():
+    from openviking.session.train.domain import Policy
+
+    source = _source("Report the verified total 1628")
+    gradient = _gradient(source, passed=False)
+    policy = Policy(
+        "cancel",
+        EXPERIENCE_URI,
+        2,
+        "draft",
+        _source("old"),
+        metadata={
+            "source_sessions": [
+                {
+                    "source_session_uri": "viking://user/u/sessions/old/history/archive_001",
+                    "passed": True,
+                }
+            ]
+        },
+    )
+    fs = SimpleNamespace(read_file=AsyncMock(side_effect=AssertionError("must not read history")))
+    gate = ExperienceImprovementGate(
+        config=DagDeciderConfig(provider="jev"),
+        dag_decider=StopsAtReportDecider(),
+        jev=SimpleNamespace(
+            evaluate=AsyncMock(
+                return_value={
+                    "improvement_effective": {"noul": 0.99},
+                    "preservation_0": {"noul": 0.99},
+                }
+            )
+        ),
+    )
+
+    accepted, _ = await gate.validate_proposals(
+        [gradient],
+        PolicySet("viking://user/u/memories/experiences", [policy], viking_fs=fs),
+        None,
+    )
+
+    assert accepted == [gradient]
+    fs.read_file.assert_not_called()

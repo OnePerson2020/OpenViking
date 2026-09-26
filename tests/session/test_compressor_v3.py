@@ -590,13 +590,31 @@ async def test_train_from_extracted_cases_submits_streaming_rollout(monkeypatch)
         "openviking.session.compressor_v3.get_viking_fs",
         lambda: SimpleNamespace(ls=AsyncMock(return_value=[])),
     )
+    trainer_factory = AsyncMock(return_value=FakeTrainer())
     monkeypatch.setattr(
         "openviking.session.compressor_v3.get_streaming_policy_trainer",
-        AsyncMock(return_value=FakeTrainer()),
+        trainer_factory,
     )
     monkeypatch.setattr(
         "openviking.session.train.components.gradient_estimator.ExperienceGradientEstimator.estimate",
         fake_estimate_exp_gradients,
+    )
+    monkeypatch.setattr(
+        "openviking.session.compressor_v3.ExperienceImprovementGate.validate_proposals",
+        AsyncMock(
+            side_effect=lambda gradients, policy_set, context: (
+                gradients,
+                {
+                    "experience_improvement_gate": {
+                        "stage": "proposal",
+                        "passed": True,
+                        "accepted_count": len(gradients),
+                        "rejected_count": 0,
+                        "candidates": [],
+                    }
+                },
+            )
+        ),
     )
 
     compressor = SessionCompressorV3(
@@ -617,6 +635,10 @@ async def test_train_from_extracted_cases_submits_streaming_rollout(monkeypatch)
 
     assert result["case_count"] == 1
     assert result["submitted"] == 1
+    assert result["proposed_exp_gradient_count"] == 1
+    assert result["accepted_exp_gradient_count"] == 1
+    assert result["filtered_exp_gradient_count"] == 0
+    assert trainer_factory.await_args.kwargs.get("policy_update_gate") is None
     assert len(submitted_gradients) == 1
     assert len(submitted_gradients[0]) == 1  # one exp gradient per case
     # Verify analysis was used
@@ -1728,6 +1750,23 @@ async def test_direct_case_learning_uses_session_without_trajectory_writes(monke
         AsyncMock(return_value=Trainer()),
     )
     monkeypatch.setattr(ExperienceGradientEstimator, "_run_extract_loop", propose)
+    monkeypatch.setattr(
+        "openviking.session.compressor_v3.ExperienceImprovementGate.validate_proposals",
+        AsyncMock(
+            side_effect=lambda gradients, policy_set, context: (
+                gradients,
+                {
+                    "experience_improvement_gate": {
+                        "stage": "proposal",
+                        "passed": True,
+                        "accepted_count": len(gradients),
+                        "rejected_count": 0,
+                        "candidates": [],
+                    }
+                },
+            )
+        ),
+    )
     compressor = SessionCompressorV3(vikingdb=None)
     compressor._session_skill_extraction_enabled = lambda: False
     compressor._link_case_to_training_outputs = AsyncMock()
@@ -1899,3 +1938,86 @@ async def test_enabled_skills_run_once_independently_of_case_count(monkeypatch):
     assert result["submitted"] == 2
     assert result["skill_submitted"] == 1
     assert result["skill_uris"] == ["skill-uri"]
+
+
+@pytest.mark.asyncio
+async def test_rejected_session_proposal_is_not_submitted_to_patch_merge(monkeypatch):
+    from openviking.session.train import ExperienceGradientEstimator, PatchSemanticGradient
+
+    root = "viking://user/u/memories/experiences"
+    uri = f"{root}/{_training_case().name}.md"
+
+    class Trainer:
+        policy_set = ExperienceSet(root, [])
+        submit_gradients = AsyncMock(side_effect=AssertionError("rejected proposal reached merge"))
+
+    proposal = PatchSemanticGradient(
+        before_file=None,
+        after_file=MemoryFile(
+            uri=uri,
+            content='dag = workflow("candidate")\nstep = tell("candidate")',
+            memory_type="experiences",
+            extra_fields={"experience_name": _training_case().name},
+        ),
+        base_version=None,
+        rationale="test",
+        links=[
+            StoredLink(
+                from_uri=uri,
+                to_uri="viking://user/u/sessions/s/history/archive_001",
+                link_type="derived_from",
+            )
+        ],
+        confidence=0.8,
+    )
+    monkeypatch.setattr(
+        "openviking.session.compressor_v3.get_streaming_policy_trainer",
+        AsyncMock(return_value=Trainer()),
+    )
+    monkeypatch.setattr(
+        ExperienceGradientEstimator,
+        "estimate",
+        AsyncMock(return_value=[proposal]),
+    )
+    gate_metadata = {
+        "experience_improvement_gate": {
+            "stage": "proposal",
+            "passed": False,
+            "accepted_count": 0,
+            "rejected_count": 1,
+            "candidates": [
+                {
+                    "target_uri": uri,
+                    "target_name": _training_case().name,
+                    "passed": False,
+                    "reason": "proposal does not improve its source Session",
+                    "replays": [],
+                }
+            ],
+        }
+    }
+    monkeypatch.setattr(
+        "openviking.session.compressor_v3.ExperienceImprovementGate.validate_proposals",
+        AsyncMock(return_value=([], gate_metadata)),
+    )
+    compressor = SessionCompressorV3(vikingdb=None, rollout_analyzer=AsyncMock())
+    compressor.rollout_analyzer.analyze.return_value = RolloutAnalysis(
+        evaluation=RubricEvaluation(False, 0.0, [], ["failed"]),
+        metadata={"source_session_uri": "viking://user/u/sessions/s/history/archive_001"},
+    )
+
+    result = await compressor.train_from_extracted_cases(
+        cases=[_training_case()],
+        messages=_messages(),
+        ctx=_ctx(),
+        archive_uri="viking://user/u/sessions/s/history/archive_001",
+        collect_memory_diff=True,
+    )
+
+    Trainer.submit_gradients.assert_not_awaited()
+    assert result["proposed_exp_gradient_count"] == 1
+    assert result["accepted_exp_gradient_count"] == 0
+    assert result["filtered_exp_gradient_count"] == 1
+    skipped = result["memory_diff"]["skipped_operations"]
+    assert skipped[0]["reason_code"] == "experience_gate_rejected"
+    assert skipped[0]["uri"] == uri

@@ -114,6 +114,11 @@ class PatchMergePolicyOptimizer:
                 "gradients": [
                     _gradient_to_dict(idx, gradient) for idx, gradient in enumerate(patch_gradients)
                 ],
+                "experience_proposal_gates": [
+                    dict(gradient.metadata["experience_proposal_gate"])
+                    for gradient in patch_gradients
+                    if isinstance(gradient.metadata.get("experience_proposal_gate"), dict)
+                ],
             },
         )
 
@@ -197,6 +202,8 @@ class PatchMergePolicyOptimizer:
 def _case_experience_plan_items(
     operations: Any, gradients: list[SemanticGradient], policy_set: PolicySet
 ) -> list[PolicyPlanItem]:
+    if any(not gradient.metadata.get("validated_source_sessions") for gradient in gradients):
+        raise ValueError("PatchMerge received an Experience proposal that did not pass its Gate")
     if operations is None:
         return []
     if operations.errors:
@@ -225,10 +232,23 @@ def _case_experience_plan_items(
         raise ValueError("Case Experience merge produced empty content")
     current = _find_policy_by_uri(policy_set, target_uri)
     links: dict[str, StoredLink] = {}
+    source_sessions: dict[str, dict[str, Any]] = (
+        {
+            str(source["source_session_uri"]): dict(source)
+            for source in (current.metadata.get("source_sessions") or [])
+            if isinstance(source, dict) and source.get("source_session_uri")
+        }
+        if current is not None
+        else {}
+    )
     for gradient in gradients:
         for link in gradient.links:
             if link.link_type == "derived_from" and link.to_uri:
                 links[link.to_uri] = link.model_copy(update={"from_uri": target_uri})
+        for source in gradient.metadata.get("validated_source_sessions") or []:
+            source_uri = str(source.get("source_session_uri") or "")
+            if source_uri:
+                source_sessions[source_uri] = dict(source)
     if not links:
         raise ValueError("Case Experience merge has no source Session provenance")
     return [
@@ -243,7 +263,10 @@ def _case_experience_plan_items(
             links=list(links.values()),
             metadata={
                 "merge_gradient_count": len(gradients),
-                "patch_metadata": {"case_name": name},
+                "patch_metadata": {
+                    "case_name": name,
+                    "source_sessions": list(source_sessions.values()),
+                },
             },
         )
     ]

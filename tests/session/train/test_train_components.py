@@ -680,6 +680,12 @@ async def test_fixed_case_merge_groups_sessions_and_rebases_on_latest_policy(mon
     policy_set = _experience_set()
     current = policy_set.policies[0]
     current.content = 'dag = workflow("current")\ncurrent = tell("keep concurrent update")'
+    current.metadata["source_sessions"] = [
+        {
+            "source_session_uri": "viking://session/old/archives/1",
+            "passed": True,
+        }
+    ]
     source_uris = [f"viking://session/s{i}/archives/1" for i in range(3)]
 
     def proposal(name, source):
@@ -696,6 +702,9 @@ async def test_fixed_case_merge_groups_sessions_and_rebases_on_latest_policy(mon
             rationale="session",
             links=[StoredLink(from_uri=uri, to_uri=source, link_type="derived_from")],
             confidence=0.8,
+            metadata={
+                "validated_source_sessions": [{"source_session_uri": source, "passed": True}]
+            },
         )
 
     proposals = [
@@ -735,6 +744,10 @@ async def test_fixed_case_merge_groups_sessions_and_rebases_on_latest_policy(mon
     assert result.items[0].base_version == current.version
     assert {link.to_uri for link in result.items[0].links} == set(source_uris[:2])
     assert {link.to_uri for link in result.items[1].links} == {source_uris[2]}
+    assert {
+        source["source_session_uri"]
+        for source in result.items[0].metadata["patch_metadata"]["source_sessions"]
+    } == {"viking://session/old/archives/1", *source_uris[:2]}
 
 
 @pytest.mark.asyncio

@@ -14,9 +14,10 @@ Session names do not rename that Case. This applies to ordinary sessions as well
 ```text
 Session + canonical Case + evaluation + runtime execution feedback
   -> ExperienceGradientEstimator: one proposal for the fixed Case Experience
-  -> streaming buffer: concurrent Session proposals
+  -> Jev proposal Gate: replay this proposal against this Session
+  -> streaming buffer: accepted concurrent Session proposals
   -> PatchMerge: group by Experience URI, rebase against the latest stored version
-  -> Jev replay Gate: validate the merged candidate against its source Sessions
+  -> deterministic DAG and fixed-target validation
   -> persist Experience + Session provenance + Case relation
 ```
 
@@ -37,10 +38,11 @@ order_id.then(order)
 sdk.commit()
 ```
 
-Sessions generate proposals concurrently without waiting for every trial. Count/time buffering
-can produce several updates to the same Experience across a run. Each flush groups proposals by
-fixed URI before PatchMerge. The policy root lock covers reload, merge, Gate and apply, so a stale
-proposal is merged against the latest Experience instead of overwriting concurrent improvements.
+Sessions generate proposals concurrently without waiting for every trial. Each proposal passes
+the replay Gate against its own Session before entering the streaming buffer. Count/time buffering
+can produce several updates to the same Experience across a run. Each flush groups accepted
+proposals by fixed URI before PatchMerge. The policy root lock covers reload, merge and apply, so a
+stale proposal is merged against the latest Experience instead of overwriting concurrent improvements.
 Case links use the same policy lock boundary when their backlinks are updated.
 
 For updates, the model reads the old source and emits a complete replacement program. Every
@@ -151,26 +153,30 @@ are the Python variable names. These observations are passed directly to the ref
 They are not independently verified business outcomes; the external Session evaluation remains
 separate. Missing evaluation is represented as unknown, never converted into a passing result.
 
-The Gate compiles the merged candidate and its latest stored baseline, then starts fresh DAG
-instances against the original Session evidence. DAGs with identical evidence are decided
-together. Corrective-action and preservation judgements share a request, retaining each
-candidate/baseline pair as one unit when splitting over-budget batches. A failed candidate does
-not reject an unrelated Case's candidate.
+The proposal Gate compiles one Session's candidate and its currently stored baseline, then starts
+fresh DAG instances against that Session's original evidence. Corrective-action and preservation
+judgements share one Jev request, retaining the candidate/baseline pair as one unit when splitting
+over-budget requests. A rejected proposal never enters PatchMerge and does not reject another
+Session's proposal.
 
-For each Case Experience, acceptance requires:
+For each Session proposal, acceptance requires:
 
-- Every successful source Session still completes its path and preserves grounded obligations.
-- Every failed source Session is non-regressing, and at least one failed Session has a materially
-  better corrective action. Merely labelling its failed execution complete is not improvement.
+- A successful source Session still completes its path and preserves grounded obligations.
+- A failed source Session is non-regressing and has a materially better corrective action. Merely
+  labelling its failed execution complete is not improvement.
 - Unknown outcomes require an evidence-grounded, non-regressing workflow; they never count as
   proof of success or as the required failed-Session improvement.
 - New/all-success Experiences need successful replay and grounded obligations, without a
   fabricated failed sample. Missing source evidence or replay errors reject publication.
 
+PatchMerge does not run a second Jev semantic Gate in this version. It still compiles and validates
+the complete merged DAG, enforces the fixed Case name and URI, rejects deletes/renames, and rebases
+under the current policy lock. Independently valid proposals can therefore conflict semantically
+after merge; this is an explicit current limitation.
+
 Accepted Experiences store forward `derived_from` links to Session archive directories and a
 `source_sessions` metadata list of source identity, evaluation and feedback. Raw evidence is not
-duplicated into Experience metadata. Later updates reload historical source archives for
-regression checks. Archive contents are never rewritten to add memory backlinks. Snapshot
+duplicated into Experience metadata. Archive contents are never rewritten to add memory backlinks. Snapshot
 messages use `OpenViking-Experience-Session-Map`; submitter memory diffs, Case relations and Gate
 diagnostics are scoped to the originating Session and Case.
 

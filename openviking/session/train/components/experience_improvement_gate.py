@@ -12,7 +12,7 @@ from openviking.models.jev import JevClient, JevPayloadTooLarge, estimate_jev_in
 from openviking.service.experience_dag_decider import ExperienceDagDecider
 from openviking.session.memory.experience_dag import Dag, DagAction, DagEvidenceRef, DagInstance
 from openviking.session.memory.experience_dag_compiler import compile_dag
-from openviking.session.train.domain import PolicySet, PolicyUpdatePlan
+from openviking.session.train.domain import PolicyPlanItem, PolicySet, PolicyUpdatePlan
 from openviking.session.train.interfaces import SemanticGradient
 from openviking.telemetry import tracer
 from openviking_cli.utils.config.agent_evolution_config import DagDeciderConfig
@@ -66,7 +66,7 @@ class _CorrectiveJudgementResult:
 
 @dataclass(slots=True)
 class ExperienceImprovementGate:
-    """Keep only Experience plans that improve their source Sessions."""
+    """Keep only per-Session Experience proposals that improve their source Session."""
 
     config: DagDeciderConfig
     jev_config: JevConfig | None = None
@@ -79,8 +79,97 @@ class ExperienceImprovementGate:
         if self.dag_decider is None and self.jev is not None:
             self.dag_decider = ExperienceDagDecider(config=self.config, jev=self.jev)
 
+    @tracer(
+        "train.proposal_gate.experience.validate",
+        ignore_args=True,
+        ignore_result=True,
+    )
+    async def validate_proposals(
+        self,
+        gradients: list[SemanticGradient],
+        policy_set: PolicySet,
+        context: Any,
+    ) -> tuple[list[SemanticGradient], dict[str, Any]]:
+        """Validate each Session proposal independently before PatchMerge."""
+
+        accepted: list[SemanticGradient] = []
+        candidate_diagnostics: list[dict[str, Any]] = []
+        jev_batch_count = 0
+        jev_split_count = 0
+        oversized_candidates: list[dict[str, str]] = []
+
+        for gradient in gradients:
+            current = next(
+                (policy for policy in policy_set.policies if policy.uri == gradient.target_uri),
+                None,
+            )
+            before_content = (
+                gradient.before_file.content
+                if gradient.before_file is not None
+                else current.content
+                if current is not None
+                else None
+            )
+            proposal = PolicyPlanItem(
+                kind="upsert",
+                memory_type="experiences",
+                target_name=gradient.target_name,
+                target_uri=gradient.target_uri,
+                before_content=before_content,
+                after_content=gradient.after_file.content,
+                base_version=gradient.base_version,
+                confidence=gradient.confidence,
+                links=list(gradient.links),
+            )
+            gated = await self._validate(
+                PolicyUpdatePlan(items=[proposal], metadata={"gate_stage": "proposal"}),
+                [gradient],
+                policy_set,
+                context,
+            )
+            gate = dict(gated.metadata.get("experience_improvement_gate") or {})
+            candidate_diagnostics.extend(gate.get("candidates") or [])
+            jev_batch_count += int(gate.get("jev_batch_count") or 0)
+            jev_split_count += int(gate.get("jev_split_count") or 0)
+            oversized_candidates.extend(gate.get("oversized_candidates") or [])
+            if not gated.items:
+                continue
+
+            accepted_item = gated.items[0]
+            patch_metadata = dict(accepted_item.metadata.get("patch_metadata") or {})
+            gradient.metadata["validated_source_sessions"] = list(
+                patch_metadata.get("source_sessions") or []
+            )
+            gradient.metadata["experience_proposal_gate"] = gate
+            accepted.append(gradient)
+
+        accepted_count = len(accepted)
+        diagnostics = {
+            "experience_improvement_gate": {
+                "stage": "proposal",
+                "passed": bool(gradients) and accepted_count == len(gradients),
+                "atomic": False,
+                "accepted_count": accepted_count,
+                "rejected_count": len(gradients) - accepted_count,
+                "jev_batch_count": jev_batch_count,
+                "jev_split_count": jev_split_count,
+                "oversized_candidates": oversized_candidates,
+                "candidates": candidate_diagnostics,
+            }
+        }
+        return accepted, diagnostics
+
     @tracer("train.policy_gate.experience.validate", ignore_args=True, ignore_result=True)
     async def validate(
+        self,
+        plan: PolicyUpdatePlan,
+        gradients: list[SemanticGradient],
+        policy_set: PolicySet,
+        context: Any,
+    ) -> PolicyUpdatePlan:
+        return await self._validate(plan, gradients, policy_set, context)
+
+    async def _validate(
         self,
         plan: PolicyUpdatePlan,
         gradients: list[SemanticGradient],
@@ -111,7 +200,8 @@ class ExperienceImprovementGate:
                 },
             )
 
-        contexts_by_target = await _gate_contexts_by_target(gradients, policy_set)
+        del policy_set, context
+        contexts_by_target = _gate_contexts_by_target(gradients)
         validations_by_item: list[list[_CandidateValidation]] = []
         batches: dict[str, list[_CandidateValidation]] = {}
         batch_diagnostics = _CorrectiveJudgementResult()
@@ -684,50 +774,15 @@ def _aggregate_session_results(
     }
 
 
-async def _gate_contexts_by_target(
-    gradients: list[SemanticGradient], policy_set: PolicySet
+def _gate_contexts_by_target(
+    gradients: list[SemanticGradient],
 ) -> dict[str, dict[str, dict[str, Any]]]:
-    from openviking.session.archive_store import ArchiveStore
-    from openviking.session.tool_output_externalizer import ToolOutputExternalizer
-    from openviking.session.train.components.gradient_estimator import _messages_to_gate_evidence
-
     result: dict[str, dict[str, dict[str, Any]]] = {}
     for gradient in gradients:
         target = str(gradient.target_uri or "")
         for value in gradient.metadata.get(EXPERIENCE_GATE_CONTEXTS_KEY) or []:
             if isinstance(value, dict) and value.get("source_session_uri"):
                 result.setdefault(target, {})[value["source_session_uri"]] = value
-    archive_cache: dict[str, list[dict[str, str]]] = {}
-    for policy in policy_set.policies:
-        if policy.uri not in result:
-            continue
-        for source in policy.metadata.get("source_sessions") or []:
-            uri = str(source.get("source_session_uri") or "")
-            if not uri or uri in result[policy.uri]:
-                continue
-            gate_context = dict(source)
-            try:
-                if uri not in archive_cache:
-                    store = ArchiveStore(
-                        policy_set.viking_fs,
-                        policy_set.request_context,
-                        uri.rsplit("/history/", 1)[0],
-                    )
-                    messages = await store.read_messages(uri)
-                    if not messages:
-                        raise ValueError("source Session archive has no messages")
-                    session_uri = uri.rsplit("/history/", 1)[0]
-                    messages = await ToolOutputExternalizer(
-                        policy_set.viking_fs,
-                        session_uri,
-                        session_uri.rsplit("/", 1)[-1],
-                        policy_set.request_context,
-                    ).hydrate_for_extraction(messages, strict=True)
-                    archive_cache[uri] = _messages_to_gate_evidence(messages)
-                gate_context["evidence"] = archive_cache[uri]
-            except Exception as exc:
-                gate_context["error"] = f"source Session archive could not be read: {exc}"
-            result[policy.uri][uri] = gate_context
     return result
 
 
