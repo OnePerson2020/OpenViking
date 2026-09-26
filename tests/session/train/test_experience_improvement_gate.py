@@ -12,6 +12,7 @@ from openviking.session.memory.dataclass import MemoryFile, StoredLink
 from openviking.session.train.components.experience_improvement_gate import (
     EXPERIENCE_GATE_CONTEXTS_KEY,
     ExperienceImprovementGate,
+    _bounded_success_evidence,
 )
 from openviking.session.train.domain import PolicyPlanItem, PolicySet, PolicyUpdatePlan
 from openviking.session.train.engine import PolicyTrainingEngine
@@ -781,16 +782,43 @@ async def test_empty_session_evidence_cannot_pass_gate():
 
 
 @pytest.mark.asyncio
-async def test_proposal_gate_validates_only_its_source_session():
+async def test_failed_proposal_without_successful_anchor_is_rejected():
     source = _source("Report the verified total 1628")
     gradient = _gradient(source, passed=False)
     gate = ExperienceImprovementGate(
         config=DagDeciderConfig(provider="jev"),
-        dag_decider=StopsAtReportDecider(),
+        dag_decider=CompletesDecider(),
+        jev=SimpleNamespace(evaluate=AsyncMock()),
+    )
+
+    accepted, metadata = await gate.validate_proposals(
+        [gradient],
+        PolicySet(root_uri="viking://user/u/memories/experiences", policies=[]),
+        None,
+    )
+
+    assert accepted == []
+    diagnostic = metadata["experience_improvement_gate"]
+    assert diagnostic["stage"] == "proposal"
+    assert diagnostic["accepted_count"] == 0
+    assert diagnostic["rejected_count"] == 1
+    assert diagnostic["candidates"][0]["reason"] == (
+        "failed proposal has no successful Session anchor"
+    )
+    gate.jev.evaluate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_successful_proposal_uses_its_own_session_as_gate_evidence():
+    source = _source("Report the verified total 1628")
+    gradient = _gradient(source, passed=True)
+    gate = ExperienceImprovementGate(
+        config=DagDeciderConfig(provider="jev"),
+        dag_decider=CompletesDecider(),
         jev=SimpleNamespace(
             evaluate=AsyncMock(
                 return_value={
-                    "improvement_effective": {"noul": 0.99},
+                    "improvement_effective": {"noul": 0.01},
                     "preservation_0": {"noul": 0.99},
                 }
             )
@@ -804,19 +832,15 @@ async def test_proposal_gate_validates_only_its_source_session():
     )
 
     assert accepted == [gradient]
-    source_session = gradient.metadata["validated_source_sessions"][0]
-    assert source_session["source_session_uri"] == SESSION_URI
-    assert source_session["passed"] is False
-    assert source_session["score"] == 0.0
-    assert source_session["feedback"] == ["Information 1628 was not communicated."]
-    diagnostic = metadata["experience_improvement_gate"]
-    assert diagnostic["stage"] == "proposal"
-    assert diagnostic["accepted_count"] == 1
-    assert diagnostic["rejected_count"] == 0
+    assert metadata["experience_improvement_gate"]["accepted_count"] == 1
+    diagnostic = metadata["experience_improvement_gate"]["candidates"][0]
+    assert diagnostic["gate_basis"] == "proposal_session"
+    assert diagnostic["proposal_source_session_uri"] == SESSION_URI
 
 
 @pytest.mark.asyncio
-async def test_proposal_gate_does_not_replay_historical_sessions():
+async def test_failed_proposal_gate_preserves_successful_session_anchor():
+    from openviking.message import Message, TextPart
     from openviking.session.train.domain import Policy
 
     source = _source("Report the verified total 1628")
@@ -836,10 +860,15 @@ async def test_proposal_gate_does_not_replay_historical_sessions():
             ]
         },
     )
-    fs = SimpleNamespace(read_file=AsyncMock(side_effect=AssertionError("must not read history")))
+    successful_message = Message(
+        id="successful",
+        role="assistant",
+        parts=[TextPart(text="Reported the verified total 1628")],
+    )
+    fs = SimpleNamespace(read_file=AsyncMock(return_value=json.dumps(successful_message.to_dict())))
     gate = ExperienceImprovementGate(
         config=DagDeciderConfig(provider="jev"),
-        dag_decider=StopsAtReportDecider(),
+        dag_decider=CompletesDecider(),
         jev=SimpleNamespace(
             evaluate=AsyncMock(
                 return_value={
@@ -850,11 +879,42 @@ async def test_proposal_gate_does_not_replay_historical_sessions():
         ),
     )
 
-    accepted, _ = await gate.validate_proposals(
+    accepted, metadata = await gate.validate_proposals(
         [gradient],
         PolicySet("viking://user/u/memories/experiences", [policy], viking_fs=fs),
         None,
     )
 
     assert accepted == [gradient]
-    fs.read_file.assert_not_called()
+    source_session = gradient.metadata["validated_source_sessions"][0]
+    assert source_session["source_session_uri"] == SESSION_URI
+    assert source_session["passed"] is False
+    anchors = gradient.metadata["proposal_gate_anchor_sessions"]
+    assert anchors[0]["source_session_uri"] == ("viking://user/u/sessions/old/history/archive_001")
+    diagnostic = metadata["experience_improvement_gate"]["candidates"][0]
+    assert diagnostic["gate_basis"] == "successful_session_regression"
+    assert diagnostic["proposal_source_session_uri"] == SESSION_URI
+    fs.read_file.assert_awaited_once()
+
+
+def test_successful_session_witness_is_bounded_and_drops_system_messages():
+    evidence = [
+        {"id": "system", "kind": "system_message", "summary": "policy" * 10_000},
+        {"id": "first", "kind": "user_message", "summary": "initial request"},
+        *[
+            {
+                "id": f"tool-{index}",
+                "kind": "tool_result",
+                "summary": "tool result " * 1_000,
+            }
+            for index in range(20)
+        ],
+        {"id": "last", "kind": "assistant_message", "summary": "successful response"},
+    ]
+
+    bounded = _bounded_success_evidence(evidence)
+
+    assert all(item["kind"] != "system_message" for item in bounded)
+    assert sum(len(item["summary"]) for item in bounded) <= 20_000
+    assert bounded[0]["id"] == "first"
+    assert bounded[-1]["id"] == "last"

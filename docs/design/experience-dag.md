@@ -14,7 +14,7 @@ Session names do not rename that Case. This applies to ordinary sessions as well
 ```text
 Session + canonical Case + evaluation + runtime execution feedback
   -> ExperienceGradientEstimator: one proposal for the fixed Case Experience
-  -> Jev proposal Gate: replay this proposal against this Session
+  -> Jev proposal Gate: validate success or preserve successful Session anchors
   -> streaming buffer: accepted concurrent Session proposals
   -> PatchMerge: group by Experience URI, rebase against the latest stored version
   -> deterministic DAG and fixed-target validation
@@ -38,11 +38,13 @@ order_id.then(order)
 sdk.commit()
 ```
 
-Sessions generate proposals concurrently without waiting for every trial. Each proposal passes
-the replay Gate against its own Session before entering the streaming buffer. Count/time buffering
-can produce several updates to the same Experience across a run. Each flush groups accepted
-proposals by fixed URI before PatchMerge. The policy root lock covers reload, merge and apply, so a
-stale proposal is merged against the latest Experience instead of overwriting concurrent improvements.
+Sessions generate proposals concurrently without waiting for every trial. A successful Session
+proposal is replayed against itself. A failed Session proposal is treated as a suggested repair:
+its Gate replays the candidate against up to three previously accepted successful Sessions for the
+same Case. A failed proposal without a successful anchor is not published. Count/time buffering can
+produce several updates to the same Experience across a run. Each flush groups accepted proposals
+by fixed URI before PatchMerge. The policy root lock covers reload, merge and apply, so a stale
+proposal is merged against the latest Experience instead of overwriting concurrent improvements.
 Case links use the same policy lock boundary when their backlinks are updated.
 
 For updates, the model reads the old source and emits a complete replacement program. Every
@@ -153,17 +155,22 @@ are the Python variable names. These observations are passed directly to the ref
 They are not independently verified business outcomes; the external Session evaluation remains
 separate. Missing evaluation is represented as unknown, never converted into a passing result.
 
-The proposal Gate compiles one Session's candidate and its currently stored baseline, then starts
-fresh DAG instances against that Session's original evidence. Corrective-action and preservation
-judgements share one Jev request, retaining the candidate/baseline pair as one unit when splitting
-over-budget requests. A rejected proposal never enters PatchMerge and does not reject another
-Session's proposal.
+The proposal Gate compiles one Session's candidate and its currently stored baseline. A successful
+proposal starts fresh DAG instances against its own evidence. A failed proposal starts them against
+successful Session anchors and asks only whether the candidate preserves those successful paths;
+the failed Session drives reflection but is not treated as a history that the new DAG must somehow
+make successful. A rejected proposal never enters PatchMerge and does not reject another Session's
+proposal.
+
+Successful anchor evidence is a bounded execution witness rather than a concatenated full Session:
+system prompts are removed, each evidence record is limited to 2,000 characters, the combined
+witness is limited to 20,000 characters, and at most three recent successful anchors are used.
 
 For each Session proposal, acceptance requires:
 
-- A successful source Session still completes its path and preserves grounded obligations.
-- A failed source Session is non-regressing and has a materially better corrective action. Merely
-  labelling its failed execution complete is not improvement.
+- A successful proposal still completes its own path and preserves grounded obligations.
+- A failed proposal preserves every selected successful Session. The failed Session supplies the
+  defect and evaluator feedback used to generate the patch, not the Gate's success oracle.
 - Unknown outcomes require an evidence-grounded, non-regressing workflow; they never count as
   proof of success or as the required failed-Session improvement.
 - New/all-success Experiences need successful replay and grounded obligations, without a

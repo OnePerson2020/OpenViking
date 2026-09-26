@@ -10,7 +10,13 @@ from typing import Any
 
 from openviking.models.jev import JevClient, JevPayloadTooLarge, estimate_jev_input_tokens
 from openviking.service.experience_dag_decider import ExperienceDagDecider
-from openviking.session.memory.experience_dag import Dag, DagAction, DagEvidenceRef, DagInstance
+from openviking.session.memory.experience_dag import (
+    Dag,
+    DagAction,
+    DagEvidenceRef,
+    DagInstance,
+    clip_evidence_summary,
+)
 from openviking.session.memory.experience_dag_compiler import compile_dag
 from openviking.session.train.domain import PolicyPlanItem, PolicySet, PolicyUpdatePlan
 from openviking.session.train.interfaces import SemanticGradient
@@ -20,6 +26,9 @@ from openviking_cli.utils.config.jev_config import JevConfig
 
 EXPERIENCE_GATE_CONTEXTS_KEY = "_experience_gate_contexts"
 _MAX_REPLAY_ROUNDS = 32
+_MAX_SUCCESS_ANCHORS = 3
+_MAX_SUCCESS_WITNESS_CHARS = 20_000
+_MAX_SUCCESS_EVIDENCE_ITEM_CHARS = 2_000
 
 
 @dataclass(slots=True)
@@ -66,7 +75,7 @@ class _CorrectiveJudgementResult:
 
 @dataclass(slots=True)
 class ExperienceImprovementGate:
-    """Keep only per-Session Experience proposals that improve their source Session."""
+    """Validate successful proposals or protect successful anchors from failed repairs."""
 
     config: DagDeciderConfig
     jev_config: JevConfig | None = None
@@ -99,10 +108,34 @@ class ExperienceImprovementGate:
         oversized_candidates: list[dict[str, str]] = []
 
         for gradient in gradients:
+            proposal_contexts = list(
+                _gate_contexts_by_target([gradient]).get(gradient.target_uri or "", {}).values()
+            )
             current = next(
                 (policy for policy in policy_set.policies if policy.uri == gradient.target_uri),
                 None,
             )
+            failed_proposal = any(item.get("passed") is False for item in proposal_contexts)
+            validation_contexts = proposal_contexts
+            gate_basis = "proposal_session"
+            if failed_proposal:
+                validation_contexts = await _successful_anchor_contexts(current, policy_set)
+                gate_basis = "successful_session_regression"
+                if not validation_contexts:
+                    candidate_diagnostics.append(
+                        {
+                            "target_uri": gradient.target_uri,
+                            "target_name": gradient.target_name,
+                            "passed": False,
+                            "improved": False,
+                            "reason": "failed proposal has no successful Session anchor",
+                            "replays": [],
+                            "proposal_source_session_uri": _first_source_session_uri(
+                                proposal_contexts
+                            ),
+                        }
+                    )
+                    continue
             before_content = (
                 gradient.before_file.content
                 if gradient.before_file is not None
@@ -126,19 +159,33 @@ class ExperienceImprovementGate:
                 [gradient],
                 policy_set,
                 context,
+                contexts_by_target={
+                    gradient.target_uri or "": {
+                        str(item.get("source_session_uri") or index): item
+                        for index, item in enumerate(validation_contexts)
+                    }
+                },
             )
             gate = dict(gated.metadata.get("experience_improvement_gate") or {})
-            candidate_diagnostics.extend(gate.get("candidates") or [])
+            for diagnostic in gate.get("candidates") or []:
+                candidate_diagnostics.append(
+                    {
+                        **diagnostic,
+                        "gate_basis": gate_basis,
+                        "proposal_source_session_uri": _first_source_session_uri(proposal_contexts),
+                    }
+                )
             jev_batch_count += int(gate.get("jev_batch_count") or 0)
             jev_split_count += int(gate.get("jev_split_count") or 0)
             oversized_candidates.extend(gate.get("oversized_candidates") or [])
             if not gated.items:
                 continue
 
-            accepted_item = gated.items[0]
-            patch_metadata = dict(accepted_item.metadata.get("patch_metadata") or {})
-            gradient.metadata["validated_source_sessions"] = list(
-                patch_metadata.get("source_sessions") or []
+            gradient.metadata["validated_source_sessions"] = _stored_session_contexts(
+                proposal_contexts
+            )
+            gradient.metadata["proposal_gate_anchor_sessions"] = _stored_session_contexts(
+                validation_contexts
             )
             gradient.metadata["experience_proposal_gate"] = gate
             accepted.append(gradient)
@@ -175,6 +222,7 @@ class ExperienceImprovementGate:
         gradients: list[SemanticGradient],
         policy_set: PolicySet,
         context: Any,
+        contexts_by_target: dict[str, dict[str, dict[str, Any]]] | None = None,
     ) -> PolicyUpdatePlan:
         upserts = [
             item
@@ -201,7 +249,7 @@ class ExperienceImprovementGate:
             )
 
         del policy_set, context
-        contexts_by_target = _gate_contexts_by_target(gradients)
+        contexts_by_target = contexts_by_target or _gate_contexts_by_target(gradients)
         validations_by_item: list[list[_CandidateValidation]] = []
         batches: dict[str, list[_CandidateValidation]] = {}
         batch_diagnostics = _CorrectiveJudgementResult()
@@ -784,6 +832,106 @@ def _gate_contexts_by_target(
             if isinstance(value, dict) and value.get("source_session_uri"):
                 result.setdefault(target, {})[value["source_session_uri"]] = value
     return result
+
+
+async def _successful_anchor_contexts(
+    policy: Any,
+    policy_set: PolicySet,
+) -> list[dict[str, Any]]:
+    if policy is None or policy_set.viking_fs is None:
+        return []
+
+    from openviking.session.archive_store import ArchiveStore
+    from openviking.session.tool_output_externalizer import ToolOutputExternalizer
+    from openviking.session.train.components.gradient_estimator import _messages_to_gate_evidence
+
+    sources = [
+        dict(source)
+        for source in policy.metadata.get("source_sessions") or []
+        if isinstance(source, dict)
+        and source.get("passed") is True
+        and source.get("source_session_uri")
+    ][-_MAX_SUCCESS_ANCHORS:]
+    contexts: list[dict[str, Any]] = []
+    for source in sources:
+        archive_uri = str(source["source_session_uri"])
+        session_uri = archive_uri.rsplit("/history/", 1)[0]
+        context = dict(source)
+        try:
+            messages = await ArchiveStore(
+                policy_set.viking_fs,
+                policy_set.request_context,
+                session_uri,
+            ).read_messages(archive_uri)
+            messages = await ToolOutputExternalizer(
+                policy_set.viking_fs,
+                session_uri,
+                session_uri.rsplit("/", 1)[-1],
+                policy_set.request_context,
+            ).hydrate_for_extraction(messages, strict=True)
+            context["evidence"] = _bounded_success_evidence(_messages_to_gate_evidence(messages))
+        except Exception as exc:
+            context["error"] = f"successful Session anchor could not be read: {exc}"
+        contexts.append(context)
+    return contexts
+
+
+def _bounded_success_evidence(value: Any) -> list[dict[str, str]]:
+    items = [
+        item.model_dump(mode="json")
+        for item in _parse_evidence(value)
+        if item.kind != "system_message"
+    ]
+    clipped = [
+        {
+            **item,
+            "summary": clip_evidence_summary(
+                item["kind"],
+                item["summary"],
+                _MAX_SUCCESS_EVIDENCE_ITEM_CHARS,
+            ),
+        }
+        for item in items
+    ]
+    if sum(len(item["summary"]) for item in clipped) <= _MAX_SUCCESS_WITNESS_CHARS:
+        return clipped
+
+    selected: dict[int, dict[str, str]] = {}
+    used = 0
+    head_budget = _MAX_SUCCESS_WITNESS_CHARS // 3
+    for index, item in enumerate(clipped):
+        size = len(item["summary"])
+        if used + size > head_budget:
+            break
+        selected[index] = item
+        used += size
+    for index in range(len(clipped) - 1, -1, -1):
+        item = clipped[index]
+        size = len(item["summary"])
+        if index in selected or used + size > _MAX_SUCCESS_WITNESS_CHARS:
+            continue
+        selected[index] = item
+        used += size
+    return [selected[index] for index in sorted(selected)]
+
+
+def _stored_session_contexts(contexts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            key: value
+            for key, value in context.items()
+            if key not in {"evidence", "experience_execution", "error"}
+        }
+        for context in contexts
+        if context.get("source_session_uri")
+    ]
+
+
+def _first_source_session_uri(contexts: list[dict[str, Any]]) -> str:
+    return next(
+        (str(item["source_session_uri"]) for item in contexts if item.get("source_session_uri")),
+        "",
+    )
 
 
 def _plan_item_identity(item: Any) -> str:

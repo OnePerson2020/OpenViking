@@ -42,6 +42,7 @@ from openviking_cli.utils.config.agent_evolution_config import DagDeciderConfig
 async def test_two_sessions_merge_one_case_experience_and_preserve_archives(monkeypatch):
     root = "viking://user/u/memories/experiences"
     uri = f"{root}/case_a.md"
+    success_archive = "viking://user/u/sessions/s0/history/archive_001"
     baseline = 'dag = workflow("report")\nknown = ask("reservation ID")\nreport = tell("report total")\nknown.then(report)'
     candidate = baseline.replace('tell("report total")', 'tell("report the verified total")')
     fs = FakeVikingFS(
@@ -51,7 +52,17 @@ async def test_two_sessions_merge_one_case_experience_and_preserve_archives(monk
                     uri=uri,
                     content=baseline,
                     memory_type="experiences",
-                    extra_fields={"experience_name": "case_a", "version": 3},
+                    extra_fields={
+                        "experience_name": "case_a",
+                        "version": 3,
+                        "source_sessions": [
+                            {
+                                "source_session_uri": success_archive,
+                                "passed": True,
+                                "score": 1.0,
+                            }
+                        ],
+                    },
                 )
             )
         }
