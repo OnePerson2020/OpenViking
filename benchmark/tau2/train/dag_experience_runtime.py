@@ -8,6 +8,8 @@ import uuid
 from typing import Any
 
 GUIDANCE_MARKER = "[DAG Experience Guidance]"
+_MAX_EVIDENCE_SUMMARY_CHARS = 4096
+_TRUNCATION_SUFFIX = "...[truncated]"
 
 
 class Tau2DagExperienceRuntime:
@@ -86,7 +88,12 @@ def _execution_evidence(messages: list[dict[str, Any]]) -> tuple[list[dict[str, 
         role = str(message.get("role", "unknown"))
         name = str(message.get("name", "") or "")
         kind = "tool_result" if role == "tool" else f"{role}_message"
-        evidence.append({"id": evidence_id, "kind": kind, "summary": content[:4096]})
+        summary = (
+            _tool_evidence_summary(name, content)
+            if role == "tool"
+            else content[:_MAX_EVIDENCE_SUMMARY_CHARS]
+        )
+        evidence.append({"id": evidence_id, "kind": kind, "summary": summary})
         context.append(
             {
                 "evidence_id": evidence_id,
@@ -96,6 +103,35 @@ def _execution_evidence(messages: list[dict[str, Any]]) -> tuple[list[dict[str, 
             }
         )
     return evidence, json.dumps(context, ensure_ascii=False)
+
+
+def _tool_evidence_summary(tool_name: str, tool_output: str) -> str:
+    """Keep tool identity visible to Jev while preserving a valid bounded JSON value."""
+    bounded_name = tool_name[:512] or None
+
+    def render(output: str) -> str:
+        return json.dumps(
+            {"tool_name": bounded_name, "tool_output": output},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    complete = render(tool_output)
+    if len(complete) <= _MAX_EVIDENCE_SUMMARY_CHARS:
+        return complete
+
+    low = 0
+    high = len(tool_output)
+    best = render(_TRUNCATION_SUFFIX)
+    while low <= high:
+        midpoint = (low + high) // 2
+        candidate = render(tool_output[:midpoint] + _TRUNCATION_SUFFIX)
+        if len(candidate) <= _MAX_EVIDENCE_SUMMARY_CHARS:
+            best = candidate
+            low = midpoint + 1
+        else:
+            high = midpoint - 1
+    return best
 
 
 def _action_outcomes(

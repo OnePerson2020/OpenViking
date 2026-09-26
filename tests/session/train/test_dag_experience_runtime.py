@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -68,17 +69,50 @@ async def test_autorecall_uses_live_evidence_and_one_session():
     evidence = client.search_exp.call_args.kwargs["evidence"]
     assert "Order confirmed" in context and "Order 123" in context
     assert "old action" not in context and "An old SOP" not in context and "private" not in context
-    assert evidence == [
+    assert evidence[:2] == [
         {"id": "message:0", "kind": "user_message", "summary": "Order 123"},
         {"id": "message:3", "kind": "assistant_message", "summary": "Checking"},
-        {"id": "message:4", "kind": "tool_result", "summary": "Order confirmed"},
     ]
+    assert evidence[2]["id"] == "message:4"
+    assert evidence[2]["kind"] == "tool_result"
+    assert json.loads(evidence[2]["summary"]) == {
+        "tool_name": "query_order",
+        "tool_output": "Order confirmed",
+    }
     assert runtime.events[0]["action_outcomes"] == [
         {"node_id": 1, "slot_name": "known", "status": "issued"}
     ]
     assert len(runtime.events) == 2
     await runtime.close()
     client.close.assert_awaited_once()
+
+
+def test_tool_evidence_summary_is_valid_json_after_bounded_truncation():
+    from benchmark.tau2.train.dag_experience_runtime import _execution_evidence
+
+    evidence, _ = _execution_evidence(
+        [
+            {
+                "role": "assistant",
+                "content": "I will cancel the reservation now.",
+            },
+            {
+                "role": "tool",
+                "name": "cancel_reservation",
+                "content": 'result with quotes " and slashes \\' * 1000,
+            },
+        ]
+    )
+
+    assert evidence[0] == {
+        "id": "message:0",
+        "kind": "assistant_message",
+        "summary": "I will cancel the reservation now.",
+    }
+    assert len(evidence[1]["summary"]) <= 4096
+    parsed = json.loads(evidence[1]["summary"])
+    assert parsed["tool_name"] == "cancel_reservation"
+    assert parsed["tool_output"].endswith("...[truncated]")
 
 
 @pytest.mark.asyncio
