@@ -7,6 +7,7 @@ import asyncio
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -31,7 +32,6 @@ from openviking.session.train import (
     Rubric,
     RubricCriterion,
     RubricEvaluation,
-    Trajectory,
 )
 from openviking.session.train.components.reporter import ConsolePipelineReporter
 
@@ -58,6 +58,12 @@ def _case() -> Case:
 
 class DummyVikingFS:
     def __init__(self):
+        from unittest.mock import AsyncMock
+
+        self._async_agfs = SimpleNamespace(
+            pathlock_acquire_tree=AsyncMock(return_value="test-lease"),
+            pathlock_release=AsyncMock(),
+        )
         self.reloads = 0
         self.version = 1
 
@@ -169,15 +175,10 @@ class DummyAnalyzer:
                 criterion_results=[],
                 feedback=[],
             ),
-            trajectories=[
-                Trajectory(
-                    name=rollout.case.task_signature,
-                    uri=f"viking://user/u/memories/trajectories/{rollout.case.name}.md",
-                    content="trajectory content",
-                    outcome="success",
-                    retrieval_anchor="Stage: final; Capability: duplicate booking handling",
-                )
-            ],
+            rollout=rollout,
+            metadata={
+                "source_session_uri": f"viking://user/u/sessions/{rollout.case.name}/history/archive_001"
+            },
         )
 
 
@@ -188,17 +189,16 @@ class DummyEstimator:
         experience_set: ExperienceSet,
         context: Any,
     ) -> list[DummyGradient]:
-        traj = analysis.trajectories[0]
         return [
             DummyGradient(
                 target_name="booking_duplicate_handling",
                 target_uri=experience_set.policies[0].uri,
                 base_version=experience_set.policies[0].version,
-                rationale="trajectory succeeded",
+                rationale="Session succeeded",
                 links=[
                     StoredLink(
                         from_uri=experience_set.policies[0].uri,
-                        to_uri=traj.uri,
+                        to_uri=analysis.metadata["source_session_uri"],
                         link_type="derived_from",
                         weight=1.0,
                     )
@@ -745,7 +745,7 @@ async def test_batch_policy_trainer_trains_from_rollout_batch():
 
 
 @pytest.mark.asyncio
-async def test_streaming_policy_trainer_scopes_concurrent_submit_results_by_source_trajectory():
+async def test_streaming_policy_trainer_scopes_concurrent_submit_results_by_source_session():
     from openviking.session.train import (
         PolicyPlanItem,
         StreamingPolicyTrainer,
@@ -762,32 +762,27 @@ async def test_streaming_policy_trainer_scopes_concurrent_submit_results_by_sour
                     criterion_results=[],
                     feedback=[],
                 ),
-                trajectories=[
-                    Trajectory(
-                        name=rollout.case.name,
-                        uri=f"viking://user/u/memories/trajectories/{rollout.case.name}.md",
-                        content=f"trajectory {rollout.case.name}",
-                        outcome="success",
-                        retrieval_anchor="",
-                    )
-                ],
+                rollout=rollout,
+                metadata={
+                    "source_session_uri": f"viking://user/u/sessions/{rollout.case.name}/history/archive_001"
+                },
             )
 
     class NewExpEstimator:
         async def estimate(self, analysis, experience_set, context):
             del context
-            traj = analysis.trajectories[0]
-            target_uri = f"{experience_set.root_uri}/{traj.name}.md"
+            case = analysis.rollout.case
+            target_uri = f"{experience_set.root_uri}/{case.name}.md"
             return [
                 DummyGradient(
-                    target_name=traj.name,
+                    target_name=case.name,
                     target_uri=target_uri,
                     base_version=None,
                     rationale="new scoped experience",
                     links=[
                         StoredLink(
                             from_uri=target_uri,
-                            to_uri=traj.uri,
+                            to_uri=analysis.metadata["source_session_uri"],
                             link_type="derived_from",
                             weight=1.0,
                         )
@@ -965,7 +960,6 @@ async def test_streaming_policy_trainer_splits_flush_by_gradient_count():
     class MultiGradientEstimator:
         async def estimate(self, analysis, experience_set, context):
             del context
-            traj = analysis.trajectories[0]
             return [
                 DummyGradient(
                     target_name="booking_duplicate_handling",
@@ -975,7 +969,7 @@ async def test_streaming_policy_trainer_splits_flush_by_gradient_count():
                     links=[
                         StoredLink(
                             from_uri=experience_set.policies[0].uri,
-                            to_uri=traj.uri,
+                            to_uri=analysis.metadata["source_session_uri"],
                             link_type="derived_from",
                             weight=1.0,
                         )
@@ -1035,7 +1029,6 @@ async def test_streaming_policy_trainer_chunks_multiple_target_gradients_by_coun
     class MultiTargetEstimator:
         async def estimate(self, analysis, experience_set, context):
             del context
-            traj = analysis.trajectories[0]
             return [
                 DummyGradient(
                     target_name=f"target_{idx}",
@@ -1045,7 +1038,7 @@ async def test_streaming_policy_trainer_chunks_multiple_target_gradients_by_coun
                     links=[
                         StoredLink(
                             from_uri=f"{experience_set.root_uri}/target_{idx}.md",
-                            to_uri=traj.uri,
+                            to_uri=analysis.metadata["source_session_uri"],
                             link_type="derived_from",
                             weight=1.0,
                         )
@@ -1258,7 +1251,7 @@ async def test_session_commit_policy_trainer_records_commit_trace_id():
             commit_result["session_id"],
             {
                 "memory_policy": {
-                    "memory_types": ["cases", "trajectories", "experiences"],
+                    "memory_types": ["cases", "experiences"],
                     "working_memory": {"enabled": False},
                 }
             },

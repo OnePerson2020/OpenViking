@@ -5,15 +5,11 @@ import pytest
 
 from openviking.message import Message, ToolPart
 from openviking.server.identity import RequestContext, Role
-from openviking.session.memory.dataclass import ResolvedOperation, ResolvedOperations
 from openviking.session.memory.experience_lineage import (
     collect_read_experience_uris,
     experience_source_tag,
     normalize_trajectory_outcome,
     trajectory_outcome_tag,
-)
-from openviking.session.train.components.trajectory_analyzer import (
-    _trajectory_search_tags_by_uri,
 )
 from openviking.utils.tags import build_search_tags_filter, merge_search_tags, normalize_search_tags
 from openviking_cli.session.user_id import UserIdentifier
@@ -217,47 +213,6 @@ def test_experience_source_tag_preserves_case_and_escapes_equals_without_collisi
     assert uppercase_tag.count("=") == 1
     assert lowercase_tag.count("=") == 1
     assert merge_search_tags([uppercase_tag], [lowercase_tag]) == [uppercase_tag, lowercase_tag]
-
-
-def test_source_experiences_create_transient_tags_for_every_generated_trajectory():
-    first_uri = "viking://user/alice/memories/experiences/exchange.md"
-    second_uri = "viking://user/alice/memories/experiences/refund.md"
-    operations = ResolvedOperations(
-        upsert_operations=[
-            ResolvedOperation(
-                memory_fields={"trajectory_name": "exchange", "outcome": "success"},
-                memory_type="trajectories",
-                uris=["viking://user/alice/memories/trajectories/exchange.md"],
-            ),
-            ResolvedOperation(
-                memory_fields={"trajectory_name": "refund", "outcome": "failure"},
-                memory_type="trajectories",
-                uris=["viking://user/alice/memories/trajectories/refund.md"],
-            ),
-        ],
-        delete_file_contents=[],
-        errors=[],
-    )
-
-    tags_by_uri = _trajectory_search_tags_by_uri(
-        operations,
-        [first_uri, second_uri, first_uri],
-    )
-
-    assert tags_by_uri == {
-        "viking://user/alice/memories/trajectories/exchange.md": [
-            experience_source_tag(first_uri),
-            experience_source_tag(second_uri),
-            "trajectory_outcome=success",
-        ],
-        "viking://user/alice/memories/trajectories/refund.md": [
-            experience_source_tag(first_uri),
-            experience_source_tag(second_uri),
-            "trajectory_outcome=failure",
-        ],
-    }
-    for operation in operations.upsert_operations:
-        assert "source_experience_uris" not in operation.memory_fields
 
 
 def test_trajectory_outcome_tag_normalizes_unknown_values():

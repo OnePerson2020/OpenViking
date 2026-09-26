@@ -89,7 +89,7 @@ class SessionSkillContextProvider(SessionExtractContextProvider):
     def instruction(self) -> str:
         return (
             "You are an extraction agent. Analyze the archived conversation, use read when "
-            "needed, and output only JSON that matches the schema descriptions."
+            "needed, and output only restricted Python memory SDK code that matches the schema descriptions."
         )
 
     async def prefetch(self) -> List[Dict[str, Any]]:
@@ -118,8 +118,7 @@ class SessionSkillContextProvider(SessionExtractContextProvider):
                     if not entry.get("isDir", False):
                         continue
                     skill_root = (
-                        entry.get("uri")
-                        or f"{skill_root_uri.rstrip('/')}/{entry.get('name', '')}"
+                        entry.get("uri") or f"{skill_root_uri.rstrip('/')}/{entry.get('name', '')}"
                     )
                     skill_name = entry.get("name") or skill_root.rstrip("/").split("/")[-1]
                     if skill_name in seen_names:

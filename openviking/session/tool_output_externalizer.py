@@ -120,7 +120,9 @@ class ToolOutputExternalizer:
     # Hydration for memory extraction
     # ------------------------------------------------------------------
 
-    async def hydrate_for_extraction(self, messages: List[Message]) -> List[Message]:
+    async def hydrate_for_extraction(
+        self, messages: List[Message], *, strict: bool = False
+    ) -> List[Message]:
         """Return a sanitized memory-only copy with externalized tool outputs restored."""
         hydrated = [Message.from_dict(m.to_dict()) for m in messages]
         store = self.tool_result_store()
@@ -154,6 +156,10 @@ class ToolOutputExternalizer:
                         include_metadata=False,
                     )
                 except Exception as exc:
+                    if strict:
+                        raise FailedPreconditionError(
+                            f"Cannot replay Session with missing tool evidence: {ref}"
+                        ) from exc
                     logger.warning(
                         "Failed to hydrate externalized tool output for extraction: "
                         "session=%s message_id=%s tool_id=%s ref=%s error=%s",

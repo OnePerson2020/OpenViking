@@ -187,19 +187,17 @@ class RubricEvaluation:
 
 @dataclass(slots=True)
 class RolloutAnalysis:
-    """Structured analysis of a rollout.
+    """Session evidence and optional independent policy gradients.
 
-    Contains both rubric evaluation and trajectories extracted from the same
-    rollout context.  ``gradients`` carries any policy patches co-extracted
-    during analysis (e.g. session skill patches) keyed by their
-    ``memory_type``; these bypass the gradient estimator and are fed directly
-    into the corresponding policy trainer.
+    Direct Experience learning carries the original rollout. Evaluation may be unknown;
+    the generic framework's legacy trajectory collection stays empty in Agent Evolution.
     """
 
-    evaluation: RubricEvaluation
-    trajectories: list[Trajectory]
+    evaluation: RubricEvaluation | None
+    trajectories: list[Trajectory] = field(default_factory=list)
     gradients: list["PatchSemanticGradient"] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    rollout: Rollout | None = None
 
 
 @dataclass(slots=True)

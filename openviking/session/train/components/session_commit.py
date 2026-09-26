@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from openviking.session.train.components.progress import run_with_progress
-from openviking.session.train.components.trajectory_analyzer import (
+from openviking.session.train.components.session_analyzer import (
     experience_execution_from_runtime,
 )
 from openviking.session.train.context import PipelineContext
@@ -29,7 +29,7 @@ from openviking.session.train.domain import (
 from openviking.session.train.utils import average_score, validate_rollouts_have_cases
 from openviking_cli.client.http import AsyncHTTPClient
 
-_TRAINING_COMMIT_MEMORY_TYPES = ("cases", "trajectories", "experiences")
+_TRAINING_COMMIT_MEMORY_TYPES = ("cases", "experiences")
 _TRAINING_CASE_SPEC_PROTOCOL = "openviking.batch_train.case_spec.v1"
 _TRAINING_CASE_SPEC_HEADER = "# OpenViking Batch Training CaseSpec v1"
 _SESSION_BATCH_ADD_MESSAGE_LIMIT = 100

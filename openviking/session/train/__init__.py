@@ -61,13 +61,13 @@ from openviking.session.train.components.rollout_executor import (
     SingleTurnLLMRolloutExecutor,
     default_single_turn_prompt,
 )
+from openviking.session.train.components.session_analyzer import (
+    SessionAnalyzerContext,
+    SessionRolloutAnalyzer,
+)
 from openviking.session.train.components.session_commit import SessionCommitPolicyTrainer
 from openviking.session.train.components.skill_policy_updater import SkillPolicyUpdater
 from openviking.session.train.components.snapshotter import ContentHashPolicySnapshotter
-from openviking.session.train.components.trajectory_analyzer import (
-    TrajectoryAnalyzerContext,
-    TrajectoryRolloutAnalyzer,
-)
 from openviking.session.train.context import (
     ExecutionContext,
     PipelineContext,
@@ -133,8 +133,8 @@ __all__ = [
     "ExperienceGradientEstimator",
     "ExperienceGradientContext",
     "ExperienceImprovementGate",
-    "TrajectoryRolloutAnalyzer",
-    "TrajectoryAnalyzerContext",
+    "SessionRolloutAnalyzer",
+    "SessionAnalyzerContext",
     "PatchMergePolicyOptimizer",
     "PatchMergePolicyOptimizerContext",
     "PolicyTrainer",

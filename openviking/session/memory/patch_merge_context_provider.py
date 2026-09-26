@@ -128,8 +128,10 @@ class PatchMergeContextProvider(SessionExtractContextProvider):
         output_language: str | None = None,
         memory_registry: MemoryTypeRegistry | None = None,
         vlm_config: VLMHandle | None = None,
+        fixed_target: bool = False,
     ):
         super().__init__(messages=[], vlm_config=vlm_config)
+        self.fixed_target = fixed_target
         self.memory_type = memory_type
         self._registry = memory_registry
         self.required_file_uris = list(required_file_uris or [])
@@ -138,6 +140,16 @@ class PatchMergeContextProvider(SessionExtractContextProvider):
 
     def instruction(self) -> str:
         output_language = self._output_language
+        if self.fixed_target:
+            target = self.patches[0]
+            return f"""Merge the Session proposals for ONE canonical Case Experience.
+The only target is {target.target_uri}; keep the exact name {target.target_name!r}.
+The prefetched file is the latest stored version. Proposals can be based on older
+versions: apply their intended changes to the latest file while preserving unrelated
+changes and successful paths. Return one full standalone Python DAG, or no operations
+if the proposals add no useful change. Never rename, delete, supersede, create another
+Experience, or merge another Case. Output restricted Python memory SDK code only.
+Keep the fixed name; write natural-language DAG descriptions in {output_language}."""
         return f"""You are a memory patch merge agent.
 
 You are given original memory files and structured memory-file field diffs. Merge them by producing final memory operations that follow the provided JSON schema.
@@ -194,7 +206,7 @@ canonical replacement; if it is only a duplicate new proposal, omit it.
         """Resolve required files plus semantic-search candidates for this merge."""
 
         required_uris = _dedupe_uris(self.required_file_uris)
-        if not any(patch.before_file is None for patch in self.patches):
+        if self.fixed_target or not any(patch.before_file is None for patch in self.patches):
             return required_uris
 
         max_extra_candidate_files = min(_MAX_EXTRA_CANDIDATE_FILES, max(5, len(required_uris)))

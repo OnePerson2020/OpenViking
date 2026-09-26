@@ -307,13 +307,17 @@ async def test_dry_run_policy_updater_does_not_mutate_policy_set():
 @pytest.mark.asyncio
 async def test_dry_run_policy_updater_simulates_patch_plan_items():
     policy_set = _experience_set()
-    gradient = _patch_gradient(uri=policy_set.policies[0].uri, before="content", after="new content")
+    gradient = _patch_gradient(
+        uri=policy_set.policies[0].uri,
+        before="content",
+        after='dag = workflow("new content")\nstep = tell("new content")',
+    )
     plan = _plan_from_gradient(gradient)
 
     result = await DryRunPolicyUpdater().apply(plan, policy_set)
 
     assert result.updated_policy_set is not policy_set
-    assert result.updated_policy_set.policies[0].content == "new content"
+    assert "new content" in result.updated_policy_set.policies[0].content
     assert result.updated_policy_set.policies[0].version == 2
     assert result.written_uris == []
     assert result.metadata["dry_run"] is True
@@ -342,7 +346,7 @@ async def test_memory_file_policy_updater_writes_experience_files():
     gradient = _patch_gradient(
         uri=policy_set.policies[0].uri,
         before="content",
-        after="new content",
+        after='dag = workflow("new content")\nstep = tell("new content")',
         links=[],
     )
     plan = _plan_from_gradient(gradient)
@@ -356,7 +360,7 @@ async def test_memory_file_policy_updater_writes_experience_files():
     assert result.errors == []
     assert result.written_uris == [policy_set.policies[0].uri]
     written = fs.files[policy_set.policies[0].uri]
-    assert written.startswith("new content")
+    assert written.startswith('dag = workflow("new content")')
     assert '"memory_type": "experiences"' in written
     assert '"experience_name": "booking_duplicate_handling"' in written
     assert '"version": 2' in written
@@ -370,7 +374,7 @@ async def test_memory_file_policy_updater_does_not_expand_lock_without_trajector
     gradient = _patch_gradient(
         uri=policy_set.policies[0].uri,
         before="content",
-        after="new content",
+        after='dag = workflow("new content")\nstep = tell("new content")',
         links=[],
     )
     plan = _plan_from_gradient(gradient)
@@ -397,7 +401,7 @@ async def test_memory_file_policy_updater_vectorizes_written_experience_files():
     gradient = _patch_gradient(
         uri=policy_set.policies[0].uri,
         before="content",
-        after="new content",
+        after='dag = workflow("new content")\nstep = tell("new content")',
         links=[],
     )
     plan = _plan_from_gradient(gradient)
@@ -418,216 +422,6 @@ async def test_memory_file_policy_updater_vectorizes_written_experience_files():
     assert embedding_msg.context_data["uri"] == policy_set.policies[0].uri
     assert embedding_msg.context_data["context_type"] == "memory"
     assert "new content" in embedding_msg.message
-
-
-@pytest.mark.asyncio
-async def test_memory_file_policy_updater_writes_v2_compatible_source_trajectory_links():
-    policy_set = _experience_set()
-    exp_uri = policy_set.policies[0].uri
-    traj_uri = "viking://user/u/memories/trajectories/booking_duplicate.md"
-    ctx = fake_request_context()
-    transaction_lease = {"lease_ref": "experience-tree-lease"}
-    fs = FakeVikingFS(
-        {
-            traj_uri: MemoryFileUtils.write(
-                MemoryFile(
-                    uri=traj_uri,
-                    content="trajectory content",
-                    memory_type="trajectories",
-                    extra_fields={
-                        "memory_type": "trajectories",
-                        "trajectory_name": "booking_duplicate",
-                    },
-                )
-            )
-        }
-    )
-    gradient = _patch_gradient(
-        uri=exp_uri,
-        before="content",
-        after="new content",
-        links=[
-            StoredLink(
-                from_uri=exp_uri,
-                to_uri=traj_uri,
-                link_type="derived_from",
-                weight=1.0,
-            )
-        ],
-    )
-    plan = _plan_from_gradient(gradient)
-
-    result = await MemoryFilePolicyUpdater(viking_fs=fs).apply(
-        plan,
-        policy_set,
-        ctx,
-        transaction_handle=transaction_lease,
-    )
-
-    assert result.errors == []
-    assert len(fs._async_agfs.acquire_calls) == 1
-    acquire_call = fs._async_agfs.acquire_calls[0]
-    assert acquire_call["exact_paths"] == [fs._uri_to_path(traj_uri, ctx=ctx)]
-    assert acquire_call["tree_paths"] == [fs._uri_to_path(policy_set.root_uri, ctx=ctx)]
-    assert acquire_call["timeout_secs"] == 300.0
-    assert acquire_call["owner_lease_ref"] is transaction_lease
-    combined_lease = acquire_call["lease"]
-    assert fs._async_agfs.release_calls == [combined_lease]
-    relevant_write_leases = [
-        lease for uri, lease in fs.write_lock_handles if uri in {exp_uri, traj_uri}
-    ]
-    assert relevant_write_leases
-    assert all(lease is combined_lease for lease in relevant_write_leases)
-
-    exp_mf = MemoryFileUtils.read(fs.files[exp_uri], uri=exp_uri)
-    assert any(
-        link.get("from_uri") == exp_uri
-        and link.get("to_uri") == traj_uri
-        and link.get("link_type") == "derived_from"
-        and link.get("match_text") is None
-        and link.get("description") == ""
-        for link in exp_mf.links
-    )
-
-    traj_mf = MemoryFileUtils.read(fs.files[traj_uri], uri=traj_uri)
-    assert any(
-        link.get("from_uri") == exp_uri
-        and link.get("to_uri") == traj_uri
-        and link.get("link_type") == "derived_from"
-        and link.get("match_text") is None
-        and link.get("description") == ""
-        for link in traj_mf.backlinks
-    )
-
-
-@pytest.mark.asyncio
-async def test_memory_file_policy_updater_locks_and_writes_multiple_trajectory_backlinks():
-    policy_set = _experience_set()
-    exp_uri = policy_set.policies[0].uri
-    trajectory_uris = [
-        "viking://user/u/memories/trajectories/traj1.md",
-        "viking://user/u/memories/trajectories/traj2.md",
-    ]
-    ctx = fake_request_context()
-    transaction_lease = {"lease_ref": "experience-tree-lease"}
-    fs = FakeVikingFS(
-        {
-            uri: MemoryFileUtils.write(
-                MemoryFile(
-                    uri=uri,
-                    content=f"trajectory content {index}",
-                    memory_type="trajectories",
-                    extra_fields={
-                        "memory_type": "trajectories",
-                        "trajectory_name": f"traj{index}",
-                    },
-                )
-            )
-            for index, uri in enumerate(trajectory_uris, start=1)
-        }
-    )
-    gradient = _patch_gradient(
-        uri=exp_uri,
-        before="content",
-        after="new content",
-        links=[
-            StoredLink(
-                from_uri=exp_uri,
-                to_uri=uri,
-                link_type="derived_from",
-                weight=1.0,
-            )
-            for uri in trajectory_uris
-        ],
-    )
-
-    result = await MemoryFilePolicyUpdater(viking_fs=fs).apply(
-        _plan_from_gradient(gradient),
-        policy_set,
-        ctx,
-        transaction_handle=transaction_lease,
-    )
-
-    assert result.errors == []
-    assert len(fs._async_agfs.acquire_calls) == 1
-    acquire_call = fs._async_agfs.acquire_calls[0]
-    assert acquire_call["exact_paths"] == sorted(
-        fs._uri_to_path(uri, ctx=ctx) for uri in trajectory_uris
-    )
-    assert acquire_call["tree_paths"] == [fs._uri_to_path(policy_set.root_uri, ctx=ctx)]
-    assert acquire_call["owner_lease_ref"] is transaction_lease
-    combined_lease = acquire_call["lease"]
-    assert fs._async_agfs.release_calls == [combined_lease]
-
-    exp_mf = MemoryFileUtils.read(fs.files[exp_uri], uri=exp_uri)
-    assert {link["to_uri"] for link in exp_mf.links} == set(trajectory_uris)
-    for trajectory_uri in trajectory_uris:
-        trajectory_mf = MemoryFileUtils.read(
-            fs.files[trajectory_uri],
-            uri=trajectory_uri,
-        )
-        assert any(
-            link.get("from_uri") == exp_uri and link.get("to_uri") == trajectory_uri
-            for link in trajectory_mf.backlinks
-        )
-
-
-@pytest.mark.asyncio
-async def test_memory_file_policy_updater_propagates_combined_lock_failure_before_writes():
-    policy_set = _experience_set()
-    exp_uri = policy_set.policies[0].uri
-    traj_uri = "viking://user/u/memories/trajectories/traj1.md"
-    initial_files = {
-        exp_uri: MemoryFileUtils.write(
-            _memory_file(
-                name="booking_duplicate_handling",
-                uri=exp_uri,
-                content="content",
-                version=1,
-            )
-        ),
-        traj_uri: MemoryFileUtils.write(
-            MemoryFile(
-                uri=traj_uri,
-                content="trajectory content",
-                memory_type="trajectories",
-                extra_fields={"memory_type": "trajectories", "trajectory_name": "traj1"},
-            )
-        ),
-    }
-    fs = FakeVikingFS(
-        dict(initial_files),
-        lock_acquire_error=LockAcquisitionError("combined lock timed out"),
-    )
-    gradient = _patch_gradient(
-        uri=exp_uri,
-        before="content",
-        after="new content",
-        links=[
-            StoredLink(
-                from_uri=exp_uri,
-                to_uri=traj_uri,
-                link_type="derived_from",
-                weight=1.0,
-            )
-        ],
-    )
-
-    with pytest.raises(LockAcquisitionError, match="combined lock timed out"):
-        await MemoryFilePolicyUpdater(viking_fs=fs).apply(
-            _plan_from_gradient(gradient),
-            policy_set,
-            fake_request_context(),
-            transaction_handle={"lease_ref": "experience-tree-lease"},
-        )
-
-    assert len(fs._async_agfs.acquire_calls) == 1
-    assert fs._async_agfs.release_calls == []
-    assert fs.write_lock_handles == []
-    assert fs.files == initial_files
-    persisted_exp = MemoryFileUtils.read(fs.files[exp_uri], uri=exp_uri)
-    assert persisted_exp.content == "content"
-    assert persisted_exp.extra_fields["version"] == 1
 
 
 @pytest.mark.asyncio
@@ -659,7 +453,7 @@ async def test_memory_file_policy_updater_detects_base_content_mismatch():
     gradient = _patch_gradient(
         uri=policy_set.policies[0].uri,
         before="stale content",
-        after="new content",
+        after='dag = workflow("new content")\nstep = tell("new content")',
     )
     plan = _plan_from_gradient(gradient)
 
@@ -670,417 +464,6 @@ async def test_memory_file_policy_updater_detects_base_content_mismatch():
         "base content mismatch for booking_duplicate_handling: expected gradient before_content"
     ]
     assert policy_set.policies[0].uri not in fs.files
-
-
-@pytest.mark.asyncio
-async def test_patch_merge_policy_optimizer_runs_patch_merge_extract_loop(monkeypatch):
-    from openviking.session.memory.dataclass import (
-        MemoryFile,
-        ResolvedOperation,
-        ResolvedOperations,
-    )
-
-    policy_set = _experience_set()
-    gradient = _patch_gradient(
-        uri=policy_set.policies[0].uri,
-        before="stale content",
-        after="merged content",
-    )
-    captured = {}
-
-    class FakeExtractLoop:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-        async def run(self):
-            provider = captured["context_provider"]
-            captured["prefetch_messages"] = await provider.prefetch()
-            return (
-                ResolvedOperations(
-                    upsert_operations=[
-                        ResolvedOperation(
-                            old_memory_file_content=MemoryFile(
-                                uri=policy_set.policies[0].uri,
-                                content="content",
-                                memory_type="experiences",
-                                extra_fields={
-                                    "experience_name": "booking_duplicate_handling",
-                                    "version": 1,
-                                },
-                            ),
-                            memory_fields={
-                                "experience_name": "booking_duplicate_handling",
-                                "content": "merged content",
-                            },
-                            memory_type="experiences",
-                            uris=[policy_set.policies[0].uri],
-                        )
-                    ],
-                    delete_file_contents=[],
-                    errors=[],
-                ),
-                [],
-            )
-
-    monkeypatch.setattr(
-        "openviking.session.train.components.policy_optimizer.ExtractLoop",
-        FakeExtractLoop,
-    )
-
-    plan = await PatchMergePolicyOptimizer(viking_fs=FakeVikingFS({}), vlm=object()).plan(
-        [gradient],
-        policy_set,
-        PatchMergePolicyOptimizerContext(request_context=fake_request_context()),
-    )
-
-    assert plan.metadata["optimizer"] == "patch_merge"
-    assert plan.items[0].kind == "upsert"
-    assert plan.items[0].target_uri == policy_set.policies[0].uri
-    assert plan.items[0].before_content == "content"
-    assert plan.items[0].after_content == "merged content"
-    assert [link.to_uri for link in plan.items[0].links] == [
-        "viking://user/u/memories/trajectories/traj1.md"
-    ]
-    assert captured["context_provider"].__class__.__name__ == "PatchMergeContextProvider"
-    assert captured["context_provider"].get_tools() == []
-    assert "Patch 1" in captured["prefetch_messages"][-1]["content"]
-    assert "  content:" in captured["prefetch_messages"][-1]["content"]
-    assert "-stale content" in captured["prefetch_messages"][-1]["content"]
-    assert "+merged content" in captured["prefetch_messages"][-1]["content"]
-
-
-@pytest.mark.asyncio
-async def test_patch_merge_policy_optimizer_merges_all_patch_gradients_once(monkeypatch):
-    from openviking.session.memory.dataclass import (
-        ResolvedOperation,
-        ResolvedOperations,
-    )
-
-    policy_set = _experience_set()
-    root = policy_set.root_uri
-    gradients = [
-        _patch_gradient(
-            name="重复预订处理",
-            uri=f"{root}/重复预订处理.md",
-            before=None,
-            after="核对订单后只取消重复订单",
-            base_version=None,
-            rationale="r1",
-            links=[
-                StoredLink(
-                    from_uri=f"{root}/重复预订处理.md",
-                    to_uri="viking://user/u/memories/trajectories/traj1.md",
-                    link_type="derived_from",
-                    weight=1.0,
-                )
-            ],
-            confidence=0.8,
-        ),
-        _patch_gradient(
-            name="处理酒店重复预订",
-            uri=f"{root}/处理酒店重复预订.md",
-            before=None,
-            after="识别有效订单并取消重复订单",
-            base_version=None,
-            rationale="r2",
-            links=[
-                StoredLink(
-                    from_uri=f"{root}/处理酒店重复预订.md",
-                    to_uri="viking://user/u/memories/trajectories/traj2.md",
-                    link_type="derived_from",
-                    weight=1.0,
-                )
-            ],
-            confidence=0.9,
-        ),
-    ]
-    captured = {"constructed": 0}
-
-    class FakeExtractLoop:
-        def __init__(self, **kwargs):
-            captured["constructed"] += 1
-            captured.update(kwargs)
-
-        async def run(self):
-            provider = captured["context_provider"]
-            captured["prefetch_messages"] = await provider.prefetch()
-            return (
-                ResolvedOperations(
-                    upsert_operations=[
-                        ResolvedOperation(
-                            old_memory_file_content=None,
-                            memory_fields={
-                                "experience_name": "重复预订处理",
-                                "content": "合并后的重复预订处理经验",
-                            },
-                            memory_type="experiences",
-                            uris=[f"{root}/重复预订处理.md"],
-                        )
-                    ],
-                    delete_file_contents=[],
-                    errors=[],
-                ),
-                [],
-            )
-
-    monkeypatch.setattr("openviking.session.train.components.policy_optimizer.ExtractLoop", FakeExtractLoop)
-
-    plan = await PatchMergePolicyOptimizer(viking_fs=FakeVikingFS({}), vlm=object()).plan(
-        gradients,
-        policy_set,
-        PatchMergePolicyOptimizerContext(request_context=fake_request_context()),
-    )
-
-    assert captured["constructed"] == 1
-    provider = captured["context_provider"]
-    assert provider.required_file_uris == [
-        f"{root}/重复预订处理.md",
-        f"{root}/处理酒店重复预订.md",
-    ]
-    assert len(provider.patches) == 2
-    assert captured["prefetch_messages"][-1]["content"].count("\nPatch ") == 2
-    assert plan.metadata["optimizer"] == "patch_merge"
-    assert plan.metadata["patch_gradient_count"] == 2
-    assert len(plan.items) == 1
-    assert plan.items[0].target_name == "重复预订处理"
-    assert [link.to_uri for link in plan.items[0].links] == [
-        "viking://user/u/memories/trajectories/traj1.md",
-        "viking://user/u/memories/trajectories/traj2.md",
-    ]
-    assert {link.from_uri for link in plan.items[0].links} == {f"{root}/重复预订处理.md"}
-
-
-@pytest.mark.asyncio
-async def test_patch_merge_policy_optimizer_keeps_distinct_output_source_links_scoped(monkeypatch):
-    from openviking.session.memory.dataclass import (
-        ResolvedOperation,
-        ResolvedOperations,
-    )
-
-    policy_set = ExperienceSet(root_uri="viking://user/u/memories/experiences", policies=[])
-    root = policy_set.root_uri
-    gradients = [
-        _patch_gradient(
-            name="取消资格核验",
-            uri=f"{root}/取消资格核验.md",
-            before=None,
-            after="取消前核验资格",
-            base_version=None,
-            links=[
-                StoredLink(
-                    from_uri=f"{root}/取消资格核验.md",
-                    to_uri="viking://user/u/memories/trajectories/traj_cancel.md",
-                    link_type="derived_from",
-                    weight=1.0,
-                )
-            ],
-        ),
-        _patch_gradient(
-            name="退款总额传达",
-            uri=f"{root}/退款总额传达.md",
-            before=None,
-            after="多笔退款后传达总额",
-            base_version=None,
-            links=[
-                StoredLink(
-                    from_uri=f"{root}/退款总额传达.md",
-                    to_uri="viking://user/u/memories/trajectories/traj_refund.md",
-                    link_type="derived_from",
-                    weight=1.0,
-                )
-            ],
-        ),
-    ]
-
-    class FakeExtractLoop:
-        def __init__(self, **kwargs):
-            pass
-
-        async def run(self):
-            return (
-                ResolvedOperations(
-                    upsert_operations=[
-                        ResolvedOperation(
-                            old_memory_file_content=None,
-                            memory_fields={
-                                "experience_name": "取消资格核验",
-                                "content": "取消前核验资格",
-                            },
-                            memory_type="experiences",
-                            uris=[f"{root}/取消资格核验.md"],
-                        ),
-                        ResolvedOperation(
-                            old_memory_file_content=None,
-                            memory_fields={
-                                "experience_name": "退款总额传达",
-                                "content": "多笔退款后传达总额",
-                            },
-                            memory_type="experiences",
-                            uris=[f"{root}/退款总额传达.md"],
-                        ),
-                    ],
-                    delete_file_contents=[],
-                    errors=[],
-                ),
-                [],
-            )
-
-    monkeypatch.setattr("openviking.session.train.components.policy_optimizer.ExtractLoop", FakeExtractLoop)
-
-    plan = await PatchMergePolicyOptimizer(viking_fs=FakeVikingFS({}), vlm=object()).plan(
-        gradients,
-        policy_set,
-        PatchMergePolicyOptimizerContext(request_context=fake_request_context()),
-    )
-
-    links_by_name = {item.target_name: {link.to_uri for link in item.links} for item in plan.items}
-    assert links_by_name == {
-        "取消资格核验": {"viking://user/u/memories/trajectories/traj_cancel.md"},
-        "退款总额传达": {"viking://user/u/memories/trajectories/traj_refund.md"},
-    }
-
-
-@pytest.mark.asyncio
-async def test_patch_merge_policy_optimizer_single_canonical_output_inherits_all_source_links(monkeypatch):
-    from openviking.session.memory.dataclass import (
-        ResolvedOperation,
-        ResolvedOperations,
-    )
-
-    policy_set = ExperienceSet(root_uri="viking://user/u/memories/experiences", policies=[])
-    root = policy_set.root_uri
-    gradients = [
-        _patch_gradient(
-            name="重复预订处理",
-            uri=f"{root}/重复预订处理.md",
-            before=None,
-            after="核对订单后只取消重复订单",
-            base_version=None,
-            links=[
-                StoredLink(
-                    from_uri=f"{root}/重复预订处理.md",
-                    to_uri="viking://user/u/memories/trajectories/traj1.md",
-                    link_type="derived_from",
-                    weight=1.0,
-                )
-            ],
-        ),
-        _patch_gradient(
-            name="处理酒店重复预订",
-            uri=f"{root}/处理酒店重复预订.md",
-            before=None,
-            after="识别有效订单并取消重复订单",
-            base_version=None,
-            links=[
-                StoredLink(
-                    from_uri=f"{root}/处理酒店重复预订.md",
-                    to_uri="viking://user/u/memories/trajectories/traj2.md",
-                    link_type="derived_from",
-                    weight=1.0,
-                )
-            ],
-        ),
-    ]
-
-    class FakeExtractLoop:
-        def __init__(self, **kwargs):
-            pass
-
-        async def run(self):
-            return (
-                ResolvedOperations(
-                    upsert_operations=[
-                        ResolvedOperation(
-                            old_memory_file_content=None,
-                            memory_fields={
-                                "experience_name": "重复预订处理",
-                                "content": "合并后的重复预订处理经验",
-                            },
-                            memory_type="experiences",
-                            uris=[f"{root}/重复预订处理.md"],
-                        )
-                    ],
-                    delete_file_contents=[],
-                    errors=[],
-                ),
-                [],
-            )
-
-    monkeypatch.setattr("openviking.session.train.components.policy_optimizer.ExtractLoop", FakeExtractLoop)
-
-    plan = await PatchMergePolicyOptimizer(viking_fs=FakeVikingFS({}), vlm=object()).plan(
-        gradients,
-        policy_set,
-        PatchMergePolicyOptimizerContext(request_context=fake_request_context()),
-    )
-
-    assert len(plan.items) == 1
-    assert {link.to_uri for link in plan.items[0].links} == {
-        "viking://user/u/memories/trajectories/traj1.md",
-        "viking://user/u/memories/trajectories/traj2.md",
-    }
-
-
-@pytest.mark.asyncio
-async def test_patch_merge_policy_optimizer_runs_llm_for_single_patch(monkeypatch):
-    from openviking.session.memory.dataclass import (
-        MemoryFile,
-        ResolvedOperation,
-        ResolvedOperations,
-    )
-
-    policy_set = _experience_set()
-    gradient = _patch_gradient(
-        uri=policy_set.policies[0].uri,
-        before="content",
-        after="merged update",
-    )
-    captured = {"constructed": False}
-
-    class FakeExtractLoop:
-        def __init__(self, **kwargs):
-            captured["constructed"] = True
-            captured.update(kwargs)
-
-        async def run(self):
-            return (
-                ResolvedOperations(
-                    upsert_operations=[
-                        ResolvedOperation(
-                            old_memory_file_content=MemoryFile(
-                                uri=policy_set.policies[0].uri,
-                                content="content",
-                                memory_type="experiences",
-                                extra_fields={
-                                    "experience_name": "booking_duplicate_handling",
-                                    "version": 1,
-                                },
-                            ),
-                            memory_fields={
-                                "experience_name": "booking_duplicate_handling",
-                                "content": "merged update",
-                            },
-                            memory_type="experiences",
-                            uris=[policy_set.policies[0].uri],
-                        )
-                    ],
-                    delete_file_contents=[],
-                    errors=[],
-                ),
-                [],
-            )
-
-    monkeypatch.setattr("openviking.session.train.components.policy_optimizer.ExtractLoop", FakeExtractLoop)
-
-    plan = await PatchMergePolicyOptimizer(viking_fs=FakeVikingFS({}), vlm=object()).plan(
-        [gradient],
-        policy_set,
-        PatchMergePolicyOptimizerContext(request_context=fake_request_context()),
-    )
-
-    assert captured["constructed"] is True
-    assert plan.metadata["patch_gradient_count"] == 1
-    assert plan.items[0].after_content == "merged update"
 
 
 @pytest.mark.asyncio
@@ -1288,3 +671,167 @@ async def test_skill_policy_creation_preserves_lock_ownership(tmp_path, monkeypa
             tracker.cleanup(msg.telemetry_id)
             unregister_telemetry(msg.telemetry_id)
         agfs.close()
+
+
+@pytest.mark.asyncio
+async def test_fixed_case_merge_groups_sessions_and_rebases_on_latest_policy(monkeypatch):
+    from openviking.session.memory.dataclass import ResolvedOperation, ResolvedOperations
+
+    policy_set = _experience_set()
+    current = policy_set.policies[0]
+    current.content = 'dag = workflow("current")\ncurrent = tell("keep concurrent update")'
+    source_uris = [f"viking://session/s{i}/archives/1" for i in range(3)]
+
+    def proposal(name, source):
+        uri = f"{policy_set.root_uri}/{name}.md"
+        return PatchSemanticGradient(
+            before_file=MemoryFile(uri=uri, content="stale base"),
+            after_file=MemoryFile(
+                uri=uri,
+                content=f"proposed {source}",
+                memory_type="experiences",
+                extra_fields={"experience_name": name},
+            ),
+            base_version=1,
+            rationale="session",
+            links=[StoredLink(from_uri=uri, to_uri=source, link_type="derived_from")],
+            confidence=0.8,
+        )
+
+    proposals = [
+        proposal(current.name, source_uris[0]),
+        proposal(current.name, source_uris[1]),
+        proposal("other_case", source_uris[2]),
+    ]
+    groups = []
+
+    async def merge(self, *, gradients, policy_set, context):
+        groups.append(gradients)
+        name = gradients[0].target_name
+        return ResolvedOperations(
+            upsert_operations=[
+                ResolvedOperation(
+                    memory_type="experiences",
+                    uris=[gradients[0].target_uri],
+                    memory_fields={
+                        "experience_name": name,
+                        "content": 'dag = workflow("merged")\nkeep = tell("keep concurrent update")',
+                    },
+                )
+            ],
+            delete_file_contents=[],
+            errors=[],
+        )
+
+    monkeypatch.setattr(PatchMergePolicyOptimizer, "_run_merge_extract_loop", merge)
+    result = await PatchMergePolicyOptimizer().plan(
+        proposals,
+        policy_set,
+        PatchMergePolicyOptimizerContext(request_context=fake_request_context()),
+    )
+    assert [len(group) for group in groups] == [2, 1]
+    assert len(result.items) == 2
+    assert result.items[0].before_content == current.content
+    assert result.items[0].base_version == current.version
+    assert {link.to_uri for link in result.items[0].links} == set(source_uris[:2])
+    assert {link.to_uri for link in result.items[1].links} == {source_uris[2]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("violation", ["rename", "delete", "cross_case", "extra"])
+async def test_fixed_case_merge_rejects_target_changes(monkeypatch, violation):
+    from unittest.mock import AsyncMock
+
+    from openviking.session.memory.dataclass import ResolvedOperation, ResolvedOperations
+
+    policy_set = _experience_set()
+    current = policy_set.policies[0]
+    file = MemoryFile(
+        uri=current.uri,
+        content="new",
+        memory_type="experiences",
+        extra_fields={"experience_name": current.name},
+    )
+    gradient = PatchSemanticGradient(
+        None,
+        file,
+        None,
+        "session",
+        [
+            StoredLink(
+                from_uri=current.uri,
+                to_uri="viking://session/s/archives/1",
+                link_type="derived_from",
+            )
+        ],
+        0.8,
+    )
+    op = ResolvedOperation(
+        memory_type="experiences",
+        uris=[current.uri],
+        memory_fields={"experience_name": current.name, "content": "new"},
+    )
+    operations = ResolvedOperations(upsert_operations=[op], delete_file_contents=[], errors=[])
+    if violation == "rename":
+        op.memory_fields["experience_name"] = "other"
+    if violation == "delete":
+        operations.delete_file_contents.append(file)
+    if violation == "cross_case":
+        op.uris = ["viking://user/u/memories/experiences/other.md"]
+    if violation == "extra":
+        operations.upsert_operations.append(op.model_copy())
+    monkeypatch.setattr(
+        PatchMergePolicyOptimizer, "_run_merge_extract_loop", AsyncMock(return_value=operations)
+    )
+    with pytest.raises(ValueError):
+        await PatchMergePolicyOptimizer().plan(
+            [gradient],
+            policy_set,
+            PatchMergePolicyOptimizerContext(request_context=fake_request_context()),
+        )
+
+
+@pytest.mark.asyncio
+async def test_policy_updater_preserves_source_archive_and_persists_replay_metadata():
+    from openviking.session.train import PolicyPlanItem
+
+    source_uri = "viking://session/s/archives/1"
+    archive_uri = source_uri + "/messages.jsonl"
+    source = '{"role":"user","content":"original archive"}'
+    fs = FakeVikingFS({archive_uri: source})
+    current = _experience_set().policies[0]
+    fs.files[current.uri] = MemoryFileUtils.write(
+        MemoryFile(
+            uri=current.uri,
+            content=current.content,
+            memory_type="experiences",
+            extra_fields={"experience_name": current.name},
+        )
+    )
+    item = PolicyPlanItem(
+        kind="upsert",
+        memory_type="experiences",
+        target_name=current.name,
+        target_uri=current.uri,
+        before_content=current.content,
+        after_content='dag = workflow("updated")\nstep = tell("updated content")',
+        links=[StoredLink(from_uri=current.uri, to_uri=source_uri, link_type="derived_from")],
+        metadata={
+            "patch_metadata": {
+                "source_sessions": [{"source_session_uri": source_uri, "passed": True}]
+            }
+        },
+    )
+    result = await MemoryFilePolicyUpdater(viking_fs=fs).apply(
+        PolicyUpdatePlan(items=[item]),
+        _experience_set(),
+        fake_request_context(),
+        transaction_handle="root-lease",
+    )
+    assert result.errors == []
+    stored = MemoryFileUtils.read(fs.files[current.uri], uri=current.uri)
+    assert stored.extra_fields["source_sessions"][0]["passed"] is True
+    assert stored.links[0]["to_uri"] == source_uri
+    assert fs.files[archive_uri] == source
+    assert source_uri not in fs.files
+    assert fs._async_agfs.acquire_calls == []

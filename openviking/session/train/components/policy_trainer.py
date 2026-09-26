@@ -263,7 +263,7 @@ class StreamingPolicyTrainer:
         Unlike ``submit_rollout``, this method skips analysis and gradient
         estimation.  It is useful for memory types whose gradients are
         produced during an earlier stage (e.g. session skills co-extracted
-        during trajectory analysis).
+        during Session analysis).
         """
         if self._closed:
             raise RuntimeError("StreamingPolicyTrainer is closed")
@@ -466,7 +466,7 @@ def _scope_training_result_to_submitter(
     items would make one trace appear to add every other concurrently flushed
     experience.  Keep the full batch result available via ``batch_result`` but
     scope the top-level fields to the submitter's analyses and source
-    trajectories.
+    Sessions.
     """
 
     analysis = submitter.analysis
@@ -511,31 +511,49 @@ def _scope_plan_to_analysis(
     analysis: RolloutAnalysis,
     apply_result: PolicyApplyResult,
 ) -> PolicyUpdatePlan:
-    trajectory_uris = _analysis_trajectory_uris(analysis)
+    session_uris = _analysis_session_uris(analysis)
     scoped_items = [
         item
         for item in list(getattr(plan, "items", []) or [])
-        if _plan_item_belongs_to_trajectories(
+        if _plan_item_belongs_to_sessions(
             item,
-            trajectory_uris=trajectory_uris,
+            session_uris=session_uris,
+            case_name=analysis.rollout.case.name if analysis.rollout else None,
         )
     ]
     metadata = dict(getattr(plan, "metadata", {}) or {})
+    gate = metadata.get("experience_improvement_gate")
+    if isinstance(gate, dict) and analysis.rollout is not None:
+        candidates = [
+            candidate
+            for candidate in gate.get("candidates", [])
+            if candidate.get("target_name") == analysis.rollout.case.name
+        ]
+        metadata["experience_improvement_gate"] = {
+            **gate,
+            "candidates": candidates,
+            "accepted_count": sum(bool(item.get("passed")) for item in candidates),
+            "rejected_count": sum(not item.get("passed") for item in candidates),
+            "passed": bool(candidates) and all(item.get("passed") for item in candidates),
+        }
     metadata.update(
         {
-            "scoped_to_trajectory_uris": sorted(trajectory_uris),
+            "scoped_to_session_uris": sorted(session_uris),
             "unscoped_item_count": len(getattr(plan, "items", []) or []),
         }
     )
     return PolicyUpdatePlan(items=scoped_items, metadata=metadata)
 
 
-def _plan_item_belongs_to_trajectories(
+def _plan_item_belongs_to_sessions(
     item: Any,
     *,
-    trajectory_uris: set[str],
+    session_uris: set[str],
+    case_name: str | None = None,
 ) -> bool:
-    if not trajectory_uris:
+    if not session_uris:
+        return False
+    if case_name and item.memory_type == "experiences" and item.target_name != case_name:
         return False
     for link in getattr(item, "links", []) or []:
         try:
@@ -549,10 +567,10 @@ def _plan_item_belongs_to_trajectories(
                 continue
         except Exception:
             continue
-        if link_type == "derived_from" and to_uri in trajectory_uris:
+        if link_type == "derived_from" and to_uri in session_uris:
             return True
     # Deletes may not carry fresh links when a merged replacement owns the
-    # source trajectory links. Keep only upserts in submitter-scoped views.
+    # source Session links. Keep only upserts in submitter-scoped views.
     return False
 
 
@@ -584,12 +602,9 @@ def _scope_apply_result_to_plan(
     )
 
 
-def _analysis_trajectory_uris(analysis: RolloutAnalysis) -> set[str]:
-    return {
-        str(getattr(trajectory, "uri", "") or "")
-        for trajectory in getattr(analysis, "trajectories", []) or []
-        if str(getattr(trajectory, "uri", "") or "")
-    }
+def _analysis_session_uris(analysis: RolloutAnalysis) -> set[str]:
+    uri = str(analysis.metadata.get("source_session_uri") or "")
+    return {uri} if uri else set()
 
 
 def _plan_item_uri(item: Any, root_uri: str) -> str:

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from openviking.core.namespace import is_session_uri
 from openviking.session.memory.dataclass import (
     MemoryFile,
     ResolvedOperation,
@@ -101,38 +102,21 @@ class MemoryFilePolicyUpdater:
             policy_set=policy_set,
             updated_policy_set=updated_policy_set,
         )
-        trajectory_uris = sorted({link.to_uri for link in operations.resolved_links if link.to_uri})
         operation_lease = transaction_handle
-        combined_lease = None
-        if trajectory_uris:
-            uri_to_path = getattr(viking_fs, "_uri_to_path", None)
-            if not callable(uri_to_path):
-                raise RuntimeError("VikingFS must provide _uri_to_path for policy link locking")
-            combined_lease = await viking_fs._async_agfs.pathlock_acquire_exact_tree_batch(
-                sorted(uri_to_path(uri, ctx=context) for uri in trajectory_uris),
-                [uri_to_path(policy_set.root_uri, ctx=context)],
-                timeout_secs=300.0,
-                owner_lease_ref=transaction_handle,
-            )
-            operation_lease = combined_lease
 
-        try:
-            updater = MemoryUpdater(
-                registry=get_default_registry(),
-                vikingdb=self.vikingdb,
-                transaction_handle=operation_lease,
-            )
-            updater._viking_fs = viking_fs
+        updater = MemoryUpdater(
+            registry=get_default_registry(),
+            vikingdb=self.vikingdb,
+            transaction_handle=operation_lease,
+        )
+        updater._viking_fs = viking_fs
 
-            apply_result = await updater.apply_operations(
-                operations,
-                context,
-                extract_context=None,
-                isolation_handler=None,
-            )
-        finally:
-            if combined_lease is not None:
-                await viking_fs._async_agfs.pathlock_release(combined_lease)
+        apply_result = await updater.apply_operations(
+            operations,
+            context,
+            extract_context=None,
+            isolation_handler=None,
+        )
         errors = [*preflight_errors, *[f"{uri}: {exc}" for uri, exc in apply_result.errors]]
 
         return PolicyApplyResult(
@@ -293,12 +277,20 @@ def _plan_to_resolved_operations(
                     "experience_name": updated.name,
                     "content": updated.content,
                     "status": updated.status,
+                    # Session archives are immutable provenance endpoints. Store forward
+                    # links on the Experience without writing backlinks into raw archives.
+                    "links": [
+                        *updated.links,
+                        *[
+                            link.model_dump()
+                            for link in _source_session_links(exp_uri=uri, links=item.links)
+                        ],
+                    ],
                 },
                 memory_type=item.memory_type or "experiences",
                 uris=[uri],
             )
         )
-        links.extend(_source_trajectory_links(exp_uri=uri, links=item.links))
 
     return (
         ResolvedOperations(
@@ -350,7 +342,7 @@ def _policy_to_memory_file(policy: Policy | None) -> MemoryFile | None:
     )
 
 
-def _source_trajectory_links(
+def _source_session_links(
     *,
     exp_uri: str,
     links: list[StoredLink],
@@ -358,11 +350,7 @@ def _source_trajectory_links(
     result: list[StoredLink] = []
     seen: set[tuple[str, str | None]] = set()
     for link in links or []:
-        if (
-            link.link_type != "derived_from"
-            or not link.to_uri
-            or "/memories/trajectories/" not in link.to_uri
-        ):
+        if link.link_type != "derived_from" or not link.to_uri or not is_session_uri(link.to_uri):
             continue
         key = (link.to_uri, link.match_text)
         if key in seen:

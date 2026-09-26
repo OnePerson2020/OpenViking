@@ -29,7 +29,6 @@ from openviking.session.memory.constants import (
     EVENT_MEMORY_TYPE,
     EXECUTION_MEMORY_TYPES,
     EXPERIENCE_MEMORY_TYPE,
-    TRAJECTORY_MEMORY_TYPE,
 )
 from openviking.session.memory.dataclass import (
     MemoryFile,
@@ -49,7 +48,6 @@ from openviking.session.memory.streaming_memory_updater import (
     MemoryUpdateRequest,
     get_streaming_memory_updater,
     make_streaming_memory_updater_key,
-    merge_link_lists,
 )
 from openviking.session.memory.utils.json_parser import JsonUtils
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
@@ -78,11 +76,11 @@ from openviking.session.train import (
     Rubric,
     RubricCriterion,
     RubricEvaluation,
+    SessionAnalyzerContext,
+    SessionRolloutAnalyzer,
     SkillPolicyUpdater,
     SkillSetLoader,
     StreamingPolicyTrainerConfig,
-    TrajectoryAnalyzerContext,
-    TrajectoryRolloutAnalyzer,
     get_streaming_policy_trainer,
     make_streaming_policy_trainer_key,
 )
@@ -90,6 +88,7 @@ from openviking.storage.viking_fs import get_viking_fs
 from openviking.telemetry import get_current_telemetry, tracer
 from openviking_cli.utils import get_logger
 from openviking_cli.utils.config import get_openviking_config
+from openviking_cli.utils.config.agent_evolution_config import DagDeciderConfig
 
 if TYPE_CHECKING:
     from openviking.config.vlm import VLMHandle, VLMResolver
@@ -97,16 +96,19 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _CASES_MEMORY_TYPE = CASE_MEMORY_TYPE
-_TRAJECTORIES_MEMORY_TYPE = TRAJECTORY_MEMORY_TYPE
 _EXPERIENCES_MEMORY_TYPE = EXPERIENCE_MEMORY_TYPE
 _EVENTS_MEMORY_TYPE = EVENT_MEMORY_TYPE
 _AGENT_MEMORY_TYPES = EXECUTION_MEMORY_TYPES
 _TRAINING_CASE_SPEC_PROTOCOL = "openviking.batch_train.case_spec.v1"
 _TRAINING_CASE_SPEC_HEADER = "# OpenViking Batch Training CaseSpec v1"
 _TRAINING_EVALUATION_HEADER = "# OpenViking OutcomeEvaluation"
-_TRAINING_FAST_PATH_MEMORY_TYPES = frozenset({"cases", "trajectories", "experiences"})
+_TRAINING_FAST_PATH_MEMORY_TYPES = frozenset({"cases", "experiences"})
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
-_EXPERIENCE_TRAJECTORY_MAP_PREFIX = "OpenViking-Experience-Trajectory-Map: "
+_EXPERIENCE_SESSION_MAP_PREFIX = "OpenViking-Experience-Session-Map: "
+
+
+class ExperienceTrainingError(RuntimeError):
+    """A failed Experience update must fail the owning commit task visibly."""
 
 
 def _apply_event_search_tags(
@@ -206,7 +208,7 @@ async def _commit_experience_snapshot(
     ctx: RequestContext,
     experience_uris: list[str],
     archive_uri: str = "",
-    experience_trajectory_map: Optional[dict[str, list[str]]] = None,
+    experience_session_map: Optional[dict[str, list[str]]] = None,
 ) -> None:
     commit = getattr(viking_fs, "commit", None)
     if not callable(commit):
@@ -220,15 +222,15 @@ async def _commit_experience_snapshot(
         return
     archive_ref = archive_uri.rstrip("/") if archive_uri else "unknown"
     changed_experience_uris = set(paths)
-    trajectory_map = {
-        experience_uri: list(dict.fromkeys(trajectory_uris))
-        for experience_uri, trajectory_uris in (experience_trajectory_map or {}).items()
+    session_map = {
+        experience_uri: list(dict.fromkeys(session_uris))
+        for experience_uri, session_uris in (experience_session_map or {}).items()
         if experience_uri in changed_experience_uris
     }
     message = (
         f"Update experience memories from session commit {archive_ref}\n"
-        f"{_EXPERIENCE_TRAJECTORY_MAP_PREFIX}"
-        f"{json.dumps(trajectory_map, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
+        f"{_EXPERIENCE_SESSION_MAP_PREFIX}"
+        f"{json.dumps(session_map, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
     )
     try:
         await commit(
@@ -243,7 +245,7 @@ async def _commit_experience_snapshot(
 class SessionCompressorV3:
     """Session compressor with lock-free patch-merge user memory extraction."""
 
-    rollout_analyzer: TrajectoryRolloutAnalyzer | Any
+    rollout_analyzer: SessionRolloutAnalyzer | Any
     streaming_trainer_config: StreamingPolicyTrainerConfig = field(
         default_factory=StreamingPolicyTrainerConfig
     )
@@ -256,7 +258,7 @@ class SessionCompressorV3:
         vikingdb,
         skill_processor: Optional[Any] = None,
         *,
-        rollout_analyzer: TrajectoryRolloutAnalyzer | Any | None = None,
+        rollout_analyzer: SessionRolloutAnalyzer | Any | None = None,
         streaming_trainer_config: StreamingPolicyTrainerConfig | None = None,
         streaming_memory_updater_config: StreamingMemoryUpdaterConfig | None = None,
         vlm_resolver: VLMResolver | None = None,
@@ -264,7 +266,7 @@ class SessionCompressorV3:
         self.vikingdb = vikingdb
         self.skill_processor = skill_processor
         self.vlm_resolver = vlm_resolver
-        self.rollout_analyzer = rollout_analyzer or TrajectoryRolloutAnalyzer(
+        self.rollout_analyzer = rollout_analyzer or SessionRolloutAnalyzer(
             viking_fs=get_viking_fs(),
             vikingdb=vikingdb,
             vlm_resolver=vlm_resolver,
@@ -481,7 +483,7 @@ class SessionCompressorV3:
             if (
                 agent_evolution_enabled
                 and cases_allowed
-                and _TRAJECTORIES_MEMORY_TYPE in agent_memory_types
+                and _EXPERIENCES_MEMORY_TYPE in agent_memory_types
             ):
                 train_result = await self.train_from_extracted_cases(
                     cases=result.cases,
@@ -524,6 +526,8 @@ class SessionCompressorV3:
                 train_result=train_result,
                 archive_uri=archive_uri or "",
             )
+        except ExperienceTrainingError:
+            raise
         except Exception:
             if strict_extract_errors:
                 raise
@@ -553,7 +557,7 @@ class SessionCompressorV3:
         case_result = _applied_memory_result(case_write)
         contexts = _contexts_from_update_result(case_result)
         agent_memory_types = _allowed_agent_memory_types(allowed_memory_types)
-        if agent_evolution_enabled and _TRAJECTORIES_MEMORY_TYPE in agent_memory_types:
+        if agent_evolution_enabled and _EXPERIENCES_MEMORY_TYPE in agent_memory_types:
             train_result = await self.train_from_extracted_cases(
                 cases=[case],
                 messages=_training_messages_after_case_spec(messages),
@@ -829,7 +833,7 @@ class SessionCompressorV3:
         if not self._session_skill_extraction_enabled():
             return {"case_count": 0, "submitted": 0, "reason": "session_skills_disabled"}
 
-        extract = getattr(self.rollout_analyzer, "extract_trajectory_memories", None)
+        extract = getattr(self.rollout_analyzer, "extract_session_skills", None)
         if not callable(extract):
             return {
                 "case_count": 0,
@@ -842,8 +846,6 @@ class SessionCompressorV3:
                 messages=list(messages),
                 ctx=ctx,
                 strict_extract_errors=strict_extract_errors,
-                include_trajectories=False,
-                include_session_skills=True,
                 source_archive_uri=archive_uri,
             )
             skill_gradients = [
@@ -898,7 +900,7 @@ class SessionCompressorV3:
             skill_root_uri,
             ctx=ctx,
         )
-        analysis_context = TrajectoryAnalyzerContext(
+        analysis_context = SessionAnalyzerContext(
             request_context=ctx,
             strict_extract_errors=strict_extract_errors,
             include_session_skills=True,
@@ -957,18 +959,22 @@ class SessionCompressorV3:
             return {"case_count": 0, "submitted": 0}
 
         agent_memory_types = _allowed_agent_memory_types(allowed_memory_types)
-        if _TRAJECTORIES_MEMORY_TYPE not in agent_memory_types:
+        if _EXPERIENCES_MEMORY_TYPE not in agent_memory_types:
             return {
                 "case_count": len(cases),
                 "submitted": 0,
                 "reason": "memory_types_filtered",
             }
-        experiences_allowed = _EXPERIENCES_MEMORY_TYPE in agent_memory_types
 
         skill_enabled = self._session_skill_extraction_enabled()
 
         try:
             viking_fs = get_viking_fs()
+            from openviking.session.memory.account_templates import resolve_account_memory_registry
+
+            registry = await resolve_account_memory_registry(
+                viking_fs, ctx.account_id, get_default_registry()
+            )
 
             # --- Experience streaming trainer ---
             exp_root_uri = _experience_root_uri(ctx)
@@ -981,24 +987,19 @@ class SessionCompressorV3:
                 request_context=ctx,
                 messages=list(messages),
                 strict_extract_errors=strict_extract_errors,
+                memory_registry=registry,
             )
-            analysis_context = TrajectoryAnalyzerContext(
+            analysis_context = SessionAnalyzerContext(
                 request_context=ctx,
                 strict_extract_errors=strict_extract_errors,
-                include_session_skills=skill_enabled,
+                include_session_skills=False,
                 source_archive_uri=archive_uri or "",
             )
             runtime_config = get_openviking_config()
             dag_decider_config = runtime_config.agent_evolution.dag_decider
-            experience_gate = (
-                ExperienceImprovementGate(
-                    config=dag_decider_config,
-                    jev_config=runtime_config.jev,
-                )
-                if experiences_allowed
-                and dag_decider_config is not None
-                and dag_decider_config.provider == "jev"
-                else None
+            experience_gate = ExperienceImprovementGate(
+                config=dag_decider_config or DagDeciderConfig(provider="jev"),
+                jev_config=runtime_config.jev,
             )
             exp_trainer = await get_streaming_policy_trainer(
                 key=make_streaming_policy_trainer_key(
@@ -1014,6 +1015,7 @@ class SessionCompressorV3:
                 policy_optimizer=PatchMergePolicyOptimizer(
                     viking_fs=viking_fs,
                     memory_type="experiences",
+                    memory_registry=registry,
                     vlm_resolver=self.vlm_resolver,
                 ),
                 policy_updater=MemoryFilePolicyUpdater(viking_fs=viking_fs, vikingdb=self.vikingdb),
@@ -1027,20 +1029,20 @@ class SessionCompressorV3:
                 config=self.streaming_trainer_config,
             )
 
-            # --- Skill streaming trainer ---
-            skill_trainer = None
-            if skill_enabled:
-                skill_trainer = await self._get_session_skill_trainer(
-                    viking_fs=viking_fs,
-                    ctx=ctx,
+            # Skills remain an independent Session extraction, once per archive.
+            skill_result = (
+                await self.extract_session_skills(
                     messages=messages,
-                    strict_extract_errors=strict_extract_errors,
+                    ctx=ctx,
                     archive_uri=archive_uri,
+                    strict_extract_errors=strict_extract_errors,
                 )
-
+                if skill_enabled
+                else {}
+            )
             submitted = 0
-            skill_submitted = 0
-            skill_uris: list[str] = []
+            skill_submitted = int(skill_result.get("skill_submitted", 0))
+            skill_uris = list(skill_result.get("skill_uris", []))
             filtered_exp_gradient_count = 0
             memory_diffs: list[dict[str, Any]] = []
             policy_snapshot_id = _commit_policy_snapshot_id(
@@ -1059,45 +1061,41 @@ class SessionCompressorV3:
                     policy_snapshot_id=policy_snapshot_id,
                     evaluation=rollout_evaluation,
                     metadata={
+                        "source_session_uri": archive_uri,
+                        "case_uri": case_uri,
                         "experience_execution": dict(
                             case.metadata.get("experience_execution") or {}
-                        )
+                        ),
                     },
                 )
-                # Analyze once — trajectories + skill patches co-extracted
+                # Prepare raw Session evidence and optional independent skill proposals.
                 analysis = await self.rollout_analyzer.analyze(rollout, analysis_context)
 
                 # Experience path: estimate gradients, then submit to exp trainer
-                exp_gradients = []
-                if experiences_allowed:
-                    exp_gradients = await ExperienceGradientEstimator(
-                        viking_fs=viking_fs,
-                        vlm_resolver=self.vlm_resolver,
-                    ).estimate(analysis, exp_trainer.policy_set, gradient_context)
-                exp_training_result = _trajectory_only_training_result(
+                exp_gradients = await ExperienceGradientEstimator(
+                    viking_fs=viking_fs,
+                    vlm_resolver=self.vlm_resolver,
+                ).estimate(analysis, exp_trainer.policy_set, gradient_context)
+                exp_training_result = _empty_training_result(
                     analysis=analysis,
                     rollout=rollout,
                     policy_set=exp_trainer.policy_set,
                 )
                 if exp_gradients:
-                    fallback_trajectory_uris = {
-                        uri
-                        for trajectory in analysis.trajectories
-                        if (uri := str(getattr(trajectory, "uri", "") or ""))
-                    }
+                    source_session_uris = {archive_uri}
 
                     async def commit_experience_batch(
                         batch_result: RolloutTrainingResult,
                         *,
-                        _fallback_trajectory_uris: set[str] = fallback_trajectory_uris,
+                        _fallback_session_uris: set[str] = source_session_uris,
                     ) -> None:
                         persisted_result = (
                             getattr(batch_result, "batch_result", None) or batch_result
                         )
-                        snapshot_apply_result, experience_trajectory_map = (
+                        snapshot_apply_result, experience_session_map = (
                             _experience_snapshot_provenance(
                                 batch_result,
-                                fallback_trajectory_uris=_fallback_trajectory_uris,
+                                fallback_session_uris=_fallback_session_uris,
                             )
                         )
                         await _commit_experience_snapshot(
@@ -1108,7 +1106,7 @@ class SessionCompressorV3:
                                 apply_result=snapshot_apply_result,
                             ),
                             archive_uri=archive_uri,
-                            experience_trajectory_map=experience_trajectory_map,
+                            experience_session_map=experience_session_map,
                         )
 
                     exp_training_result = await exp_trainer.submit_gradients(
@@ -1116,6 +1114,10 @@ class SessionCompressorV3:
                         analysis=analysis,
                         rollout=rollout,
                         batch_finalizer=commit_experience_batch,
+                    )
+                if exp_training_result.apply_result.errors:
+                    raise ExperienceTrainingError(
+                        "; ".join(exp_training_result.apply_result.errors)
                     )
                 if case_uri:
                     await self._link_case_to_training_outputs(
@@ -1126,31 +1128,13 @@ class SessionCompressorV3:
                         ctx=ctx,
                         viking_fs=viking_fs,
                     )
-                # Skill path: co-extracted skill gradients go directly to skill trainer
-                if skill_trainer is not None and analysis.gradients:
-                    skill_gradients = [
-                        g for g in analysis.gradients if _gradient_memory_type(g) == "skills"
-                    ]
-                    if skill_gradients:
-                        skill_training_result = await skill_trainer.submit_gradients(
-                            skill_gradients,
-                            analysis=analysis,
-                            rollout=rollout,
-                        )
-                        skill_submitted += 1
-                        apply_result = getattr(skill_training_result, "apply_result", None)
-                        if apply_result is not None:
-                            for uri in getattr(apply_result, "written_uris", []) or []:
-                                if uri:
-                                    skill_uris.append(str(uri))
-
                 submitted += 1
 
                 if collect_memory_diff:
                     # Build diff from the strongly typed training result returned by
                     # submit_gradients.  Do not use exp_trainer.last_apply_result here:
                     # it is only a PolicyApplyResult and does not carry analyses/plan,
-                    # so trajectory and experience diffs would be lost.
+                    # so Experience diffs would be lost.
                     memory_diff = await self._build_training_memory_diff(
                         training_result=exp_training_result,
                         viking_fs=viking_fs,
@@ -1181,9 +1165,7 @@ class SessionCompressorV3:
             return response
         except Exception as exc:
             logger.warning("Commit streaming train failed: %s", exc, exc_info=True)
-            if strict_extract_errors:
-                raise
-            return {"case_count": len(cases), "submitted": 0, "error": str(exc)}
+            raise ExperienceTrainingError(str(exc)) from exc
 
     async def _build_training_memory_diff(
         self,
@@ -1197,20 +1179,11 @@ class SessionCompressorV3:
         updates: list[dict[str, Any]] = []
         deletes: list[dict[str, Any]] = []
 
-        seen_trajectory_uris: set[str] = set()
-        for analysis in training_result.analyses:
-            for trajectory in analysis.trajectories:
-                uri = trajectory.uri
-                if not uri or uri in seen_trajectory_uris:
-                    continue
-                seen_trajectory_uris.add(uri)
-                adds.append(
-                    {
-                        "uri": uri,
-                        "memory_type": "trajectories",
-                        "after": trajectory.content,
-                    }
-                )
+        source_session_uris = {
+            str(analysis.metadata["source_session_uri"])
+            for analysis in training_result.analyses
+            if analysis.metadata.get("source_session_uri")
+        }
 
         applied_uris = set(training_result.apply_result.written_uris)
         deleted_uris = set(training_result.apply_result.deleted_uris)
@@ -1219,14 +1192,13 @@ class SessionCompressorV3:
             raise ValueError(
                 "PolicyApplyResult.updated_policy_set.root_uri is required for training memory diff"
             )
-        source_trajectory_uris = set(seen_trajectory_uris)
 
         for item in training_result.plan.items:
             if item.memory_type != "experiences":
                 continue
-            if source_trajectory_uris and not _plan_item_has_source_trajectory(
+            if source_session_uris and not _plan_item_has_source_session(
                 item,
-                source_trajectory_uris,
+                source_session_uris,
             ):
                 continue
             uri = _experience_plan_item_uri(item, root_uri)
@@ -1300,13 +1272,18 @@ class SessionCompressorV3:
         )
         if not links:
             return
-        await _render_case_links_from_template(
-            case_uri=case_uri,
-            links=links,
-            ctx=ctx,
-            viking_fs=viking_fs,
+        lease = await viking_fs._async_agfs.pathlock_acquire_exact_tree_batch(
+            [viking_fs._uri_to_path(case_uri, ctx=ctx)],
+            [viking_fs._uri_to_path(apply_result.updated_policy_set.root_uri, ctx=ctx)],
+            timeout_secs=300.0,
         )
-        await write_stored_links(links, ctx, viking_fs, skip_uris={case_uri})
+        try:
+            await _render_case_links_from_template(
+                case_uri=case_uri, links=links, ctx=ctx, viking_fs=viking_fs, lease_ref=lease
+            )
+            await write_stored_links(links, ctx, viking_fs, skip_uris={case_uri}, lease_ref=lease)
+        finally:
+            await viking_fs._async_agfs.pathlock_release(lease)
 
     async def _write_final_memory_diff(
         self,
@@ -1371,7 +1348,7 @@ def _training_case_from_first_message(
     """
     if not messages or allowed_memory_types is None:
         return None
-    if not {_CASES_MEMORY_TYPE, _TRAJECTORIES_MEMORY_TYPE}.issubset(allowed_memory_types):
+    if not {_CASES_MEMORY_TYPE, _EXPERIENCES_MEMORY_TYPE}.issubset(allowed_memory_types):
         return None
     if not set(allowed_memory_types).issubset(_TRAINING_FAST_PATH_MEMORY_TYPES):
         return None
@@ -1835,7 +1812,7 @@ class _NoopGradientEstimator:
     """GradientEstimator that returns empty gradients.
 
     Used for the skill trainer because skill gradients are co-extracted
-    during trajectory analysis and submitted directly via
+    from Sessions and submitted directly via
     ``submit_gradients``; the estimator is never called in practice but
     ``StreamingPolicyTrainer`` requires one.
     """
@@ -1906,47 +1883,10 @@ def _case_training_links(
     plan: PolicyUpdatePlan,
     apply_result: PolicyApplyResult,
 ) -> list[StoredLink]:
-    trajectory_links = _case_trajectory_links(analysis=analysis, case_uri=case_uri)
-    trajectory_uris = {link.to_uri for link in trajectory_links if link.to_uri}
-    experience_links = _case_experience_links_via_trajectories(
-        case_uri=case_uri,
-        trajectory_uris=trajectory_uris,
-        plan=plan,
-        apply_result=apply_result,
-    )
-    return merge_link_lists([*trajectory_links, *experience_links])
-
-
-def _case_trajectory_links(
-    *,
-    analysis: RolloutAnalysis,
-    case_uri: str,
-) -> list[StoredLink]:
-    links: list[StoredLink] = []
-    for trajectory in getattr(analysis, "trajectories", []) or []:
-        uri = str(getattr(trajectory, "uri", "") or "")
-        if not uri or "/memories/trajectories/" not in uri:
-            continue
-        links.append(
-            _stored_link(
-                from_uri=case_uri,
-                target_uri=uri,
-                link_type="related_to",
-                description="",
-            )
-        )
-    return links
-
-
-def _case_experience_links_via_trajectories(
-    *,
-    case_uri: str,
-    trajectory_uris: set[str],
-    plan: PolicyUpdatePlan,
-    apply_result: PolicyApplyResult,
-) -> list[StoredLink]:
-    if not trajectory_uris:
+    source_session_uri = str(analysis.metadata.get("source_session_uri") or "")
+    if not source_session_uri:
         return []
+    session_uris = {source_session_uri}
     touched = set(getattr(apply_result, "written_uris", []) or [])
     touched.update(getattr(apply_result, "edited_uris", []) or [])
     result: list[StoredLink] = []
@@ -1959,7 +1899,9 @@ def _case_experience_links_via_trajectories(
     for item in getattr(plan, "items", []) or []:
         if item.memory_type != "experiences" or item.kind != "upsert":
             continue
-        if not _plan_item_has_source_trajectory(item, trajectory_uris):
+        if analysis.rollout is not None and item.target_name != analysis.rollout.case.name:
+            continue
+        if not _plan_item_has_source_session(item, session_uris):
             continue
         uri = _experience_plan_item_uri(item, root_uri)
         if uri not in touched:
@@ -1978,13 +1920,13 @@ def _case_experience_links_via_trajectories(
     return result
 
 
-def _plan_item_has_source_trajectory(item: PolicyPlanItem, trajectory_uris: set[str]) -> bool:
-    return bool(_plan_item_source_trajectory_uris(item, trajectory_uris))
+def _plan_item_has_source_session(item: PolicyPlanItem, session_uris: set[str]) -> bool:
+    return bool(_plan_item_source_session_uris(item, session_uris))
 
 
-def _plan_item_source_trajectory_uris(
+def _plan_item_source_session_uris(
     item: PolicyPlanItem,
-    trajectory_uris: set[str],
+    session_uris: set[str],
 ) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
@@ -1993,11 +1935,7 @@ def _plan_item_source_trajectory_uris(
             stored = link if isinstance(link, StoredLink) else StoredLink(**dict(link))
         except Exception:
             continue
-        if (
-            stored.link_type == "derived_from"
-            and stored.to_uri in trajectory_uris
-            and "/memories/trajectories/" in str(stored.to_uri or "")
-        ):
+        if stored.link_type == "derived_from" and stored.to_uri in session_uris:
             uri = str(stored.to_uri)
             if uri not in seen:
                 seen.add(uri)
@@ -2005,11 +1943,11 @@ def _plan_item_source_trajectory_uris(
     return result
 
 
-def _experience_trajectory_map(
+def _experience_session_map(
     *,
     plan: PolicyUpdatePlan,
     apply_result: PolicyApplyResult,
-    trajectory_uris: set[str],
+    session_uris: set[str],
 ) -> dict[str, list[str]]:
     root_uri = getattr(getattr(apply_result, "updated_policy_set", None), "root_uri", "")
     if not root_uri:
@@ -2022,7 +1960,7 @@ def _experience_trajectory_map(
         experience_uri = _experience_plan_item_uri(item, root_uri)
         if not experience_uri or experience_uri not in written_uris:
             continue
-        source_uris = _plan_item_source_trajectory_uris(item, trajectory_uris)
+        source_uris = _plan_item_source_session_uris(item, session_uris)
         if not source_uris:
             continue
         existing = result.setdefault(experience_uri, [])
@@ -2069,7 +2007,7 @@ def _visible_experience_snapshot_uris(
 def _experience_snapshot_provenance(
     training_result: Any,
     *,
-    fallback_trajectory_uris: Optional[set[str]] = None,
+    fallback_session_uris: Optional[set[str]] = None,
 ) -> tuple[PolicyApplyResult, dict[str, list[str]]]:
     """Return provenance for the complete update that reached storage.
 
@@ -2081,18 +2019,17 @@ def _experience_snapshot_provenance(
     """
     persisted_result = getattr(training_result, "batch_result", None) or training_result
     apply_result = persisted_result.apply_result
-    trajectory_uris = {
-        uri
+    session_uris = {
+        str(analysis.metadata["source_session_uri"])
         for analysis in getattr(persisted_result, "analyses", []) or []
-        for trajectory in getattr(analysis, "trajectories", []) or []
-        if (uri := str(getattr(trajectory, "uri", "") or ""))
+        if analysis.metadata.get("source_session_uri")
     }
-    if not trajectory_uris:
-        trajectory_uris = set(fallback_trajectory_uris or set())
-    return apply_result, _experience_trajectory_map(
+    if not session_uris:
+        session_uris = set(fallback_session_uris or set())
+    return apply_result, _experience_session_map(
         plan=persisted_result.plan,
         apply_result=apply_result,
-        trajectory_uris=trajectory_uris,
+        session_uris=session_uris,
     )
 
 
@@ -2120,14 +2057,14 @@ async def _render_case_links_from_template(
     links: list[StoredLink],
     ctx: RequestContext,
     viking_fs: Any,
+    lease_ref: Any = None,
 ) -> None:
     if not links:
         return
     try:
         raw = await viking_fs.read_file(case_uri, ctx=ctx)
     except Exception as exc:
-        tracer.error(f"Failed to read case memory for link rendering {case_uri}: {exc}")
-        return
+        raise ExperienceTrainingError(f"Failed to link Case {case_uri}: {exc}") from exc
 
     mf = MemoryFileUtils.read(raw or "", uri=case_uri)
     from openviking.session.memory.merge_op.link_merge import merge_links
@@ -2142,6 +2079,7 @@ async def _render_case_links_from_template(
         case_uri,
         MemoryFileUtils.write(mf, content_template=content_template),
         ctx=ctx,
+        lease_ref=lease_ref,
     )
 
 
@@ -2163,19 +2101,13 @@ def _gradient_memory_type(gradient: Any) -> str:
     return "experiences"
 
 
-def _trajectory_only_training_result(
+def _empty_training_result(
     *,
     analysis: RolloutAnalysis,
     rollout: Rollout,
     policy_set: Any,
 ) -> RolloutTrainingResult:
-    """Return a typed no-op training result that still carries trajectories.
-
-    Some rollouts produce useful trajectory memories but no experience gradients.
-    The memory diff should still include those trajectory writes, so callers use
-    this as the baseline result and replace it only when experience training
-    returns a full RolloutTrainingResult.
-    """
+    """Return a typed no-op result retaining source Session attribution."""
 
     return RolloutTrainingResult(
         analyses=[analysis],
@@ -2188,9 +2120,8 @@ def _trajectory_only_training_result(
             metadata={"no_experience_gradients": True},
         ),
         metadata={
-            "source": "trajectory_only",
+            "source": "session_no_proposal",
             "case_name": rollout.case.name,
-            "trajectory_count": len(analysis.trajectories),
         },
     )
 

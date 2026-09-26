@@ -13,10 +13,8 @@ fields:
   - name: experience_name
     type: string
     description: |
-      Name the generalizable pattern, not the specific instance.
-      Must be written in {{ language }}.
-      {% if language == 'en' %}Use lowercase snake_case, max 5 words.{% else %}Use a concise noun phrase, max 15 characters.{% endif %}
-      Good: "booking_duplicate_handling", "pytest_asyncio_cancel_hang_fix", "重复预订处理".
+      The exact canonical Case name supplied by the Session learning context.
+      Never rename, translate, split or broaden it. One Case owns one same-named Experience.
     merge_op: immutable
 
   - name: content
@@ -66,7 +64,7 @@ fields:
       information requires an action.
       Memory retrieval and lifecycle operations are outside the business DAG. Never create
       nodes for `search_exp`, `search_experience` or `read_experience`.
-      Each DAG covers one intent. Generalize instance-specific identifiers and use only tools
+      Each DAG covers the complete canonical Case, including its dependent intents. Generalize instance-specific identifiers and use only tools
       observed in the input. Preserve alternate paths and put guard conditions before actions.
       Natural-language descriptions must be in {{ language }}; constructor names stay in English.
       Example content:
@@ -75,15 +73,4 @@ fields:
       order = call("query_order", "Use order_id from context")
       order_id.then(order)
 
-    merge_op: replace
-
-  - name: supersedes
-    type: string
-    init_value: ""
-    description: |
-      The experience_name of an existing experience that this one supersedes.
-      Set ONLY when this experience replaces a narrower existing experience with a DIFFERENT name.
-      The system will automatically delete the old experience and inherit its trajectory history.
-      Omit this argument for a new experience or when updating an experience with the same name;
-      it defaults to an empty string.
     merge_op: replace

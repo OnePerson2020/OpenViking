@@ -18,7 +18,7 @@ from openviking.session.train.engine import PolicyTrainingEngine
 from openviking.session.train.gradients import PatchSemanticGradient
 from openviking_cli.utils.config.agent_evolution_config import DagDeciderConfig
 
-TRAJECTORY_URI = "viking://user/u/memories/trajectories/cancel.md"
+SESSION_URI = "viking://session/s1/archives/001"
 EXPERIENCE_URI = "viking://user/u/memories/experiences/cancel.md"
 
 
@@ -33,12 +33,12 @@ def _context(
     *,
     passed: bool,
     rollout_passed: bool | None = None,
-    trajectory_uri: str = TRAJECTORY_URI,
+    source_session_uri: str = SESSION_URI,
     experience_execution: dict | None = None,
 ) -> dict:
     return {
-        "trajectory_uri": trajectory_uri,
-        "trajectory_summary": "The agent reported 708 instead of 1628.",
+        "source_session_uri": source_session_uri,
+        "session_summary": "The agent reported 708 instead of 1628.",
         "passed": passed,
         "rollout_passed": passed if rollout_passed is None else rollout_passed,
         "score": 1.0 if passed else 0.0,
@@ -61,7 +61,7 @@ def _gradient(
     passed: bool,
     rollout_passed: bool | None = None,
     experience_uri: str = EXPERIENCE_URI,
-    trajectory_uri: str = TRAJECTORY_URI,
+    source_session_uri: str = SESSION_URI,
 ) -> PatchSemanticGradient:
     file = MemoryFile(
         uri=experience_uri,
@@ -77,7 +77,7 @@ def _gradient(
         links=[
             StoredLink(
                 from_uri=experience_uri,
-                to_uri=trajectory_uri,
+                to_uri=source_session_uri,
                 link_type="derived_from",
                 weight=1.0,
             )
@@ -88,7 +88,7 @@ def _gradient(
                 _context(
                     passed=passed,
                     rollout_passed=rollout_passed,
-                    trajectory_uri=trajectory_uri,
+                    source_session_uri=source_session_uri,
                 )
             ]
         },
@@ -99,7 +99,7 @@ def _plan(
     source: str,
     *,
     experience_uri: str = EXPERIENCE_URI,
-    trajectory_uri: str = TRAJECTORY_URI,
+    source_session_uri: str = SESSION_URI,
     target_name: str = "cancel",
     before_source: str | None = None,
 ) -> PolicyUpdatePlan:
@@ -115,7 +115,7 @@ def _plan(
                 links=[
                     StoredLink(
                         from_uri=experience_uri,
-                        to_uri=trajectory_uri,
+                        to_uri=source_session_uri,
                         link_type="derived_from",
                         weight=1.0,
                     )
@@ -164,11 +164,12 @@ class BatchStopsAtReportDecider:
 
 
 @pytest.mark.asyncio
-async def test_failed_trajectory_accepts_relevant_corrective_action():
+async def test_failed_session_accepts_relevant_corrective_action():
     jev = SimpleNamespace(
         evaluate=AsyncMock(
             return_value={
                 "improvement_effective": {"type": "noul", "noul": 0.96},
+                "preservation_0": {"type": "noul", "noul": 0.99},
             }
         )
     )
@@ -196,7 +197,7 @@ async def test_failed_trajectory_accepts_relevant_corrective_action():
 
 
 @pytest.mark.asyncio
-async def test_failed_trajectory_rejects_candidate_that_still_completes():
+async def test_failed_session_rejects_candidate_that_still_completes():
     jev = SimpleNamespace(evaluate=AsyncMock())
     gate = ExperienceImprovementGate(
         config=DagDeciderConfig(provider="jev"),
@@ -215,16 +216,16 @@ async def test_failed_trajectory_rejects_candidate_that_still_completes():
     assert result.items == []
     diagnostic = result.metadata["experience_improvement_gate"]
     assert diagnostic["passed"] is False
-    assert "still accepts" in diagnostic["candidates"][0]["replays"][0]["reason"]
+    assert "accepts" in diagnostic["candidates"][0]["replays"][0]["reason"]
     jev.evaluate.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_successful_trajectory_requires_candidate_to_complete():
+async def test_successful_session_requires_candidate_to_complete():
     gate = ExperienceImprovementGate(
         config=DagDeciderConfig(provider="jev"),
         dag_decider=CompletesDecider(),
-        jev=SimpleNamespace(evaluate=AsyncMock()),
+        jev=SimpleNamespace(evaluate=AsyncMock(return_value={"preservation_0": {"noul": 0.99}})),
     )
     source = _source()
 
@@ -240,39 +241,9 @@ async def test_successful_trajectory_requires_candidate_to_complete():
 
 
 @pytest.mark.asyncio
-async def test_failed_rollout_can_reattribute_mislabeled_successful_trajectory():
-    jev = SimpleNamespace(
-        evaluate=AsyncMock(
-            return_value={
-                "improvement_effective": {"type": "noul", "noul": 0.93},
-            }
-        )
-    )
-    gate = ExperienceImprovementGate(
-        config=DagDeciderConfig(provider="jev"),
-        dag_decider=StopsAtReportDecider(),
-        jev=jev,
-    )
-    source = _source("Report the total 1628 required by the failed rollout")
-
-    result = await gate.validate(
-        _plan(source),
-        [_gradient(source, passed=True, rollout_passed=False)],
-        PolicySet(root_uri="viking://user/u/memories/experiences", policies=[]),
-        None,
-    )
-
-    replay = result.metadata["experience_improvement_gate"]["candidates"][0]["replays"][0]
-    assert len(result.items) == 1
-    assert replay["passed"] is True
-    assert replay["failure_reattributed"] is True
-    assert replay["reason"] == "candidate correction is attributable to the failed rollout"
-
-
-@pytest.mark.asyncio
 async def test_merged_plan_keeps_independently_passing_candidate():
     second_experience = "viking://user/u/memories/experiences/refund.md"
-    second_trajectory = "viking://user/u/memories/trajectories/refund.md"
+    second_session = "viking://session/s2/archives/001"
     source = _source()
     plan = PolicyUpdatePlan(
         items=[
@@ -280,7 +251,7 @@ async def test_merged_plan_keeps_independently_passing_candidate():
             *_plan(
                 source,
                 experience_uri=second_experience,
-                trajectory_uri=second_trajectory,
+                source_session_uri=second_session,
                 target_name="refund",
             ).items,
         ]
@@ -288,7 +259,7 @@ async def test_merged_plan_keeps_independently_passing_candidate():
     gate = ExperienceImprovementGate(
         config=DagDeciderConfig(provider="jev"),
         dag_decider=BatchCompletesDecider(),
-        jev=SimpleNamespace(evaluate=AsyncMock(return_value={})),
+        jev=SimpleNamespace(evaluate=AsyncMock(return_value={"preservation_0": {"noul": 0.99}})),
     )
 
     result = await gate.validate(
@@ -299,7 +270,7 @@ async def test_merged_plan_keeps_independently_passing_candidate():
                 source,
                 passed=False,
                 experience_uri=second_experience,
-                trajectory_uri=second_trajectory,
+                source_session_uri=second_session,
             ),
         ],
         PolicySet(root_uri="viking://user/u/memories/experiences", policies=[]),
@@ -317,7 +288,7 @@ async def test_merged_plan_keeps_independently_passing_candidate():
 @pytest.mark.asyncio
 async def test_same_context_candidates_and_baselines_share_dag_replay_call():
     second_experience = "viking://user/u/memories/experiences/refund.md"
-    second_trajectory = "viking://user/u/memories/trajectories/refund.md"
+    second_session = "viking://session/s2/archives/001"
     baseline = _source("State the previous total")
     candidate = _source("State the corrected total")
     plan = PolicyUpdatePlan(
@@ -326,7 +297,7 @@ async def test_same_context_candidates_and_baselines_share_dag_replay_call():
             *_plan(
                 candidate,
                 experience_uri=second_experience,
-                trajectory_uri=second_trajectory,
+                source_session_uri=second_session,
                 target_name="refund",
                 before_source=baseline,
             ).items,
@@ -354,7 +325,7 @@ async def test_same_context_candidates_and_baselines_share_dag_replay_call():
                 candidate,
                 passed=True,
                 experience_uri=second_experience,
-                trajectory_uri=second_trajectory,
+                source_session_uri=second_session,
             ),
         ],
         PolicySet(root_uri="viking://user/u/memories/experiences", policies=[]),
@@ -362,8 +333,9 @@ async def test_same_context_candidates_and_baselines_share_dag_replay_call():
     )
 
     assert len(result.items) == 2
-    jev.evaluate.assert_awaited_once()
-    assert len(jev.evaluate.await_args.kwargs["questions"]) == 8
+    assert jev.evaluate.await_count == 2
+    assert len(jev.evaluate.await_args_list[0].kwargs["questions"]) == 8
+    assert len(jev.evaluate.await_args_list[1].kwargs["questions"]) == 4
     diagnostics = result.metadata["experience_improvement_gate"]["candidates"]
     assert all(
         item["replays"][0]["baseline_replay"]["state"] == "completed" for item in diagnostics
@@ -384,7 +356,12 @@ async def test_failed_update_compares_candidate_with_baseline_and_execution_feed
     gradient = _gradient(candidate, passed=False)
     gradient.metadata[EXPERIENCE_GATE_CONTEXTS_KEY][0]["experience_execution"] = execution
     jev = SimpleNamespace(
-        evaluate=AsyncMock(return_value={"improvement_effective": {"type": "noul", "noul": 0.97}})
+        evaluate=AsyncMock(
+            return_value={
+                "improvement_effective": {"type": "noul", "noul": 0.97},
+                "preservation_0": {"type": "noul", "noul": 0.99},
+            }
+        )
     )
     decider = BatchStopsAtReportDecider()
     gate = ExperienceImprovementGate(
@@ -406,7 +383,7 @@ async def test_failed_update_compares_candidate_with_baseline_and_execution_feed
     diagnostic = result.metadata["experience_improvement_gate"]["candidates"][0]["replays"][0]
     assert diagnostic["passed"] is True
     assert diagnostic["baseline_replay"]["current_nodes"] == ["report"]
-    assert diagnostic["reason"] == "candidate improves on the baseline for the failed rollout"
+    assert diagnostic["reason"] == "candidate improves the failed Session"
     judge_state = jev.evaluate.await_args.kwargs["state"]
     candidate_state = judge_state["candidates"]["improvement_effective"]
     assert json.loads(candidate_state["actual_experience_execution"]) == execution
@@ -417,7 +394,7 @@ async def test_failed_update_compares_candidate_with_baseline_and_execution_feed
 @pytest.mark.asyncio
 async def test_failed_candidates_share_corrective_action_jev_call():
     second_experience = "viking://user/u/memories/experiences/refund.md"
-    second_trajectory = "viking://user/u/memories/trajectories/refund.md"
+    second_session = "viking://session/s2/archives/001"
     candidate = _source("Report the verified total")
     plan = PolicyUpdatePlan(
         items=[
@@ -425,7 +402,7 @@ async def test_failed_candidates_share_corrective_action_jev_call():
             *_plan(
                 candidate,
                 experience_uri=second_experience,
-                trajectory_uri=second_trajectory,
+                source_session_uri=second_session,
                 target_name="refund",
             ).items,
         ]
@@ -434,7 +411,9 @@ async def test_failed_candidates_share_corrective_action_jev_call():
         evaluate=AsyncMock(
             return_value={
                 "improvement_effective": {"type": "noul", "noul": 0.96},
+                "preservation_0": {"type": "noul", "noul": 0.99},
                 "improvement_effective_1": {"type": "noul", "noul": 0.95},
+                "preservation_1": {"type": "noul", "noul": 0.99},
             }
         )
     )
@@ -452,7 +431,7 @@ async def test_failed_candidates_share_corrective_action_jev_call():
                 candidate,
                 passed=False,
                 experience_uri=second_experience,
-                trajectory_uri=second_trajectory,
+                source_session_uri=second_session,
             ),
         ],
         PolicySet(root_uri="viking://user/u/memories/experiences", policies=[]),
@@ -462,14 +441,19 @@ async def test_failed_candidates_share_corrective_action_jev_call():
     assert len(result.items) == 2
     jev.evaluate.assert_awaited_once()
     call = jev.evaluate.await_args.kwargs
-    assert set(call["questions"]) == {"improvement_effective", "improvement_effective_1"}
-    assert set(call["state"]["candidates"]) == set(call["questions"])
+    assert set(call["questions"]) == {
+        "improvement_effective",
+        "improvement_effective_1",
+        "preservation_0",
+        "preservation_1",
+    }
+    assert set(call["state"]["candidates"]) == {"improvement_effective", "improvement_effective_1"}
 
 
 @pytest.mark.asyncio
 async def test_provider_oversize_splits_candidates_but_keeps_each_baseline_atomic():
     second_experience = "viking://user/u/memories/experiences/refund.md"
-    second_trajectory = "viking://user/u/memories/trajectories/refund.md"
+    second_session = "viking://session/s2/archives/001"
     baseline = _source("Report the previous total")
     candidate = _source("Report the verified total")
     plan = PolicyUpdatePlan(
@@ -478,7 +462,7 @@ async def test_provider_oversize_splits_candidates_but_keeps_each_baseline_atomi
             *_plan(
                 candidate,
                 experience_uri=second_experience,
-                trajectory_uri=second_trajectory,
+                source_session_uri=second_session,
                 target_name="refund",
                 before_source=baseline,
             ).items,
@@ -486,12 +470,12 @@ async def test_provider_oversize_splits_candidates_but_keeps_each_baseline_atomi
     )
 
     async def reject_combined_batch(*, state, questions):
-        if len(questions) > 1:
+        if len(state["candidates"]) > 1:
             raise JevPayloadTooLarge("provider returned 422")
         question_id = next(iter(questions))
         candidate_state = state["candidates"][question_id]
         assert candidate_state["baseline_source"] == baseline
-        return {question_id: {"type": "noul", "noul": 0.96}}
+        return {qid: {"type": "noul", "noul": 0.96} for qid in questions}
 
     jev = SimpleNamespace(
         config=SimpleNamespace(max_input_tokens=100_000, model="qwen3-1.7b"),
@@ -511,7 +495,7 @@ async def test_provider_oversize_splits_candidates_but_keeps_each_baseline_atomi
                 candidate,
                 passed=False,
                 experience_uri=second_experience,
-                trajectory_uri=second_trajectory,
+                source_session_uri=second_session,
             ),
         ],
         PolicySet(root_uri="viking://user/u/memories/experiences", policies=[]),
@@ -529,7 +513,7 @@ async def test_provider_oversize_splits_candidates_but_keeps_each_baseline_atomi
 @pytest.mark.asyncio
 async def test_estimated_oversized_candidate_does_not_reject_other_candidate(monkeypatch):
     second_experience = "viking://user/u/memories/experiences/refund.md"
-    second_trajectory = "viking://user/u/memories/trajectories/refund.md"
+    second_session = "viking://session/s2/archives/001"
     candidate = _source("Report the verified total")
     plan = PolicyUpdatePlan(
         items=[
@@ -537,15 +521,15 @@ async def test_estimated_oversized_candidate_does_not_reject_other_candidate(mon
             *_plan(
                 candidate,
                 experience_uri=second_experience,
-                trajectory_uri=second_trajectory,
+                source_session_uri=second_session,
                 target_name="refund",
             ).items,
         ]
     )
 
     def estimate_by_candidate(*, state, questions, model):
-        del state, model
-        if len(questions) > 1 or "improvement_effective" in questions:
+        del model
+        if len(state["candidates"]) > 1 or "improvement_effective" in questions:
             return 200
         return 50
 
@@ -556,7 +540,10 @@ async def test_estimated_oversized_candidate_does_not_reject_other_candidate(mon
     jev = SimpleNamespace(
         config=SimpleNamespace(max_input_tokens=100, model="qwen3-1.7b"),
         evaluate=AsyncMock(
-            return_value={"improvement_effective_1": {"type": "noul", "noul": 0.95}}
+            return_value={
+                "improvement_effective_1": {"type": "noul", "noul": 0.95},
+                "preservation_1": {"type": "noul", "noul": 0.99},
+            }
         ),
     )
     gate = ExperienceImprovementGate(
@@ -573,7 +560,7 @@ async def test_estimated_oversized_candidate_does_not_reject_other_candidate(mon
                 candidate,
                 passed=False,
                 experience_uri=second_experience,
-                trajectory_uri=second_trajectory,
+                source_session_uri=second_session,
             ),
         ],
         PolicySet(root_uri="viking://user/u/memories/experiences", policies=[]),
@@ -587,7 +574,7 @@ async def test_estimated_oversized_candidate_does_not_reject_other_candidate(mon
     assert diagnostics["oversized_candidates"] == [
         {
             "experience_uri": EXPERIENCE_URI,
-            "trajectory_uri": TRAJECTORY_URI,
+            "source_session_uri": SESSION_URI,
             "reason": "estimated input 200 exceeds configured Jev budget 100",
         }
     ]
@@ -601,7 +588,7 @@ async def test_compile_error_rejects_entire_experience_plan():
     gate = ExperienceImprovementGate(
         config=DagDeciderConfig(provider="jev"),
         dag_decider=CompletesDecider(),
-        jev=SimpleNamespace(evaluate=AsyncMock()),
+        jev=SimpleNamespace(evaluate=AsyncMock(return_value={"preservation_0": {"noul": 0.99}})),
     )
     source = "not valid Python ("
 
@@ -677,4 +664,215 @@ async def test_training_engine_runs_gate_before_updater():
         policy_set,
         "apply",
         transaction_handle="lease",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "success_complete,improve,preserve,accepted",
+    [
+        (True, True, True, True),
+        (False, True, True, False),
+        (True, False, True, False),
+        (True, True, False, False),
+    ],
+)
+async def test_case_gate_aggregates_success_and_failed_sessions(
+    success_complete, improve, preserve, accepted
+):
+    class EvidenceDecider:
+        async def decide(self, instances, *, evidence, context):
+            success = "successful" in context
+            return {
+                i.experience_uri: {"known": True, "report": success and success_complete}
+                for i in instances
+            }
+
+    async def judge(*, state, questions):
+        return {
+            qid: {
+                "noul": 0.99 if (preserve if qid.startswith("preservation") else improve) else 0.01
+            }
+            for qid in questions
+        }
+
+    source = _source()
+    success = _gradient(
+        source, passed=True, source_session_uri="viking://session/success/archives/1"
+    )
+    success.metadata[EXPERIENCE_GATE_CONTEXTS_KEY][0]["evidence"][1]["summary"] = "successful"
+    failed = _gradient(source, passed=False)
+    gate = ExperienceImprovementGate(
+        config=DagDeciderConfig(provider="jev"),
+        dag_decider=EvidenceDecider(),
+        jev=SimpleNamespace(evaluate=AsyncMock(side_effect=judge)),
+    )
+    result = await gate.validate(
+        _plan(source, before_source=source),
+        [success, failed],
+        PolicySet(root_uri="viking://user/u/memories/experiences", policies=[]),
+        None,
+    )
+    assert bool(result.items) is accepted
+    if accepted:
+        saved = result.items[0].metadata["patch_metadata"]["source_sessions"]
+        assert len(saved) == 2
+        assert all("evidence" not in item for item in saved)
+
+
+@pytest.mark.asyncio
+async def test_unknown_session_requires_grounding_without_claiming_improvement():
+    source = _source()
+    gradient = _gradient(source, passed=None)
+
+    async def judge(*, state, questions):
+        assert state["candidates"]["improvement_effective"]["session_outcome"] is None
+        return {qid: {"noul": 0.99} for qid in questions}
+
+    gate = ExperienceImprovementGate(
+        config=DagDeciderConfig(provider="jev"),
+        dag_decider=BatchStopsAtReportDecider(),
+        jev=SimpleNamespace(evaluate=AsyncMock(side_effect=judge)),
+    )
+    result = await gate.validate(_plan(source), [gradient], PolicySet("root", []), None)
+    assert len(result.items) == 1
+    assert result.metadata["experience_improvement_gate"]["candidates"][0]["improved"] is False
+
+
+@pytest.mark.asyncio
+async def test_gate_reads_historical_session_archive_and_rejects_regression():
+    from openviking.message import Message, TextPart
+    from openviking.session.train.domain import Policy
+
+    source = _source()
+    archived_uri = "viking://session/previous/archives/1"
+    message = Message(id="old", role="assistant", parts=[TextPart(text="completed correctly")])
+    fs = SimpleNamespace(read_file=AsyncMock(return_value=json.dumps(message.to_dict())))
+    policy = Policy(
+        "cancel",
+        EXPERIENCE_URI,
+        2,
+        "draft",
+        source,
+        metadata={"source_sessions": [{"source_session_uri": archived_uri, "passed": True}]},
+    )
+    gate = ExperienceImprovementGate(
+        config=DagDeciderConfig(provider="jev"),
+        dag_decider=BatchStopsAtReportDecider(),
+        jev=SimpleNamespace(
+            evaluate=AsyncMock(
+                return_value={
+                    "improvement_effective": {"noul": 0.99},
+                    "preservation_0": {"noul": 0.99},
+                }
+            )
+        ),
+    )
+    result = await gate.validate(
+        _plan(source, before_source=source),
+        [_gradient(source, passed=False)],
+        PolicySet("viking://user/u/memories/experiences", [policy], viking_fs=fs),
+        None,
+    )
+    assert result.items == []
+    fs.read_file.assert_awaited_once_with(archived_uri + "/messages.jsonl", ctx=None)
+    replays = result.metadata["experience_improvement_gate"]["candidates"][0]["replays"]
+    assert any("no longer completes" in item["reason"] for item in replays)
+
+
+@pytest.mark.asyncio
+async def test_missing_archived_tool_evidence_rejects_historical_replay(monkeypatch):
+    from openviking.message import Message, ToolPart
+    from openviking.session.tool_result_store import ToolResultStore
+    from openviking.session.train.domain import Policy
+
+    source = _source()
+    archived_uri = "viking://user/u/sessions/previous/history/archive_001"
+    message = Message(
+        id="tool",
+        role="assistant",
+        parts=[
+            ToolPart(
+                tool_id="t1",
+                tool_name="get_reservation",
+                tool_status="completed",
+                tool_output="preview",
+                tool_output_ref="viking://user/u/sessions/previous/tool-results/t1",
+                tool_output_truncated=True,
+            )
+        ],
+    )
+    fs = SimpleNamespace(read_file=AsyncMock(return_value=json.dumps(message.to_dict())))
+    monkeypatch.setattr(
+        ToolResultStore, "read", AsyncMock(side_effect=FileNotFoundError("missing evidence"))
+    )
+    policy = Policy(
+        "cancel",
+        EXPERIENCE_URI,
+        2,
+        "draft",
+        source,
+        metadata={"source_sessions": [{"source_session_uri": archived_uri, "passed": True}]},
+    )
+    gate = ExperienceImprovementGate(
+        config=DagDeciderConfig(provider="jev"),
+        dag_decider=BatchStopsAtReportDecider(),
+        jev=SimpleNamespace(
+            evaluate=AsyncMock(
+                return_value={
+                    "improvement_effective": {"noul": 0.99},
+                    "preservation_0": {"noul": 0.99},
+                }
+            )
+        ),
+    )
+    result = await gate.validate(
+        _plan(source, before_source=source),
+        [_gradient(source, passed=False)],
+        PolicySet("root", [policy], viking_fs=fs),
+        None,
+    )
+    assert result.items == []
+    replays = result.metadata["experience_improvement_gate"]["candidates"][0]["replays"]
+    assert any("missing tool evidence" in item["reason"] for item in replays)
+
+
+@pytest.mark.asyncio
+async def test_failed_session_completion_never_counts_as_improvement():
+    source = _source()
+
+    async def judge(*, state, questions):
+        return {qid: {"noul": 0.99} for qid in questions}
+
+    gate = ExperienceImprovementGate(
+        config=DagDeciderConfig(provider="jev"),
+        dag_decider=BatchCompletesDecider(),
+        jev=SimpleNamespace(evaluate=AsyncMock(side_effect=judge)),
+    )
+    result = await gate.validate(
+        _plan(source, before_source=source),
+        [_gradient(source, passed=False)],
+        PolicySet("root", []),
+        None,
+    )
+    assert result.items == []
+    diagnostic = result.metadata["experience_improvement_gate"]["candidates"][0]
+    assert diagnostic["reason"] == "no failed source Session improved"
+
+
+@pytest.mark.asyncio
+async def test_empty_session_evidence_cannot_pass_gate():
+    source = _source()
+    gradient = _gradient(source, passed=True)
+    gradient.metadata[EXPERIENCE_GATE_CONTEXTS_KEY][0]["evidence"] = []
+    gate = ExperienceImprovementGate(
+        config=DagDeciderConfig(provider="jev"),
+        dag_decider=BatchCompletesDecider(),
+        jev=SimpleNamespace(evaluate=AsyncMock()),
+    )
+    result = await gate.validate(_plan(source), [gradient], PolicySet("root", []), None)
+    assert result.items == []
+    assert (
+        "no replay evidence"
+        in result.metadata["experience_improvement_gate"]["candidates"][0]["replays"][0]["reason"]
     )

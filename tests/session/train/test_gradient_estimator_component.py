@@ -1,426 +1,194 @@
-# Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
-# SPDX-License-Identifier: AGPL-3.0
-
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from test_fakes import fake_request_context
 
-from openviking.session.memory.dataclass import MemoryFile
+from openviking.message import Message, TextPart
+from openviking.session.memory.dataclass import MemoryFile, ResolvedOperation, ResolvedOperations
 from openviking.session.train import (
-    CriterionResult,
-    Experience,
+    Case,
     ExperienceGradientContext,
     ExperienceGradientEstimator,
     ExperienceSet,
+    Rollout,
     RolloutAnalysis,
+    Rubric,
     RubricEvaluation,
-    Trajectory,
 )
-from openviking.session.train.components import gradient_estimator as gradient_estimator_module
 from openviking.session.train.components.experience_improvement_gate import (
     EXPERIENCE_GATE_CONTEXTS_KEY,
 )
 
-
-class FakeExperienceGradientEstimator(ExperienceGradientEstimator):
-    def __init__(self, operations_by_trajectory_uri):
-        super().__init__()
-        self.operations_by_trajectory_uri = operations_by_trajectory_uri
-        self.calls = []
-
-    async def _run_extract_loop(self, trajectory, context):
-        self.calls.append((trajectory, context))
-        return self.operations_by_trajectory_uri.get(trajectory.uri)
+ROOT = "viking://user/u/memories/experiences"
+SESSION = "viking://session/s1/archives/001"
 
 
-def _analysis(*, passed: bool = True, outcome: str = "success") -> RolloutAnalysis:
+def analysis(name="case_a", session=SESSION, passed=True):
+    case = Case(
+        name=name,
+        task_signature="cancel duplicate",
+        input={},
+        rubric=Rubric(name="done", description="", criteria=[]),
+    )
+    rollout = Rollout(
+        case=case,
+        messages=[
+            Message(id="m1", role="user", parts=[TextPart(text="Cancel the duplicate booking.")])
+        ],
+        policy_snapshot_id="p0",
+    )
     return RolloutAnalysis(
-        evaluation=RubricEvaluation(
-            passed=passed,
-            score=1.0 if passed else 0.0,
-            criterion_results=[
-                CriterionResult(
-                    criterion_name="done",
-                    passed=passed,
-                    score=1.0 if passed else 0.0,
-                    feedback=[],
-                    evidence=["evidence"],
-                )
-            ],
-            feedback=[],
+        rollout=rollout,
+        evaluation=(
+            None
+            if passed is None
+            else RubricEvaluation(
+                passed=passed,
+                score=float(passed),
+                criterion_results=[],
+                feedback=[] if passed else ["duplicate remains"],
+            )
         ),
-        trajectories=[
-            Trajectory(
-                name="booking_duplicate",
-                uri="viking://user/u/memories/trajectories/booking_duplicate.md",
-                content="trajectory content",
-                outcome=outcome,
-                retrieval_anchor="Stage: final",
-                metadata={"training_category": "booking"},
+        metadata={
+            "source_session_uri": session,
+            "case_uri": f"viking://user/u/memories/cases/{name}.md",
+        },
+    )
+
+
+def operations(name="case_a", **fields):
+    return ResolvedOperations(
+        upsert_operations=[
+            ResolvedOperation(
+                memory_type="experiences",
+                uris=[f"{ROOT}/{name}.md"],
+                memory_fields={
+                    "experience_name": name,
+                    "content": 'dag = workflow("cancel")\ncancel = call("cancel", "duplicate")',
+                    **fields,
+                },
             )
         ],
+        delete_file_contents=[],
+        errors=[],
     )
 
 
-def _experience_set() -> ExperienceSet:
-    return ExperienceSet(
-        root_uri="viking://user/u/memories/experiences",
-        policies=[
-            Experience(
-                name="booking_duplicate_handling",
-                uri="viking://user/u/memories/experiences/booking_duplicate_handling.md",
-                version=3,
-                status="production",
-                content="old body from policy set",
-            )
-        ],
+async def estimate(estimator, item):
+    return await estimator.estimate(
+        item,
+        ExperienceSet(root_uri=ROOT, policies=[]),
+        ExperienceGradientContext(request_context=fake_request_context(user_id="u"), messages=[]),
     )
-
-
-def _context() -> ExperienceGradientContext:
-    return ExperienceGradientContext(request_context=SimpleNamespace(), messages=[])
 
 
 @pytest.mark.asyncio
-async def test_experience_gradient_estimator_converts_experience_operations():
-    analysis = _analysis(passed=True, outcome="success")
-    old_file = MemoryFile(
-        uri="viking://user/u/memories/experiences/booking_duplicate_handling.md",
-        content="old body with [[links]]",
-        memory_type="experiences",
-        extra_fields={"version": "7"},
-    )
-    operations = SimpleNamespace(
-        upsert_operations=[
-            SimpleNamespace(
-                memory_type="experiences",
-                memory_fields={
-                    "experience_name": "booking_duplicate_handling",
-                    "content": "new body",
-                    "supersedes": ["older_experience"],
-                },
-                uris=["viking://user/u/memories/experiences/booking_duplicate_handling.md"],
-                old_memory_file_content=old_file,
-            ),
-            SimpleNamespace(
-                memory_type="trajectories",
-                memory_fields={"content": "ignored"},
-                uris=["viking://user/u/memories/trajectories/ignored.md"],
-                old_memory_file_content=None,
-            ),
-        ]
-    )
-    estimator = FakeExperienceGradientEstimator({analysis.trajectories[0].uri: operations})
-
-    gradients = await estimator.estimate(analysis, _experience_set(), _context())
-
+async def test_direct_session_proposal_has_fixed_case_and_archive_provenance(monkeypatch):
+    run = AsyncMock(return_value=operations())
+    monkeypatch.setattr(ExperienceGradientEstimator, "_run_extract_loop", run)
+    item = analysis(passed=False)
+    gradients = await estimate(ExperienceGradientEstimator(), item)
+    assert item.trajectories == []
     assert len(gradients) == 1
-    gradient = gradients[0]
-    assert gradient.target_name == "booking_duplicate_handling"
-    assert gradient.target_uri == (
-        "viking://user/u/memories/experiences/booking_duplicate_handling.md"
-    )
-    assert gradient.base_version == 7
-    assert gradient.before_file is old_file
-    assert gradient.after_file.content == "new body"
-    assert gradient.after_file.extra_fields["supersedes"] == ["older_experience"]
-    assert gradient.metadata["supersedes"] == ["older_experience"]
-    assert len(gradient.links) == 1
-    assert gradient.links[0].from_uri == gradient.target_uri
-    assert gradient.links[0].to_uri == analysis.trajectories[0].uri
-    assert gradient.links[0].link_type == "derived_from"
-    assert gradient.links[0].match_text is None
-    assert gradient.links[0].description == ""
-    assert gradient.confidence == pytest.approx(0.9)
-    assert gradient.metadata["trajectory_outcome"] == "success"
-    assert gradient.metadata["rubric_passed"] is True
-    assert gradient.metadata["training_category"] == "booking"
-    assert gradient.metadata[EXPERIENCE_GATE_CONTEXTS_KEY] == [
-        {
-            "trajectory_uri": analysis.trajectories[0].uri,
-            "trajectory_summary": "trajectory content",
-            "passed": True,
-            "trajectory_outcome": "success",
-            "rollout_passed": True,
-            "score": 1.0,
-            "feedback": [],
-            "experience_execution": {},
-            "evidence": [],
-        }
-    ]
-    assert len(estimator.calls) == 1
+    proposal = gradients[0]
+    assert proposal.target_name == item.rollout.case.name
+    assert proposal.links[0].to_uri == SESSION
+    gate_context = proposal.metadata[EXPERIENCE_GATE_CONTEXTS_KEY][0]
+    assert gate_context["passed"] is False
+    assert gate_context["feedback"] == ["duplicate remains"]
+    assert gate_context["evidence"][0]["summary"] == "Cancel the duplicate booking."
+    provider = run.await_args.args[0]
+    assert provider.target_uri == proposal.target_uri
+    assert provider.messages == item.rollout.messages
 
 
 @pytest.mark.asyncio
-async def test_experience_gradient_estimator_uses_policy_version_for_newer_old_file_absence():
-    analysis = _analysis(passed=False, outcome="failure")
-    operations = SimpleNamespace(
-        upsert_operations=[
-            SimpleNamespace(
-                memory_type="experiences",
-                memory_fields={"content": "replacement body"},
-                uris=["viking://user/u/memories/experiences/booking_duplicate_handling.md"],
-                old_memory_file_content=None,
-            )
-        ]
+async def test_unknown_outcome_is_not_promoted_to_success(monkeypatch):
+    monkeypatch.setattr(
+        ExperienceGradientEstimator, "_run_extract_loop", AsyncMock(return_value=operations())
     )
-    estimator = FakeExperienceGradientEstimator({analysis.trajectories[0].uri: operations})
-
-    gradients = await estimator.estimate(analysis, _experience_set(), _context())
-
-    assert len(gradients) == 1
-    gradient = gradients[0]
-    assert gradient.target_name == "booking_duplicate_handling"
-    assert gradient.base_version == 3
-    assert gradient.before_file is None
-    assert gradient.after_file.content == "replacement body"
-    assert gradient.confidence == pytest.approx(0.3)
+    (proposal,) = await estimate(ExperienceGradientEstimator(), analysis(passed=None))
+    assert proposal.metadata[EXPERIENCE_GATE_CONTEXTS_KEY][0]["passed"] is None
 
 
 @pytest.mark.asyncio
-async def test_experience_gate_uses_trajectory_outcome_instead_of_whole_rollout_outcome():
-    analysis = _analysis(passed=False, outcome="success")
-    operations = SimpleNamespace(
-        upsert_operations=[
-            SimpleNamespace(
-                memory_type="experiences",
-                memory_fields={"content": "replacement body"},
-                uris=["viking://user/u/memories/experiences/booking_duplicate_handling.md"],
-                old_memory_file_content=None,
-            )
-        ]
+@pytest.mark.parametrize(
+    "invalid", ["rename", "extra", "delete", "cross_case", "supersedes", "errors"]
+)
+async def test_invalid_target_changes_fail_explicitly(monkeypatch, invalid):
+    ops = operations()
+    if invalid == "rename":
+        ops.upsert_operations[0].memory_fields["experience_name"] = "other"
+    if invalid == "extra":
+        ops.upsert_operations.append(operations("other").upsert_operations[0])
+    if invalid == "delete":
+        ops.delete_file_contents.append(MemoryFile(uri=f"{ROOT}/case_a.md", content="old"))
+    if invalid == "cross_case":
+        ops.upsert_operations[0].uris = [f"{ROOT}/other.md"]
+    if invalid == "supersedes":
+        ops.upsert_operations[0].memory_fields["supersedes"] = "other"
+    if invalid == "errors":
+        ops.errors.append("invalid SDK")
+    monkeypatch.setattr(
+        ExperienceGradientEstimator, "_run_extract_loop", AsyncMock(return_value=ops)
     )
-    estimator = FakeExperienceGradientEstimator({analysis.trajectories[0].uri: operations})
-
-    gradients = await estimator.estimate(analysis, _experience_set(), _context())
-
-    gate_context = gradients[0].metadata[EXPERIENCE_GATE_CONTEXTS_KEY][0]
-    assert gate_context["passed"] is True
-    assert gate_context["trajectory_outcome"] == "success"
-    assert gate_context["rollout_passed"] is False
+    with pytest.raises(ValueError):
+        await estimate(ExperienceGradientEstimator(), analysis())
 
 
 @pytest.mark.asyncio
-async def test_experience_gradient_estimator_runs_trajectory_extracts_in_parallel():
-    analysis = _analysis()
-    analysis.trajectories.append(
-        Trajectory(
-            name="booking_duplicate_second",
-            uri="viking://user/u/memories/trajectories/booking_duplicate_second.md",
-            content="second trajectory content",
-            outcome="success",
-            retrieval_anchor="Stage: final",
-        )
+async def test_concurrent_sessions_propose_same_case_without_waiting_for_trials(monkeypatch):
+    entered = 0
+    ready = asyncio.Event()
+
+    async def run(self, provider, context):
+        nonlocal entered
+        entered += 1
+        if entered == 2:
+            ready.set()
+        await asyncio.wait_for(ready.wait(), 1)
+        return operations()
+
+    monkeypatch.setattr(ExperienceGradientEstimator, "_run_extract_loop", run)
+    batches = await asyncio.gather(
+        estimate(ExperienceGradientEstimator(), analysis()),
+        estimate(ExperienceGradientEstimator(), analysis(session=SESSION.replace("s1", "s2"))),
     )
-
-    class ParallelProbeEstimator(ExperienceGradientEstimator):
-        def __init__(self):
-            super().__init__()
-            self.active = 0
-            self.max_active = 0
-            self.all_started = asyncio.Event()
-
-        async def _run_extract_loop(self, trajectory, context):
-            self.active += 1
-            self.max_active = max(self.max_active, self.active)
-            if self.active == len(analysis.trajectories):
-                self.all_started.set()
-            try:
-                await asyncio.wait_for(self.all_started.wait(), timeout=0.2)
-                return None
-            finally:
-                self.active -= 1
-
-    estimator = ParallelProbeEstimator()
-
-    assert await estimator.estimate(analysis, _experience_set(), _context()) == []
-    assert estimator.max_active == len(analysis.trajectories)
+    assert batches[0][0].target_uri == batches[1][0].target_uri
+    assert batches[0][0].links[0].to_uri != batches[1][0].links[0].to_uri
 
 
 @pytest.mark.asyncio
-async def test_experience_gradient_estimator_keeps_one_primary_experience_per_trajectory():
-    analysis = _analysis()
-    analysis.trajectories[0].name = "multi_booking_handling"
-    operations = SimpleNamespace(
-        upsert_operations=[
-            SimpleNamespace(
-                memory_type="experiences",
-                memory_fields={
-                    "experience_name": "cancel_booking",
-                    "content": "small side goal",
-                    "supersedes": "",
-                },
-                uris=["viking://user/u/memories/experiences/cancel_booking.md"],
-                old_memory_file_content=None,
-            ),
-            SimpleNamespace(
-                memory_type="experiences",
-                memory_fields={
-                    "experience_name": "multi_booking_handling",
-                    "content": "one composite DAG with all required branches",
-                    "supersedes": "",
-                },
-                uris=["viking://user/u/memories/experiences/multi_booking_handling.md"],
-                old_memory_file_content=None,
-            ),
-        ]
-    )
-    estimator = FakeExperienceGradientEstimator({analysis.trajectories[0].uri: operations})
+async def test_estimator_wires_session_provider_into_extract_loop(monkeypatch):
+    from types import SimpleNamespace
 
-    gradients = await estimator.estimate(analysis, _experience_set(), _context())
+    from openviking.server.identity import RequestContext, Role
+    from openviking.session.train.components import gradient_estimator as module
+    from openviking_cli.session.user_id import UserIdentifier
 
-    assert [gradient.target_name for gradient in gradients] == ["multi_booking_handling"]
+    recorded = []
 
-
-@pytest.mark.asyncio
-async def test_experience_gradient_estimator_coalesces_duplicate_targets_with_provenance():
-    analysis = _analysis()
-    second = Trajectory(
-        name="booking_duplicate",
-        uri="viking://user/u/memories/trajectories/booking_duplicate_second.md",
-        content="second trajectory content",
-        outcome="success",
-        retrieval_anchor="Stage: final",
-        metadata={"training_category": "booking"},
-    )
-    analysis.trajectories.append(second)
-
-    def operations(content):
-        return SimpleNamespace(
-            upsert_operations=[
-                SimpleNamespace(
-                    memory_type="experiences",
-                    memory_fields={
-                        "experience_name": "booking_duplicate",
-                        "content": content,
-                        "supersedes": "",
-                    },
-                    uris=["viking://user/u/memories/experiences/booking_duplicate.md"],
-                    old_memory_file_content=None,
-                )
-            ]
-        )
-
-    estimator = FakeExperienceGradientEstimator(
-        {
-            analysis.trajectories[0].uri: operations("short"),
-            second.uri: operations("a longer composite DAG"),
-        }
-    )
-
-    gradients = await estimator.estimate(analysis, _experience_set(), _context())
-
-    assert len(gradients) == 1
-    assert gradients[0].after_file.content == "a longer composite DAG"
-    assert {link.to_uri for link in gradients[0].links} == {
-        analysis.trajectories[0].uri,
-        second.uri,
-    }
-    assert gradients[0].metadata["source_trajectory_uris"] == sorted(
-        [analysis.trajectories[0].uri, second.uri]
-    )
-
-
-@pytest.mark.asyncio
-async def test_experience_gradient_estimator_skips_empty_content_and_handles_extract_errors():
-    analysis = _analysis()
-    estimator = FakeExperienceGradientEstimator({})
-
-    async def raise_error(_trajectory, _context):
-        raise RuntimeError("extract failure")
-
-    estimator._run_extract_loop = raise_error
-
-    assert await estimator.estimate(analysis, _experience_set(), _context()) == []
-
-    strict_context = ExperienceGradientContext(
-        request_context=SimpleNamespace(),
-        messages=[],
-        strict_extract_errors=True,
-    )
-    with pytest.raises(RuntimeError, match="extract failure"):
-        await estimator.estimate(analysis, _experience_set(), strict_context)
-
-
-@pytest.mark.asyncio
-async def test_experience_gradient_estimator_runs_extract_loop(monkeypatch):
-    analysis = _analysis()
-    analysis.evaluation.feedback = ["The transfer happened before flight status was checked."]
-    analysis.metadata["experience_execution"] = {
-        "viking://user/u/memories/experiences/transfer.md": {
-            "state": "running",
-            "executed_nodes": ["lookup"],
-            "current_nodes": ["check_status"],
-        }
-    }
-    captured = {}
-
-    class FakeProvider:
+    class Loop:
         def __init__(self, **kwargs):
-            captured["provider_kwargs"] = kwargs
-
-    class FakeIsolationHandler:
-        def __init__(self, request_context, extract_context, allowed_memory_types):
-            captured["request_context"] = request_context
-            captured["extract_context"] = extract_context
-            captured["allowed_memory_types"] = allowed_memory_types
-
-        def prepare_messages(self):
-            captured["prepare_messages_called"] = True
-
-    class FakeExtractLoop:
-        def __init__(self, **kwargs):
-            captured["extract_loop_kwargs"] = kwargs
+            recorded.append(kwargs)
 
         async def run(self):
-            return SimpleNamespace(upsert_operations=[]), {"summary": "ok"}
+            return operations(), []
 
-    monkeypatch.setattr(gradient_estimator_module, "AgentExperienceContextProvider", FakeProvider)
-    monkeypatch.setattr(gradient_estimator_module, "MemoryIsolationHandler", FakeIsolationHandler)
-    monkeypatch.setattr(gradient_estimator_module, "ExtractLoop", FakeExtractLoop)
-
-    vlm = SimpleNamespace(model="account-model")
-    resolver = SimpleNamespace(get_vlm=AsyncMock(return_value=vlm))
-    estimator = ExperienceGradientEstimator(
-        viking_fs=SimpleNamespace(),
-        vlm_resolver=resolver,
+    monkeypatch.setattr(module, "ExtractLoop", Loop)
+    fs = SimpleNamespace()
+    ctx = RequestContext(user=UserIdentifier("default", "u"), role=Role.ROOT)
+    resolver = SimpleNamespace(get_vlm=AsyncMock(return_value=SimpleNamespace(model="test")))
+    estimator = ExperienceGradientEstimator(viking_fs=fs, vlm_resolver=resolver)
+    result = await estimator.estimate(
+        analysis(), ExperienceSet(ROOT, []), ExperienceGradientContext(ctx, [])
     )
-    context = _context()
-    context.request_context.account_id = "account-a"
-
-    gradients = await estimator.estimate(analysis, _experience_set(), context)
-
-    assert gradients == []
-    assert captured["provider_kwargs"] == {
-        "messages": context.messages,
-        "trajectory_summary": analysis.trajectories[0].content,
-        "trajectory_uri": analysis.trajectories[0].uri,
-        "vlm_config": vlm,
-        "dag_execution": {
-            "outcome": {
-                "passed": True,
-                "score": 1.0,
-                "feedback": ["The transfer happened before flight status was checked."],
-                "criteria": [
-                    {
-                        "criterion_name": "done",
-                        "passed": True,
-                        "score": 1.0,
-                        "feedback": [],
-                        "evidence": ["evidence"],
-                    }
-                ],
-            },
-            "execution": analysis.metadata["experience_execution"],
-        },
-    }
-    resolver.get_vlm.assert_awaited_once_with(context.request_context.account_id)
-    assert captured["request_context"] is context.request_context
-    assert captured["allowed_memory_types"] == {"experiences"}
-    assert captured["prepare_messages_called"] is True
-    assert captured["extract_loop_kwargs"]["vlm"] is vlm
-    assert captured["extract_loop_kwargs"]["context_provider"]._isolation_handler is not None
+    provider = recorded[0]["context_provider"]
+    assert [schema.memory_type for schema in provider.get_memory_schemas(ctx)] == ["experiences"]
+    assert provider.case.name == result[0].target_name
+    assert provider.source_session_uri == SESSION
+    assert provider._viking_fs is fs
+    resolver.get_vlm.assert_awaited_once_with("default")

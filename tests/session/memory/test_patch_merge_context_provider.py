@@ -399,6 +399,10 @@ def test_patch_merge_context_provider_instruction_mentions_path_field_normalizat
 
 def test_patch_merge_context_provider_detects_language_from_patch_content(monkeypatch):
     monkeypatch.setenv("TZ", "Asia/Shanghai")
+    monkeypatch.setattr(
+        "openviking.session.memory.utils.language.get_openviking_config",
+        lambda: SimpleNamespace(output_language_override=""),
+    )
     provider = PatchMergeContextProvider(
         memory_type="preferences",
         required_file_uris=[],
@@ -425,6 +429,10 @@ def test_patch_merge_context_provider_detects_language_from_patch_content(monkey
 
 def test_patch_merge_context_provider_empty_patches_fallback_to_english(monkeypatch):
     monkeypatch.setenv("TZ", "Asia/Shanghai")
+    monkeypatch.setattr(
+        "openviking.session.memory.utils.language.get_openviking_config",
+        lambda: SimpleNamespace(output_language_override=""),
+    )
     provider = PatchMergeContextProvider(
         memory_type="preferences",
         required_file_uris=[],
@@ -436,6 +444,10 @@ def test_patch_merge_context_provider_empty_patches_fallback_to_english(monkeypa
 
 def test_patch_merge_context_provider_ignores_before_file_language(monkeypatch):
     monkeypatch.setenv("TZ", "Asia/Shanghai")
+    monkeypatch.setattr(
+        "openviking.session.memory.utils.language.get_openviking_config",
+        lambda: SimpleNamespace(output_language_override=""),
+    )
     provider = PatchMergeContextProvider(
         memory_type="preferences",
         required_file_uris=[],
@@ -458,3 +470,31 @@ def test_patch_merge_context_provider_ignores_before_file_language(monkeypatch):
     )
 
     assert provider.get_output_language() == "en"
+
+
+@pytest.mark.asyncio
+async def test_fixed_case_merge_never_searches_or_renames_other_experiences():
+    from unittest.mock import AsyncMock
+
+    uri = "viking://user/u/memories/experiences/case_a.md"
+    provider = PatchMergeContextProvider(
+        memory_type="experiences",
+        fixed_target=True,
+        required_file_uris=[uri],
+        patches=[
+            PatchMergePatch(
+                before_file=None,
+                after_file=MemoryFile(
+                    uri=uri,
+                    content="dag",
+                    memory_type="experiences",
+                    extra_fields={"experience_name": "case_a"},
+                ),
+            )
+        ],
+    )
+    provider.search_files = AsyncMock(side_effect=AssertionError("fixed target must not search"))
+    assert await provider._resolve_prefetch_file_uris() == [uri]
+    provider.search_files.assert_not_called()
+    assert "Never rename" in provider.instruction()
+    assert uri in provider.instruction()

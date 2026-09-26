@@ -52,10 +52,12 @@ class _CorrectiveJudgementResult:
     errors: dict[int, str] = field(default_factory=dict)
     batch_count: int = 0
     split_count: int = 0
+    preservation_scores: dict[int, float] = field(default_factory=dict)
     oversized_candidates: list[dict[str, str]] = field(default_factory=list)
 
     def merge(self, other: "_CorrectiveJudgementResult") -> None:
         self.scores.update(other.scores)
+        self.preservation_scores.update(other.preservation_scores)
         self.errors.update(other.errors)
         self.batch_count += other.batch_count
         self.split_count += other.split_count
@@ -64,7 +66,7 @@ class _CorrectiveJudgementResult:
 
 @dataclass(slots=True)
 class ExperienceImprovementGate:
-    """Keep only Experience plans that improve their source trajectories."""
+    """Keep only Experience plans that improve their source Sessions."""
 
     config: DagDeciderConfig
     jev_config: JevConfig | None = None
@@ -85,7 +87,6 @@ class ExperienceImprovementGate:
         policy_set: PolicySet,
         context: Any,
     ) -> PolicyUpdatePlan:
-        del policy_set, context
         upserts = [
             item
             for item in plan.items
@@ -110,24 +111,13 @@ class ExperienceImprovementGate:
                 },
             )
 
-        contexts_by_trajectory = _gate_contexts_by_trajectory(gradients)
+        contexts_by_target = await _gate_contexts_by_target(gradients, policy_set)
         validations_by_item: list[list[_CandidateValidation]] = []
         batches: dict[str, list[_CandidateValidation]] = {}
         batch_diagnostics = _CorrectiveJudgementResult()
         ordinal = 0
         for item in upserts:
-            trajectory_uris = {
-                link.to_uri
-                for link in item.links
-                if link.link_type == "derived_from" and link.to_uri
-            }
-            validation_contexts = [
-                gate_context
-                for trajectory_uri in trajectory_uris
-                for gate_context in contexts_by_trajectory.get(trajectory_uri, [])
-            ]
-            if not validation_contexts and len(contexts_by_trajectory) == 1:
-                validation_contexts = next(iter(contexts_by_trajectory.values()))
+            validation_contexts = list(contexts_by_target.get(item.target_uri or "", {}).values())
 
             item_validations: list[_CandidateValidation] = []
             if not validation_contexts:
@@ -139,7 +129,7 @@ class ExperienceImprovementGate:
                     ordinal=ordinal,
                     result={
                         "passed": False,
-                        "reason": "candidate has no source trajectory validation context",
+                        "reason": "candidate has no source Session validation context",
                     },
                 )
                 ordinal += 1
@@ -175,11 +165,24 @@ class ExperienceImprovementGate:
                 {
                     "target_uri": item.target_uri,
                     "target_name": item.target_name,
-                    "passed": bool(item_diagnostics)
-                    and all(result.get("passed") for result in item_diagnostics),
+                    **_aggregate_session_results(item_diagnostics, item_validations),
                     "replays": item_diagnostics,
                 }
             )
+
+        for item, validations, diagnostic in zip(
+            upserts, validations_by_item, diagnostics, strict=True
+        ):
+            if diagnostic["passed"]:
+                sources = [
+                    {
+                        k: v
+                        for k, v in validation.gate_context.items()
+                        if k not in {"evidence", "experience_execution"}
+                    }
+                    for validation in validations
+                ]
+                item.metadata.setdefault("patch_metadata", {})["source_sessions"] = sources
 
         passed = bool(diagnostics) and all(item["passed"] for item in diagnostics)
         accepted_upserts = {
@@ -263,7 +266,9 @@ class ExperienceImprovementGate:
         except Exception as exc:
             for validation, candidate in needs_judgement:
                 validation.result = {
-                    "trajectory_uri": str(validation.gate_context.get("trajectory_uri") or ""),
+                    "source_session_uri": str(
+                        validation.gate_context.get("source_session_uri") or ""
+                    ),
                     "passed": False,
                     "reason": f"candidate corrective-action validation failed: {exc}",
                     "replay": candidate.replay,
@@ -278,7 +283,9 @@ class ExperienceImprovementGate:
             error = judgement.errors.get(validation.ordinal)
             if error:
                 validation.result = {
-                    "trajectory_uri": str(validation.gate_context.get("trajectory_uri") or ""),
+                    "source_session_uri": str(
+                        validation.gate_context.get("source_session_uri") or ""
+                    ),
                     "passed": False,
                     "reason": f"candidate corrective-action input is oversized: {error}",
                     "replay": candidate.replay,
@@ -289,32 +296,28 @@ class ExperienceImprovementGate:
                 }
                 continue
             relevance = judgement.scores.get(validation.ordinal, 0.0)
-            relevant = relevance >= self.config.noul_true_threshold
-            gate_context = validation.gate_context
-            trajectory_passed = bool(gate_context.get("passed"))
-            rollout_passed = bool(gate_context.get("rollout_passed", trajectory_passed))
-            reattributed = trajectory_passed and not rollout_passed
-            compared = validation.baseline_source is not None
+            preservation = judgement.preservation_scores.get(validation.ordinal, 0.0)
+            improved = (
+                validation.gate_context.get("passed") is False
+                and candidate.replay is not None
+                and candidate.replay["state"] != "completed"
+                and relevance >= self.config.noul_true_threshold
+            )
+            no_regression = preservation >= self.config.noul_true_threshold
             validation.result = {
-                "trajectory_uri": str(gate_context.get("trajectory_uri") or ""),
-                "passed": relevant,
-                "reason": (
-                    "candidate improves on the baseline for the failed rollout"
-                    if relevant and compared
-                    else "candidate correction is attributable to the failed rollout"
-                    if relevant and reattributed
-                    else "candidate catches the failed trajectory with a relevant corrective action"
-                    if relevant
-                    else "candidate does not improve on the baseline for the evaluation failure"
-                    if compared
-                    else "candidate corrective action does not address the evaluation failure"
-                ),
+                "source_session_uri": str(validation.gate_context.get("source_session_uri") or ""),
+                "passed": no_regression,
+                "improved": improved and no_regression,
+                "reason": "candidate improves the failed Session"
+                if improved and no_regression
+                else "candidate preserves Session obligations"
+                if no_regression
+                else "candidate regresses or lacks grounded Session obligations",
                 "corrective_action_score": relevance,
-                "failure_reattributed": reattributed and relevant,
+                "preservation_score": preservation,
                 "replay": candidate.replay,
                 **_baseline_diagnostic(
-                    validation,
-                    replay_results.get(_replay_key(validation, "baseline")),
+                    validation, replay_results.get(_replay_key(validation, "baseline"))
                 ),
             }
         return judgement
@@ -417,6 +420,7 @@ class ExperienceImprovementGate:
         questions: dict[str, dict[str, Any]] = {}
         question_to_ordinal: dict[str, int] = {}
         question_to_validation: dict[str, _CandidateValidation] = {}
+        question_groups: dict[str, list[str]] = {}
         for index, (validation, candidate) in enumerate(validations):
             question_id = (
                 "improvement_effective" if index == 0 else f"improvement_effective_{index}"
@@ -424,10 +428,11 @@ class ExperienceImprovementGate:
             baseline = replay_results.get(_replay_key(validation, "baseline"))
             gate_context = validation.gate_context
             candidates[question_id] = {
-                "trajectory": _clip(
-                    str(gate_context.get("trajectory_summary") or ""),
-                    6000,
+                "session_evidence": _clip(
+                    json.dumps(gate_context.get("evidence") or [], ensure_ascii=False),
+                    self.config.max_state_chars,
                 ),
+                "session_outcome": gate_context.get("passed"),
                 "evaluation_feedback": _clip(
                     json.dumps(gate_context.get("feedback") or [], ensure_ascii=False),
                     8000,
@@ -477,15 +482,33 @@ class ExperienceImprovementGate:
             }
             question_to_ordinal[question_id] = validation.ordinal
             question_to_validation[question_id] = validation
+            preservation_id = f"preservation_{index}"
+            question_groups[question_id] = [question_id, preservation_id]
+            questions[preservation_id] = {
+                "type": "noul",
+                "instructions": (
+                    f"For candidate {question_id}, are its obligations grounded in the raw "
+                    "Session evidence and Case, with no regression relative to the baseline? "
+                    "Every previously satisfied requirement must remain supported. Do not accept "
+                    "weakened checks, deleted requirements, invented tools or unsupported "
+                    "business-success claims. An unchanged valid baseline path is non-regressing. "
+                    "Without a baseline, require an evidence-grounded actionable workflow. "
+                    "An unknown Session outcome must stay unknown; DAG completion is not an "
+                    "independent business evaluation."
+                ),
+            }
+            question_to_ordinal[preservation_id] = validation.ordinal
+            question_to_validation[preservation_id] = validation
 
         result = _CorrectiveJudgementResult()
         max_input_tokens = _jev_max_input_tokens(self.jev)
         model = getattr(getattr(self.jev, "config", None), "model", None)
 
-        async def evaluate(question_ids: list[str]) -> None:
+        async def evaluate(candidate_ids: list[str]) -> None:
+            question_ids = [qid for cid in candidate_ids for qid in question_groups[cid]]
             batch_questions = {question_id: questions[question_id] for question_id in question_ids}
             batch_candidates = {
-                question_id: candidates[question_id] for question_id in question_ids
+                candidate_id: candidates[candidate_id] for candidate_id in candidate_ids
             }
             estimated_tokens = estimate_jev_input_tokens(
                 state={"candidates": batch_candidates},
@@ -494,7 +517,7 @@ class ExperienceImprovementGate:
             )
             if estimated_tokens > max_input_tokens:
                 await split_or_reject(
-                    question_ids,
+                    candidate_ids,
                     reason=(
                         f"estimated input {estimated_tokens} exceeds configured Jev budget "
                         f"{max_input_tokens}"
@@ -508,12 +531,17 @@ class ExperienceImprovementGate:
                     questions=batch_questions,
                 )
             except JevPayloadTooLarge as exc:
-                await split_or_reject(question_ids, reason=str(exc))
+                await split_or_reject(candidate_ids, reason=str(exc))
                 return
             for question_id in question_ids:
                 answer = answers.get(question_id)
                 score = answer.get("noul") if isinstance(answer, dict) else None
-                result.scores[question_to_ordinal[question_id]] = (
+                scores = (
+                    result.preservation_scores
+                    if question_id.startswith("preservation_")
+                    else result.scores
+                )
+                scores[question_to_ordinal[question_id]] = (
                     float(score)
                     if isinstance(score, (int, float)) and not isinstance(score, bool)
                     else 0.0
@@ -532,12 +560,14 @@ class ExperienceImprovementGate:
             result.oversized_candidates.append(
                 {
                     "experience_uri": validation.experience_uri,
-                    "trajectory_uri": str(validation.gate_context.get("trajectory_uri") or ""),
+                    "source_session_uri": str(
+                        validation.gate_context.get("source_session_uri") or ""
+                    ),
                     "reason": reason,
                 }
             )
 
-        await evaluate(list(questions))
+        await evaluate(list(candidates))
         return result
 
 
@@ -581,78 +611,123 @@ def _preliminary_validation_result(
     baseline: _DagReplayResult | None,
 ) -> dict[str, Any] | None:
     gate_context = validation.gate_context
-    trajectory_uri = str(gate_context.get("trajectory_uri") or "")
-    baseline_diagnostic = _baseline_diagnostic(validation, baseline)
-    if candidate.error:
-        reason = (
-            f"candidate DAG does not compile: {candidate.error}"
+    diagnostic = {
+        "source_session_uri": str(gate_context.get("source_session_uri") or ""),
+        **_baseline_diagnostic(validation, baseline),
+    }
+    if gate_context.get("error"):
+        return {**diagnostic, "passed": False, "reason": gate_context["error"]}
+    if not _parse_evidence(gate_context.get("evidence")):
+        return {**diagnostic, "passed": False, "reason": "source Session has no replay evidence"}
+    if candidate.error or candidate.replay is None:
+        error_prefix = (
+            "candidate DAG does not compile"
             if candidate.error_kind == "compile"
-            else f"candidate DAG replay failed: {candidate.error}"
+            else "candidate DAG replay failed"
         )
         return {
-            "trajectory_uri": trajectory_uri,
+            **diagnostic,
             "passed": False,
-            "reason": reason,
-            **baseline_diagnostic,
+            "reason": f"{error_prefix}: {candidate.error or 'missing replay'}",
         }
-    if candidate.replay is None:
+    diagnostic["replay"] = candidate.replay
+    if baseline is not None and (baseline.error or baseline.replay is None):
+        return {**diagnostic, "passed": False, "reason": "baseline replay failed"}
+    outcome = gate_context.get("passed")
+    complete = candidate.replay["state"] == "completed"
+    if outcome is True and not complete:
         return {
-            "trajectory_uri": trajectory_uri,
+            **diagnostic,
             "passed": False,
-            "reason": "candidate DAG replay did not produce a result",
-            **baseline_diagnostic,
+            "improved": False,
+            "reason": "candidate no longer completes for a successful Session",
         }
-
-    trajectory_passed = bool(gate_context.get("passed"))
-    rollout_passed = bool(gate_context.get("rollout_passed", trajectory_passed))
-    if trajectory_passed and candidate.replay["state"] == "completed":
+    if outcome is False and complete:
+        baseline_complete = (
+            baseline is not None
+            and baseline.replay is not None
+            and baseline.replay["state"] == "completed"
+        )
+        if not baseline_complete:
+            return {
+                **diagnostic,
+                "passed": False,
+                "improved": False,
+                "reason": "candidate accepts the failed Session as complete",
+            }
+        # Completion alone cannot establish equivalence: still compare obligations,
+        # and never count an accepted failed path as an improvement.
+    if not complete and not candidate.actions:
         return {
-            "trajectory_uri": trajectory_uri,
-            "passed": True,
-            "reason": "candidate preserves the successful trajectory",
-            "replay": candidate.replay,
-            **baseline_diagnostic,
-        }
-    if not trajectory_passed and candidate.replay["state"] == "completed":
-        return {
-            "trajectory_uri": trajectory_uri,
-            "passed": False,
-            "reason": "candidate still accepts the failed trajectory as complete",
-            "replay": candidate.replay,
-            **baseline_diagnostic,
-        }
-    if not candidate.actions:
-        return {
-            "trajectory_uri": trajectory_uri,
+            **diagnostic,
             "passed": False,
             "reason": "candidate detects an incomplete path but emits no corrective action",
-            "replay": candidate.replay,
-            **baseline_diagnostic,
-        }
-    if trajectory_passed and rollout_passed:
-        return {
-            "trajectory_uri": trajectory_uri,
-            "passed": False,
-            "reason": "candidate no longer completes for a successful rollout",
-            "replay": candidate.replay,
-            **baseline_diagnostic,
         }
     return None
 
 
-def _gate_contexts_by_trajectory(
-    gradients: list[SemanticGradient],
-) -> dict[str, list[dict[str, Any]]]:
-    result: dict[str, list[dict[str, Any]]] = {}
+def _aggregate_session_results(
+    results: list[dict[str, Any]], validations: list[_CandidateValidation]
+) -> dict[str, Any]:
+    preserved = bool(results) and all(result.get("passed") for result in results)
+    has_failure = any(v.gate_context.get("passed") is False for v in validations)
+    improved = any(result.get("improved") for result in results)
+    passed = preserved and (not has_failure or improved)
+    return {
+        "passed": passed,
+        "improved": improved,
+        "reason": "Session replay requirements satisfied"
+        if passed
+        else "a source Session regressed or could not be validated"
+        if not preserved
+        else "no failed source Session improved",
+    }
+
+
+async def _gate_contexts_by_target(
+    gradients: list[SemanticGradient], policy_set: PolicySet
+) -> dict[str, dict[str, dict[str, Any]]]:
+    from openviking.session.archive_store import ArchiveStore
+    from openviking.session.tool_output_externalizer import ToolOutputExternalizer
+    from openviking.session.train.components.gradient_estimator import _messages_to_gate_evidence
+
+    result: dict[str, dict[str, dict[str, Any]]] = {}
     for gradient in gradients:
-        metadata = dict(getattr(gradient, "metadata", {}) or {})
-        contexts = metadata.get(EXPERIENCE_GATE_CONTEXTS_KEY) or []
-        for gate_context in contexts:
-            if not isinstance(gate_context, dict):
+        target = str(gradient.target_uri or "")
+        for value in gradient.metadata.get(EXPERIENCE_GATE_CONTEXTS_KEY) or []:
+            if isinstance(value, dict) and value.get("source_session_uri"):
+                result.setdefault(target, {})[value["source_session_uri"]] = value
+    archive_cache: dict[str, list[dict[str, str]]] = {}
+    for policy in policy_set.policies:
+        if policy.uri not in result:
+            continue
+        for source in policy.metadata.get("source_sessions") or []:
+            uri = str(source.get("source_session_uri") or "")
+            if not uri or uri in result[policy.uri]:
                 continue
-            trajectory_uri = str(gate_context.get("trajectory_uri") or "")
-            if trajectory_uri:
-                result.setdefault(trajectory_uri, []).append(gate_context)
+            gate_context = dict(source)
+            try:
+                if uri not in archive_cache:
+                    store = ArchiveStore(
+                        policy_set.viking_fs,
+                        policy_set.request_context,
+                        uri.rsplit("/history/", 1)[0],
+                    )
+                    messages = await store.read_messages(uri)
+                    if not messages:
+                        raise ValueError("source Session archive has no messages")
+                    session_uri = uri.rsplit("/history/", 1)[0]
+                    messages = await ToolOutputExternalizer(
+                        policy_set.viking_fs,
+                        session_uri,
+                        session_uri.rsplit("/", 1)[-1],
+                        policy_set.request_context,
+                    ).hydrate_for_extraction(messages, strict=True)
+                    archive_cache[uri] = _messages_to_gate_evidence(messages)
+                gate_context["evidence"] = archive_cache[uri]
+            except Exception as exc:
+                gate_context["error"] = f"source Session archive could not be read: {exc}"
+            result[policy.uri][uri] = gate_context
     return result
 
 
