@@ -31,6 +31,32 @@ fields:
       - check("condition to observe in context")
       - tell("action to perform")
       - choose("question whose answer selects one named case")
+      Atomic node and evaluation-obligation rules:
+      - Every node represents exactly one observable obligation. Split information collection,
+        calculation, user communication, confirmation, and state mutation into separate nodes.
+      - Words such as "and", "then", "while", "同时", "并且" or "然后" usually indicate that
+        a description contains multiple obligations and must be split.
+      - Map every concrete requirement in the Case rubric or evaluation feedback to its own node.
+        If feedback says required information was not communicated, add a dedicated `tell(...)`
+        node for that information; do not hide it inside a generic summary node.
+      - `ask(...)` requests exactly one missing value or one explicit confirmation. It must not
+        also calculate or communicate required business information.
+      - `tell(...)` communicates one result or one closely related result set. State what must be
+        communicated, which previously collected evidence it uses, and whether it uses the state
+        before or after a mutation.
+      - `call(...)` represents one tool obligation. Its description must state the required input
+        evidence and intended effect without combining a later confirmation or communication.
+      Mutation barrier rules:
+      - Before any tool call that creates, updates, cancels, deletes, books, pays, transfers, or
+        otherwise changes external state, create explicit predecessor nodes for every required
+        pre-action disclosure and for the user's confirmation.
+      - Use this order: collect facts -> communicate required pre-action facts -> obtain explicit
+        confirmation -> execute state-changing tools -> communicate the final result.
+      - Information computed from pre-mutation state must be communicated before the first
+        mutation. A post-action summary cannot substitute for a required pre-action disclosure.
+      - Never combine a required disclosure and confirmation in one `ask(...)`. For example,
+        `ask("Tell the total and ask for confirmation")` is invalid. Use a `tell(...)` node for
+        the total followed by a separate `ask(...)` confirmation node.
       Relationship methods use node object variables, never IDs:
       - source.then(target1, target2) creates one-to-many fan-out.
       - condition.if_true(target), condition.if_false(target) define boolean branches.
@@ -68,9 +94,17 @@ fields:
       observed in the input. Preserve alternate paths and put guard conditions before actions.
       Natural-language descriptions must be in {{ language }}; constructor names stay in English.
       Example content:
-      dag = workflow("User asks to check an order")
+      dag = workflow("User asks to cancel an order after reviewing the refund")
       order_id = ask("What is the order ID?")
       order = call("query_order", "Use order_id from context")
+      tell_refund = tell("Before cancellation, calculate and communicate the refund from the original order")
+      confirm_cancel = ask("Ask for explicit confirmation to cancel the order")
+      cancel = call("cancel_order", "Cancel the confirmed order")
+      tell_result = tell("Communicate the cancellation and refund result")
       order_id.then(order)
+      order.then(tell_refund)
+      tell_refund.then(confirm_cancel)
+      confirm_cancel.then(cancel)
+      cancel.then(tell_result)
 
     merge_op: replace

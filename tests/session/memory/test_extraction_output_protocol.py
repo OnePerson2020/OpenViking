@@ -304,7 +304,7 @@ def test_python_protocol_compiles_extracted_code_from_fence():
     assert compiled == ["sdk.commit()"]
 
 
-def test_python_create_uses_schema_initial_value_for_omitted_optional_field():
+def test_python_create_uses_fixed_case_experience_schema():
     registry = MemoryTypeRegistry(load_schemas=False)
     registry.load_from_yaml(str(resolve_memory_templates_dir() / "experiences.yaml"))
     schema = registry.get("experiences")
@@ -320,15 +320,31 @@ def test_python_create_uses_schema_initial_value_for_omitted_optional_field():
 
     assert error is None
     assert operations is not None
-    assert "supersedes: str = ''" in contract
+    assert "supersedes" not in contract
     assert operations.model_dump()["experiences"] == [
         {
             "page_id": 100,
             "experience_name": "cancel_booking",
             "content": "dag source",
-            "supersedes": "",
         }
     ]
+
+
+def test_experience_schema_requires_atomic_nodes_and_pre_mutation_disclosures():
+    registry = MemoryTypeRegistry(load_schemas=False)
+    registry.load_from_yaml(str(resolve_memory_templates_dir() / "experiences.yaml"))
+    schema = registry.get("experiences")
+    context = _context([schema], template_context={"language": "en"})
+
+    contract = create_extraction_output_protocol("python").render_contract(context)
+
+    assert "Every node represents exactly one observable obligation" in contract
+    assert "Map every concrete requirement in the Case rubric or evaluation feedback" in contract
+    assert "collect facts -> communicate required pre-action facts" in contract
+    assert "A post-action summary cannot substitute" in contract
+    assert 'ask("Tell the total and ask for confirmation")` is invalid' in contract
+    assert "tell_refund.then(confirm_cancel)" in contract
+    assert "confirm_cancel.then(cancel)" in contract
 
 
 def test_python_create_populates_hidden_trajectory_execution_from_schema_default():
