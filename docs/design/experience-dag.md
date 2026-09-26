@@ -69,6 +69,8 @@ it as the DAG decision provider:
   "jev": {
     "api_url": "https://example.com/v1/systemone",
     "api_key": "...",
+    "model": "qwen3-1.7b",
+    "max_input_tokens": 110000,
     "timeout": 30,
     "verify_ssl": true
   },
@@ -83,12 +85,15 @@ it as the DAG decision provider:
 }
 ```
 
-One `search_exp` call translates every unresolved node across all active Experience instances
-into a single System One request. Boolean nodes become Noul questions and conditional branches
-become Choice questions. Jev never generates business values: identifiers and tool-result
-objects stay in the evidence table. Missing, malformed or uncertain answers leave nodes pending.
-Transient Jev failures do not invalidate the Experience and never fall back to slow generative
-slot filling when the Jev provider is selected.
+One `search_exp` call translates unresolved nodes across active Experience instances into typed
+System One questions. Questions are kept in one request while the conservative estimated input is
+within `max_input_tokens`; larger sets are bisected without duplicating or truncating questions.
+An HTTP 413, or a 422 explicitly reporting a context-length/input-token overflow, triggers the
+same split. Boolean nodes become Noul questions and conditional branches become Choice questions.
+Jev never generates business values: identifiers and tool-result objects stay in the evidence
+table. Missing, malformed or uncertain answers leave nodes pending. Transient Jev failures do not
+invalidate the Experience and never fall back to slow generative slot filling when the Jev
+provider is selected.
 
 The in-repository HTTP client also provides:
 
@@ -139,12 +144,14 @@ correctness.
 Experience, but that candidate is not published immediately. After patch merge, the Experience
 improvement gate compiles the final candidate and, for an update, its stored baseline. It replays
 both from empty instances against the source Trajectory's original conversation and tool-result
-evidence using Jev. DAGs sharing the same normalized evidence are decided together, including
-candidate/baseline pairs; failed-path relevance checks are likewise emitted as one Jev request
-with one typed question per candidate. For a successful Trajectory, the candidate must still
-complete. For a failed Trajectory, the candidate must stop before accepting the same failure and
-expose a current action that Jev judges both directly relevant to the evaluation feedback and,
-when a baseline exists, materially better than the baseline replay. The runtime
+evidence using Jev. DAGs sharing the same normalized evidence are decided together. Failed-path
+relevance checks keep each candidate and its baseline as one indivisible unit, then pack those
+units under the configured Jev budget. Provider-reported overflows are bisected; a single
+oversized candidate is rejected without rejecting unrelated candidates. For a successful
+Trajectory, the candidate must still complete. For a failed Trajectory, the candidate must stop
+before accepting the same failure and expose a current action that Jev judges both directly
+relevant to the evaluation feedback and, when a baseline exists, materially better than the
+baseline replay. The runtime
 `experience_execution` snapshot remains provenance and diagnostic input; the replay from original
 evidence is the publication authority. Validation is scoped to each candidate Experience and its
 linked Trajectories. Passing candidates may be applied when an unrelated candidate fails; a

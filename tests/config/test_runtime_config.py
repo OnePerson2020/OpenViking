@@ -195,6 +195,7 @@ def test_real_openviking_config_parses_shared_jev_and_dag_decider():
     )
 
     assert config.jev.api_url == "https://example.com/v1/systemone"
+    assert config.jev.max_input_tokens == 28_000
     assert config.agent_evolution.dag_decider.provider == "jev"
     assert config.agent_evolution.dag_decider.noul_true_threshold == 0.8
 

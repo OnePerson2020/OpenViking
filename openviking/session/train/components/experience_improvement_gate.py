@@ -8,7 +8,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from openviking.models.jev import JevClient
+from openviking.models.jev import JevClient, JevPayloadTooLarge, estimate_jev_input_tokens
 from openviking.service.experience_dag_decider import ExperienceDagDecider
 from openviking.session.memory.experience_dag import Dag, DagAction, DagEvidenceRef, DagInstance
 from openviking.session.memory.experience_dag_compiler import compile_dag
@@ -44,6 +44,22 @@ class _DagReplayResult:
     actions: list[DagAction] = field(default_factory=list)
     error: str | None = None
     error_kind: str | None = None
+
+
+@dataclass(slots=True)
+class _CorrectiveJudgementResult:
+    scores: dict[int, float] = field(default_factory=dict)
+    errors: dict[int, str] = field(default_factory=dict)
+    batch_count: int = 0
+    split_count: int = 0
+    oversized_candidates: list[dict[str, str]] = field(default_factory=list)
+
+    def merge(self, other: "_CorrectiveJudgementResult") -> None:
+        self.scores.update(other.scores)
+        self.errors.update(other.errors)
+        self.batch_count += other.batch_count
+        self.split_count += other.split_count
+        self.oversized_candidates.extend(other.oversized_candidates)
 
 
 @dataclass(slots=True)
@@ -97,6 +113,7 @@ class ExperienceImprovementGate:
         contexts_by_trajectory = _gate_contexts_by_trajectory(gradients)
         validations_by_item: list[list[_CandidateValidation]] = []
         batches: dict[str, list[_CandidateValidation]] = {}
+        batch_diagnostics = _CorrectiveJudgementResult()
         ordinal = 0
         for item in upserts:
             trajectory_uris = {
@@ -142,7 +159,7 @@ class ExperienceImprovementGate:
             validations_by_item.append(item_validations)
 
         for batch in batches.values():
-            await self._validate_batch(batch)
+            batch_diagnostics.merge(await self._validate_batch(batch))
 
         diagnostics: list[dict[str, Any]] = []
         for item, item_validations in zip(upserts, validations_by_item, strict=True):
@@ -190,12 +207,18 @@ class ExperienceImprovementGate:
                 "atomic": False,
                 "accepted_count": len(accepted_upserts),
                 "rejected_count": len(diagnostics) - len(accepted_upserts),
+                "jev_batch_count": batch_diagnostics.batch_count,
+                "jev_split_count": batch_diagnostics.split_count,
+                "oversized_candidates": batch_diagnostics.oversized_candidates,
                 "candidates": diagnostics,
             },
         }
         return PolicyUpdatePlan(items=accepted_items, metadata=metadata)
 
-    async def _validate_batch(self, validations: list[_CandidateValidation]) -> None:
+    async def _validate_batch(
+        self,
+        validations: list[_CandidateValidation],
+    ) -> _CorrectiveJudgementResult:
         gate_context = validations[0].gate_context
         replay_requests: list[_DagReplayRequest] = []
         for validation in validations:
@@ -231,9 +254,9 @@ class ExperienceImprovementGate:
                 needs_judgement.append((validation, candidate))
 
         if not needs_judgement:
-            return
+            return _CorrectiveJudgementResult()
         try:
-            scores = await self._judge_corrective_actions_batch(
+            judgement = await self._judge_corrective_actions_batch(
                 needs_judgement,
                 replay_results=replay_results,
             )
@@ -249,10 +272,23 @@ class ExperienceImprovementGate:
                         replay_results.get(_replay_key(validation, "baseline")),
                     ),
                 }
-            return
+            return _CorrectiveJudgementResult()
 
         for validation, candidate in needs_judgement:
-            relevance = scores.get(validation.ordinal, 0.0)
+            error = judgement.errors.get(validation.ordinal)
+            if error:
+                validation.result = {
+                    "trajectory_uri": str(validation.gate_context.get("trajectory_uri") or ""),
+                    "passed": False,
+                    "reason": f"candidate corrective-action input is oversized: {error}",
+                    "replay": candidate.replay,
+                    **_baseline_diagnostic(
+                        validation,
+                        replay_results.get(_replay_key(validation, "baseline")),
+                    ),
+                }
+                continue
+            relevance = judgement.scores.get(validation.ordinal, 0.0)
             relevant = relevance >= self.config.noul_true_threshold
             gate_context = validation.gate_context
             trajectory_passed = bool(gate_context.get("passed"))
@@ -281,6 +317,7 @@ class ExperienceImprovementGate:
                     replay_results.get(_replay_key(validation, "baseline")),
                 ),
             }
+        return judgement
 
     async def _replay_dags(
         self,
@@ -375,10 +412,11 @@ class ExperienceImprovementGate:
         validations: list[tuple[_CandidateValidation, _DagReplayResult]],
         *,
         replay_results: dict[str, _DagReplayResult],
-    ) -> dict[int, float]:
+    ) -> _CorrectiveJudgementResult:
         candidates: dict[str, Any] = {}
         questions: dict[str, dict[str, Any]] = {}
         question_to_ordinal: dict[str, int] = {}
+        question_to_validation: dict[str, _CandidateValidation] = {}
         for index, (validation, candidate) in enumerate(validations):
             question_id = (
                 "improvement_effective" if index == 0 else f"improvement_effective_{index}"
@@ -438,21 +476,69 @@ class ExperienceImprovementGate:
                 },
             }
             question_to_ordinal[question_id] = validation.ordinal
+            question_to_validation[question_id] = validation
 
-        answers = await self.jev.evaluate(
-            state={"candidates": candidates},
-            questions=questions,
-        )
-        scores: dict[int, float] = {}
-        for question_id, ordinal in question_to_ordinal.items():
-            answer = answers.get(question_id)
-            score = answer.get("noul") if isinstance(answer, dict) else None
-            scores[ordinal] = (
-                float(score)
-                if isinstance(score, (int, float)) and not isinstance(score, bool)
-                else 0.0
+        result = _CorrectiveJudgementResult()
+        max_input_tokens = _jev_max_input_tokens(self.jev)
+        model = getattr(getattr(self.jev, "config", None), "model", None)
+
+        async def evaluate(question_ids: list[str]) -> None:
+            batch_questions = {question_id: questions[question_id] for question_id in question_ids}
+            batch_candidates = {
+                question_id: candidates[question_id] for question_id in question_ids
+            }
+            estimated_tokens = estimate_jev_input_tokens(
+                state={"candidates": batch_candidates},
+                questions=batch_questions,
+                model=model,
             )
-        return scores
+            if estimated_tokens > max_input_tokens:
+                await split_or_reject(
+                    question_ids,
+                    reason=(
+                        f"estimated input {estimated_tokens} exceeds configured Jev budget "
+                        f"{max_input_tokens}"
+                    ),
+                )
+                return
+            result.batch_count += 1
+            try:
+                answers = await self.jev.evaluate(
+                    state={"candidates": batch_candidates},
+                    questions=batch_questions,
+                )
+            except JevPayloadTooLarge as exc:
+                await split_or_reject(question_ids, reason=str(exc))
+                return
+            for question_id in question_ids:
+                answer = answers.get(question_id)
+                score = answer.get("noul") if isinstance(answer, dict) else None
+                result.scores[question_to_ordinal[question_id]] = (
+                    float(score)
+                    if isinstance(score, (int, float)) and not isinstance(score, bool)
+                    else 0.0
+                )
+
+        async def split_or_reject(question_ids: list[str], *, reason: str) -> None:
+            if len(question_ids) > 1:
+                result.split_count += 1
+                midpoint = len(question_ids) // 2
+                await evaluate(question_ids[:midpoint])
+                await evaluate(question_ids[midpoint:])
+                return
+            question_id = question_ids[0]
+            validation = question_to_validation[question_id]
+            result.errors[validation.ordinal] = reason
+            result.oversized_candidates.append(
+                {
+                    "experience_uri": validation.experience_uri,
+                    "trajectory_uri": str(validation.gate_context.get("trajectory_uri") or ""),
+                    "reason": reason,
+                }
+            )
+
+        await evaluate(list(questions))
+        return result
 
 
 def _gate_context_key(gate_context: dict[str, Any]) -> str:
@@ -463,6 +549,11 @@ def _gate_context_key(gate_context: dict[str, Any]) -> str:
         ensure_ascii=False,
         sort_keys=True,
     )
+
+
+def _jev_max_input_tokens(jev: Any) -> int:
+    value = getattr(getattr(jev, "config", None), "max_input_tokens", None)
+    return value if isinstance(value, int) and value > 0 else 28_000
 
 
 def _replay_key(validation: _CandidateValidation, role: str) -> str:

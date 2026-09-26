@@ -19,6 +19,26 @@ class JevError(RuntimeError):
     """Raised when a System One request or response is invalid."""
 
 
+class JevPayloadTooLarge(JevError):
+    """Raised when one indivisible Jev request exceeds the configured/provider budget."""
+
+
+def estimate_jev_input_tokens(
+    *,
+    state: Any,
+    questions: dict[str, dict[str, Any]],
+    model: str | None = None,
+) -> int:
+    """Conservatively estimate tokens without coupling to a provider tokenizer."""
+    payload: dict[str, Any] = {"state": state, "questions": questions}
+    if model:
+        payload["model"] = model
+    serialized = json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))
+    non_ascii = sum(ord(char) > 127 for char in serialized)
+    ascii_chars = len(serialized) - non_ascii
+    return max(1, non_ascii + (ascii_chars + 3) // 4)
+
+
 @dataclass(slots=True)
 class JevClient:
     """Evaluate typed questions against shared state through System One."""
@@ -37,9 +57,14 @@ class JevClient:
             return {}
         tracer.set("jev.question_count", len(questions))
         tracer.set("jev.state_chars", len(json.dumps(state, ensure_ascii=False, default=str)))
-        payload: dict[str, Any] = {"state": state, "questions": questions}
-        if self.config.model:
-            payload["model"] = self.config.model
+        tracer.set(
+            "jev.estimated_input_tokens",
+            estimate_jev_input_tokens(
+                state=state,
+                questions=questions,
+                model=self.config.model,
+            ),
+        )
 
         owns_client = self.client is None
         client = self.client or httpx.AsyncClient(
@@ -50,12 +75,60 @@ class JevClient:
             timeout=self.config.timeout,
             verify=self.config.verify_ssl,
         )
+        stats = {"batch_count": 0, "split_count": 0}
         try:
-            body = await self._post_with_retry(client, payload)
+            answers = await self._evaluate_with_client(
+                client,
+                state=state,
+                questions=questions,
+                stats=stats,
+            )
         finally:
             if owns_client:
                 await client.aclose()
+        tracer.set("jev.batch_count", stats["batch_count"])
+        tracer.set("jev.split_count", stats["split_count"])
+        return answers
 
+    async def _evaluate_with_client(
+        self,
+        client: Any,
+        *,
+        state: Any,
+        questions: dict[str, dict[str, Any]],
+        stats: dict[str, int],
+    ) -> dict[str, dict[str, Any]]:
+        estimated_tokens = estimate_jev_input_tokens(
+            state=state,
+            questions=questions,
+            model=self.config.model,
+        )
+        if estimated_tokens > self.config.max_input_tokens:
+            return await self._split_or_reject(
+                client,
+                state=state,
+                questions=questions,
+                stats=stats,
+                reason=(
+                    f"estimated input {estimated_tokens} exceeds configured Jev budget "
+                    f"{self.config.max_input_tokens}"
+                ),
+            )
+
+        payload: dict[str, Any] = {"state": state, "questions": questions}
+        if self.config.model:
+            payload["model"] = self.config.model
+        stats["batch_count"] += 1
+        try:
+            body = await self._post_with_retry(client, payload)
+        except JevPayloadTooLarge as exc:
+            return await self._split_or_reject(
+                client,
+                state=state,
+                questions=questions,
+                stats=stats,
+                reason=str(exc),
+            )
         answers = body.get("answers") if isinstance(body, dict) else None
         if not isinstance(answers, dict):
             raise JevError("Jev decision response has no answers object")
@@ -64,6 +137,33 @@ class JevClient:
             value = usage.get(key)
             if isinstance(value, int):
                 tracer.set(f"jev.{key}", value)
+        return answers
+
+    async def _split_or_reject(
+        self,
+        client: Any,
+        *,
+        state: Any,
+        questions: dict[str, dict[str, Any]],
+        stats: dict[str, int],
+        reason: str,
+    ) -> dict[str, dict[str, Any]]:
+        if len(questions) <= 1:
+            question_id = next(iter(questions), "<none>")
+            raise JevPayloadTooLarge(f"Jev question {question_id} is oversized: {reason}")
+        stats["split_count"] += 1
+        items = list(questions.items())
+        midpoint = len(items) // 2
+        answers: dict[str, dict[str, Any]] = {}
+        for part in (items[:midpoint], items[midpoint:]):
+            answers.update(
+                await self._evaluate_with_client(
+                    client,
+                    state=state,
+                    questions=dict(part),
+                    stats=stats,
+                )
+            )
         return answers
 
     async def _post_with_retry(self, client: Any, payload: dict[str, Any]) -> dict[str, Any]:
@@ -76,6 +176,13 @@ class JevClient:
                     raise JevError("Jev decision response must be a JSON object")
                 return body
             except Exception as exc:
+                if isinstance(exc, JevPayloadTooLarge):
+                    raise
+                if _payload_too_large_jev_error(exc):
+                    raise JevPayloadTooLarge(
+                        f"Jev provider rejected oversized input with HTTP "
+                        f"{exc.response.status_code}"
+                    ) from exc
                 if attempt >= self.config.max_retries or not _retryable_jev_error(exc):
                     raise JevError(f"Jev decision request failed: {exc}") from exc
                 await asyncio.sleep(_retry_delay(self.config, attempt=attempt, error=exc))
@@ -86,6 +193,26 @@ def _retryable_jev_error(exc: Exception) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in {429, 500, 502, 503, 504, 529}
     return isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
+
+
+def _payload_too_large_jev_error(exc: Exception) -> bool:
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    if exc.response.status_code == 413:
+        return True
+    if exc.response.status_code != 422:
+        return False
+    body = exc.response.text.casefold()
+    return any(
+        marker in body
+        for marker in (
+            "maximum context length",
+            "context length",
+            "input_tokens",
+            "too large",
+            "too long",
+        )
+    )
 
 
 def _retry_delay(config: JevConfig, *, attempt: int, error: Exception) -> float:

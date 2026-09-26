@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from openviking.models.jev import JevClient, JevError
+from openviking.models.jev import JevClient, JevError, JevPayloadTooLarge
 from openviking.service.experience_dag_decider import ExperienceDagDecider
 from openviking.session.memory.experience_dag import Dag, DagEvidenceRef, DagInstance
 from openviking.session.memory.experience_dag_compiler import compile_dag
@@ -47,10 +47,20 @@ class SequenceAsyncClient:
         return self.responses.pop(0)
 
 
-def _status_error_response(status_code: int, *, retry_after: str | None = None):
+def _status_error_response(
+    status_code: int,
+    *,
+    retry_after: str | None = None,
+    body: str | None = None,
+):
     request = httpx.Request("POST", "https://example.com/v1/systemone")
     headers = {"Retry-After": retry_after} if retry_after is not None else None
-    response = httpx.Response(status_code, request=request, headers=headers)
+    response = httpx.Response(
+        status_code,
+        request=request,
+        headers=headers,
+        text=body,
+    )
     error = httpx.HTTPStatusError(
         f"status {status_code}",
         request=request,
@@ -163,6 +173,112 @@ async def test_generic_jev_client_respects_retry_after(monkeypatch):
     await client.evaluate(state="state", questions={"ok": {"type": "noul"}})
 
     sleeps.assert_awaited_once_with(1.75)
+
+
+@pytest.mark.asyncio
+async def test_generic_jev_client_splits_questions_to_fit_input_budget():
+    transport = SequenceAsyncClient(
+        [
+            FakeResponse({"answers": {"first": {"type": "noul", "noul": 0.9}}}),
+            FakeResponse({"answers": {"second": {"type": "noul", "noul": 0.8}}}),
+        ]
+    )
+    client = JevClient(
+        JevConfig(
+            api_url="https://example.com/v1/systemone",
+            api_key="secret",
+            max_input_tokens=1024,
+        ),
+        client=transport,
+    )
+    questions = {
+        "first": {"type": "noul", "instructions": "a" * 2500},
+        "second": {"type": "noul", "instructions": "b" * 2500},
+    }
+
+    answers = await client.evaluate(state={"message": "state"}, questions=questions)
+
+    assert set(answers) == {"first", "second"}
+    assert len(transport.calls) == 2
+    assert [set(call[1]["questions"]) for call in transport.calls] == [
+        {"first"},
+        {"second"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generic_jev_client_bisects_provider_422_response():
+    transport = SequenceAsyncClient(
+        [
+            _status_error_response(422, body="maximum context length exceeded input_tokens"),
+            FakeResponse({"answers": {"first": {"type": "noul", "noul": 0.9}}}),
+            FakeResponse({"answers": {"second": {"type": "noul", "noul": 0.8}}}),
+        ]
+    )
+    client = JevClient(
+        JevConfig(
+            api_url="https://example.com/v1/systemone",
+            api_key="secret",
+            max_input_tokens=100_000,
+        ),
+        client=transport,
+    )
+
+    answers = await client.evaluate(
+        state="state",
+        questions={
+            "first": {"type": "noul"},
+            "second": {"type": "noul"},
+        },
+    )
+
+    assert set(answers) == {"first", "second"}
+    assert len(transport.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_generic_jev_client_reports_indivisible_oversized_question():
+    client = JevClient(
+        JevConfig(
+            api_url="https://example.com/v1/systemone",
+            api_key="secret",
+            max_input_tokens=1024,
+        ),
+        client=FakeAsyncClient(FakeResponse({"answers": {}})),
+    )
+
+    with pytest.raises(JevPayloadTooLarge, match="oversized"):
+        await client.evaluate(
+            state={"message": "x" * 5000},
+            questions={"only": {"type": "noul"}},
+        )
+
+
+@pytest.mark.asyncio
+async def test_generic_jev_client_does_not_split_unrelated_422_error():
+    transport = FakeAsyncClient(
+        _status_error_response(422, body="question schema validation failed")
+    )
+    client = JevClient(
+        JevConfig(
+            api_url="https://example.com/v1/systemone",
+            api_key="secret",
+            max_input_tokens=100_000,
+        ),
+        client=transport,
+    )
+
+    with pytest.raises(JevError, match="request failed") as error:
+        await client.evaluate(
+            state="state",
+            questions={
+                "first": {"type": "noul"},
+                "second": {"type": "noul"},
+            },
+        )
+
+    assert not isinstance(error.value, JevPayloadTooLarge)
+    assert len(transport.calls) == 1
 
 
 @pytest.mark.asyncio

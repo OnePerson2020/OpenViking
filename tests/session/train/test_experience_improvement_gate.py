@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from openviking.models.jev import JevPayloadTooLarge
 from openviking.session.memory.dataclass import MemoryFile, StoredLink
 from openviking.session.train.components.experience_improvement_gate import (
     EXPERIENCE_GATE_CONTEXTS_KEY,
@@ -463,6 +464,136 @@ async def test_failed_candidates_share_corrective_action_jev_call():
     call = jev.evaluate.await_args.kwargs
     assert set(call["questions"]) == {"improvement_effective", "improvement_effective_1"}
     assert set(call["state"]["candidates"]) == set(call["questions"])
+
+
+@pytest.mark.asyncio
+async def test_provider_oversize_splits_candidates_but_keeps_each_baseline_atomic():
+    second_experience = "viking://user/u/memories/experiences/refund.md"
+    second_trajectory = "viking://user/u/memories/trajectories/refund.md"
+    baseline = _source("Report the previous total")
+    candidate = _source("Report the verified total")
+    plan = PolicyUpdatePlan(
+        items=[
+            *_plan(candidate, before_source=baseline).items,
+            *_plan(
+                candidate,
+                experience_uri=second_experience,
+                trajectory_uri=second_trajectory,
+                target_name="refund",
+                before_source=baseline,
+            ).items,
+        ]
+    )
+
+    async def reject_combined_batch(*, state, questions):
+        if len(questions) > 1:
+            raise JevPayloadTooLarge("provider returned 422")
+        question_id = next(iter(questions))
+        candidate_state = state["candidates"][question_id]
+        assert candidate_state["baseline_source"] == baseline
+        return {question_id: {"type": "noul", "noul": 0.96}}
+
+    jev = SimpleNamespace(
+        config=SimpleNamespace(max_input_tokens=100_000, model="qwen3-1.7b"),
+        evaluate=AsyncMock(side_effect=reject_combined_batch),
+    )
+    gate = ExperienceImprovementGate(
+        config=DagDeciderConfig(provider="jev"),
+        dag_decider=BatchStopsAtReportDecider(),
+        jev=jev,
+    )
+
+    result = await gate.validate(
+        plan,
+        [
+            _gradient(candidate, passed=False),
+            _gradient(
+                candidate,
+                passed=False,
+                experience_uri=second_experience,
+                trajectory_uri=second_trajectory,
+            ),
+        ],
+        PolicySet(root_uri="viking://user/u/memories/experiences", policies=[]),
+        None,
+    )
+
+    assert len(result.items) == 2
+    diagnostics = result.metadata["experience_improvement_gate"]
+    assert diagnostics["jev_batch_count"] == 3
+    assert diagnostics["jev_split_count"] == 1
+    assert diagnostics["oversized_candidates"] == []
+    assert jev.evaluate.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_estimated_oversized_candidate_does_not_reject_other_candidate(monkeypatch):
+    second_experience = "viking://user/u/memories/experiences/refund.md"
+    second_trajectory = "viking://user/u/memories/trajectories/refund.md"
+    candidate = _source("Report the verified total")
+    plan = PolicyUpdatePlan(
+        items=[
+            *_plan(candidate).items,
+            *_plan(
+                candidate,
+                experience_uri=second_experience,
+                trajectory_uri=second_trajectory,
+                target_name="refund",
+            ).items,
+        ]
+    )
+
+    def estimate_by_candidate(*, state, questions, model):
+        del state, model
+        if len(questions) > 1 or "improvement_effective" in questions:
+            return 200
+        return 50
+
+    monkeypatch.setattr(
+        "openviking.session.train.components.experience_improvement_gate.estimate_jev_input_tokens",
+        estimate_by_candidate,
+    )
+    jev = SimpleNamespace(
+        config=SimpleNamespace(max_input_tokens=100, model="qwen3-1.7b"),
+        evaluate=AsyncMock(
+            return_value={"improvement_effective_1": {"type": "noul", "noul": 0.95}}
+        ),
+    )
+    gate = ExperienceImprovementGate(
+        config=DagDeciderConfig(provider="jev"),
+        dag_decider=BatchStopsAtReportDecider(),
+        jev=jev,
+    )
+
+    result = await gate.validate(
+        plan,
+        [
+            _gradient(candidate, passed=False),
+            _gradient(
+                candidate,
+                passed=False,
+                experience_uri=second_experience,
+                trajectory_uri=second_trajectory,
+            ),
+        ],
+        PolicySet(root_uri="viking://user/u/memories/experiences", policies=[]),
+        None,
+    )
+
+    assert [item.target_uri for item in result.items] == [second_experience]
+    diagnostics = result.metadata["experience_improvement_gate"]
+    assert diagnostics["jev_batch_count"] == 1
+    assert diagnostics["jev_split_count"] == 1
+    assert diagnostics["oversized_candidates"] == [
+        {
+            "experience_uri": EXPERIENCE_URI,
+            "trajectory_uri": TRAJECTORY_URI,
+            "reason": "estimated input 200 exceeds configured Jev budget 100",
+        }
+    ]
+    first_replay = diagnostics["candidates"][0]["replays"][0]
+    assert "input is oversized" in first_replay["reason"]
+    jev.evaluate.assert_awaited_once()
 
 
 @pytest.mark.asyncio

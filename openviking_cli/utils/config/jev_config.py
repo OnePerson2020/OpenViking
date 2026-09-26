@@ -17,6 +17,12 @@ class JevConfig(BaseModel):
     verify_ssl: bool = True
     max_retries: int = Field(default=3, ge=0, le=5)
     retry_backoff_seconds: float = Field(default=0.5, ge=0, le=10)
+    max_input_tokens: int = Field(
+        default=28_000,
+        ge=1024,
+        le=1_000_000,
+        description="Conservative client-side input budget used to split Jev question batches",
+    )
 
     @model_validator(mode="after")
     def validate_endpoint(self) -> "JevConfig":
