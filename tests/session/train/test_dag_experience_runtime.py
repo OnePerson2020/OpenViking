@@ -113,7 +113,9 @@ def test_tool_evidence_summary_is_valid_json_after_bounded_truncation():
     assert 4096 < len(evidence[1]["summary"]) <= MAX_EVIDENCE_SUMMARY_CHARS
     parsed = json.loads(evidence[1]["summary"])
     assert parsed["tool_name"] == "cancel_reservation"
-    assert parsed["tool_output"].endswith("...[truncated]")
+    assert "...[truncated]..." in parsed["tool_output"]
+    assert parsed["tool_output"].startswith("result with quotes")
+    assert parsed["tool_output"].endswith("slashes \\")
 
 
 @pytest.mark.asyncio

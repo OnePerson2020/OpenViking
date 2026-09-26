@@ -9,10 +9,12 @@ from typing import Any
 
 from openviking.session.memory.experience_dag import (
     MAX_EVIDENCE_SUMMARY_CHARS,
+    clip_evidence_summary,
     tool_evidence_summary,
 )
 
 GUIDANCE_MARKER = "[DAG Experience Guidance]"
+_MAX_CONTEXT_CHARS = 128 * 1024
 
 
 class Tau2DagExperienceRuntime:
@@ -94,7 +96,7 @@ def _execution_evidence(messages: list[dict[str, Any]]) -> tuple[list[dict[str, 
         summary = (
             tool_evidence_summary(name, content)
             if role == "tool"
-            else content[:MAX_EVIDENCE_SUMMARY_CHARS]
+            else clip_evidence_summary(kind, content, MAX_EVIDENCE_SUMMARY_CHARS)
         )
         evidence.append({"id": evidence_id, "kind": kind, "summary": summary})
         context.append(
@@ -102,7 +104,7 @@ def _execution_evidence(messages: list[dict[str, Any]]) -> tuple[list[dict[str, 
                 "evidence_id": evidence_id,
                 "role": role,
                 "tool_name": name or None,
-                "content": content[:MAX_EVIDENCE_SUMMARY_CHARS],
+                "content": clip_evidence_summary(kind, content, MAX_EVIDENCE_SUMMARY_CHARS),
             }
         )
     return evidence, _bounded_context_json(context)
@@ -113,13 +115,11 @@ def _bounded_context_json(context: list[dict[str, Any]]) -> str:
     for item in reversed(context):
         candidate = [item, *selected]
         encoded = json.dumps(candidate, ensure_ascii=False)
-        if len(encoded) > MAX_EVIDENCE_SUMMARY_CHARS:
+        if len(encoded) > _MAX_CONTEXT_CHARS:
             if selected:
                 break
             clipped = dict(item)
-            clipped["content"] = str(clipped.get("content") or "")[
-                -MAX_EVIDENCE_SUMMARY_CHARS // 2 :
-            ]
+            clipped["content"] = str(clipped.get("content") or "")[-_MAX_CONTEXT_CHARS // 2 :]
             return json.dumps([clipped], ensure_ascii=False)
         selected = candidate
     return json.dumps(selected, ensure_ascii=False)

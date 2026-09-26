@@ -11,9 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 MAX_NODES = 256
 MAX_CONTENT_BYTES = 256 * 1024
-MAX_EVIDENCE_SUMMARY_CHARS = 128 * 1024
+MAX_EVIDENCE_SUMMARY_CHARS = 16 * 1024
 DEFAULT_BRANCH_CHOICE = "__default__"
-_TRUNCATION_SUFFIX = "...[truncated]"
+_TRUNCATION_MARKER = "\n...[truncated]...\n"
 
 
 class DagModel(BaseModel):
@@ -250,10 +250,10 @@ def tool_evidence_summary(
     payload.pop("tool_input", None)
     low = 0
     high = len(tool_output)
-    best = render(_TRUNCATION_SUFFIX)
+    best = render("")
     while low <= high:
         midpoint = (low + high) // 2
-        candidate = render(tool_output[:midpoint] + _TRUNCATION_SUFFIX)
+        candidate = render(_clip_evidence_text(tool_output, midpoint))
         if len(candidate) <= max_chars:
             best = candidate
             low = midpoint + 1
@@ -279,7 +279,18 @@ def clip_evidence_summary(kind: str, summary: str, max_chars: int) -> str:
                 tool_status=payload.get("tool_status"),
                 max_chars=max_chars,
             )
-    return summary[-max_chars:]
+    return _clip_evidence_text(summary, max_chars)
+
+
+def _clip_evidence_text(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    if max_chars <= len(_TRUNCATION_MARKER):
+        return value[:max_chars]
+    available = max_chars - len(_TRUNCATION_MARKER)
+    head = available // 2
+    tail = available - head
+    return value[:head] + _TRUNCATION_MARKER + value[-tail:]
 
 
 class DagCompletedNode(DagModel):

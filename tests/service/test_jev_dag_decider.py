@@ -381,4 +381,6 @@ async def test_dag_decider_preserves_tool_name_when_clipping_large_evidence():
     assert len(selected["summary"]) <= 1024
     payload = json.loads(selected["summary"])
     assert payload["tool_name"] == "cancel_reservation"
-    assert payload["tool_output"].endswith("...[truncated]")
+    assert "...[truncated]..." in payload["tool_output"]
+    assert payload["tool_output"].startswith("x")
+    assert payload["tool_output"].endswith("x")

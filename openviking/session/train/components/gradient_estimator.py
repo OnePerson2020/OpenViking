@@ -18,6 +18,7 @@ from openviking.session.memory.agent_experience_context_provider import (
 from openviking.session.memory.dataclass import MemoryFile, StoredLink
 from openviking.session.memory.experience_dag import (
     MAX_EVIDENCE_SUMMARY_CHARS,
+    clip_evidence_summary,
     tool_evidence_summary,
 )
 from openviking.session.memory.extract_loop import ExtractLoop
@@ -392,7 +393,11 @@ def _messages_to_gate_evidence(messages: list[Any]) -> list[dict[str, str]]:
                 {
                     "id": f"message:{message_index}",
                     "kind": f"{role}_message",
-                    "summary": content[:MAX_EVIDENCE_SUMMARY_CHARS],
+                    "summary": clip_evidence_summary(
+                        f"{role}_message",
+                        content,
+                        MAX_EVIDENCE_SUMMARY_CHARS,
+                    ),
                 }
             )
         for part_index, part in enumerate(getattr(message, "parts", []) or []):
