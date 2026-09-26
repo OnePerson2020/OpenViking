@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from openviking.models.jev import JevClient
@@ -20,6 +20,30 @@ from openviking_cli.utils.config.jev_config import JevConfig
 
 EXPERIENCE_GATE_CONTEXTS_KEY = "_experience_gate_contexts"
 _MAX_REPLAY_ROUNDS = 32
+
+
+@dataclass(slots=True)
+class _CandidateValidation:
+    source: str
+    baseline_source: str | None
+    experience_uri: str
+    gate_context: dict[str, Any]
+    ordinal: int
+    result: dict[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class _DagReplayRequest:
+    key: str
+    source: str
+
+
+@dataclass(slots=True)
+class _DagReplayResult:
+    replay: dict[str, Any] | None = None
+    actions: list[DagAction] = field(default_factory=list)
+    error: str | None = None
+    error_kind: str | None = None
 
 
 @dataclass(slots=True)
@@ -71,7 +95,9 @@ class ExperienceImprovementGate:
             )
 
         contexts_by_trajectory = _gate_contexts_by_trajectory(gradients)
-        diagnostics: list[dict[str, Any]] = []
+        validations_by_item: list[list[_CandidateValidation]] = []
+        batches: dict[str, list[_CandidateValidation]] = {}
+        ordinal = 0
         for item in upserts:
             trajectory_uris = {
                 link.to_uri
@@ -86,23 +112,48 @@ class ExperienceImprovementGate:
             if not validation_contexts and len(contexts_by_trajectory) == 1:
                 validation_contexts = next(iter(contexts_by_trajectory.values()))
 
-            item_diagnostics: list[dict[str, Any]] = []
+            item_validations: list[_CandidateValidation] = []
             if not validation_contexts:
-                item_diagnostics.append(
-                    {
+                validation = _CandidateValidation(
+                    source=str(item.after_content),
+                    baseline_source=item.before_content,
+                    experience_uri=item.target_uri or item.target_name,
+                    gate_context={},
+                    ordinal=ordinal,
+                    result={
                         "passed": False,
                         "reason": "candidate has no source trajectory validation context",
-                    }
+                    },
                 )
+                ordinal += 1
+                item_validations.append(validation)
             else:
                 for gate_context in validation_contexts:
-                    item_diagnostics.append(
-                        await self._validate_candidate(
-                            source=str(item.after_content),
-                            experience_uri=item.target_uri or item.target_name,
-                            gate_context=gate_context,
-                        )
+                    validation = _CandidateValidation(
+                        source=str(item.after_content),
+                        baseline_source=item.before_content,
+                        experience_uri=item.target_uri or item.target_name,
+                        gate_context=gate_context,
+                        ordinal=ordinal,
                     )
+                    ordinal += 1
+                    item_validations.append(validation)
+                    batches.setdefault(_gate_context_key(gate_context), []).append(validation)
+            validations_by_item.append(item_validations)
+
+        for batch in batches.values():
+            await self._validate_batch(batch)
+
+        diagnostics: list[dict[str, Any]] = []
+        for item, item_validations in zip(upserts, validations_by_item, strict=True):
+            item_diagnostics = [
+                validation.result
+                or {
+                    "passed": False,
+                    "reason": "candidate validation did not produce a result",
+                }
+                for validation in item_validations
+            ]
             diagnostics.append(
                 {
                     "target_uri": item.target_uri,
@@ -144,177 +195,358 @@ class ExperienceImprovementGate:
         }
         return PolicyUpdatePlan(items=accepted_items, metadata=metadata)
 
-    async def _validate_candidate(
-        self,
-        *,
-        source: str,
-        experience_uri: str,
-        gate_context: dict[str, Any],
-    ) -> dict[str, Any]:
-        trajectory_uri = str(gate_context.get("trajectory_uri") or "")
+    async def _validate_batch(self, validations: list[_CandidateValidation]) -> None:
+        gate_context = validations[0].gate_context
+        replay_requests: list[_DagReplayRequest] = []
+        for validation in validations:
+            replay_requests.append(
+                _DagReplayRequest(
+                    key=_replay_key(validation, "candidate"),
+                    source=validation.source,
+                )
+            )
+            if validation.baseline_source is not None:
+                replay_requests.append(
+                    _DagReplayRequest(
+                        key=_replay_key(validation, "baseline"),
+                        source=validation.baseline_source,
+                    )
+                )
+
+        replay_results = await self._replay_dags(replay_requests, gate_context=gate_context)
+        needs_judgement: list[tuple[_CandidateValidation, _DagReplayResult]] = []
+        for validation in validations:
+            candidate = replay_results[_replay_key(validation, "candidate")]
+            baseline = (
+                replay_results.get(_replay_key(validation, "baseline"))
+                if validation.baseline_source is not None
+                else None
+            )
+            validation.result = _preliminary_validation_result(
+                validation,
+                candidate=candidate,
+                baseline=baseline,
+            )
+            if validation.result is None:
+                needs_judgement.append((validation, candidate))
+
+        if not needs_judgement:
+            return
         try:
-            dag = Dag.model_validate_json(compile_dag(source))
+            scores = await self._judge_corrective_actions_batch(
+                needs_judgement,
+                replay_results=replay_results,
+            )
         except Exception as exc:
-            return {
-                "trajectory_uri": trajectory_uri,
-                "passed": False,
-                "reason": f"candidate DAG does not compile: {exc}",
+            for validation, candidate in needs_judgement:
+                validation.result = {
+                    "trajectory_uri": str(validation.gate_context.get("trajectory_uri") or ""),
+                    "passed": False,
+                    "reason": f"candidate corrective-action validation failed: {exc}",
+                    "replay": candidate.replay,
+                    **_baseline_diagnostic(
+                        validation,
+                        replay_results.get(_replay_key(validation, "baseline")),
+                    ),
+                }
+            return
+
+        for validation, candidate in needs_judgement:
+            relevance = scores.get(validation.ordinal, 0.0)
+            relevant = relevance >= self.config.noul_true_threshold
+            gate_context = validation.gate_context
+            trajectory_passed = bool(gate_context.get("passed"))
+            rollout_passed = bool(gate_context.get("rollout_passed", trajectory_passed))
+            reattributed = trajectory_passed and not rollout_passed
+            compared = validation.baseline_source is not None
+            validation.result = {
+                "trajectory_uri": str(gate_context.get("trajectory_uri") or ""),
+                "passed": relevant,
+                "reason": (
+                    "candidate improves on the baseline for the failed rollout"
+                    if relevant and compared
+                    else "candidate correction is attributable to the failed rollout"
+                    if relevant and reattributed
+                    else "candidate catches the failed trajectory with a relevant corrective action"
+                    if relevant
+                    else "candidate does not improve on the baseline for the evaluation failure"
+                    if compared
+                    else "candidate corrective action does not address the evaluation failure"
+                ),
+                "corrective_action_score": relevance,
+                "failure_reattributed": reattributed and relevant,
+                "replay": candidate.replay,
+                **_baseline_diagnostic(
+                    validation,
+                    replay_results.get(_replay_key(validation, "baseline")),
+                ),
             }
+
+    async def _replay_dags(
+        self,
+        requests: list[_DagReplayRequest],
+        *,
+        gate_context: dict[str, Any],
+    ) -> dict[str, _DagReplayResult]:
+        results: dict[str, _DagReplayResult] = {}
+        instances: dict[str, DagInstance] = {}
+        actions_by_key: dict[str, list[DagAction]] = {}
+        waiting_by_key: dict[str, list[int]] = {}
+        for request in requests:
+            try:
+                dag = Dag.model_validate_json(compile_dag(request.source))
+                instance = DagInstance(
+                    experience_uri=request.key,
+                    instance_id="improvement-gate",
+                    dag=dag,
+                )
+                actions_by_key[request.key], waiting_by_key[request.key] = instance.advance()
+                instances[request.key] = instance
+            except Exception as exc:
+                results[request.key] = _DagReplayResult(error=str(exc), error_kind="compile")
 
         evidence = _parse_evidence(gate_context.get("evidence"))
         context = json.dumps(
             [item.model_dump(mode="json") for item in evidence],
             ensure_ascii=False,
         )
-        instance = DagInstance(
-            experience_uri=experience_uri,
-            instance_id="improvement-gate",
-            dag=dag,
-        )
-        actions, waiting = instance.advance()
-        seen: set[str] = set()
+        seen: dict[str, set[str]] = {key: set() for key in instances}
         try:
-            for _ in range(min(_MAX_REPLAY_ROUNDS, len(dag.nodes) + 1)):
-                signature = _instance_signature(instance)
-                if instance.state == "completed" or signature in seen:
+            for _ in range(
+                min(
+                    _MAX_REPLAY_ROUNDS,
+                    max((len(instance.dag.nodes) for instance in instances.values()), default=0)
+                    + 1,
+                )
+            ):
+                active: list[DagInstance] = []
+                for key, instance in instances.items():
+                    signature = _instance_signature(instance)
+                    if instance.state == "completed" or signature in seen[key]:
+                        continue
+                    seen[key].add(signature)
+                    active.append(instance)
+                if not active:
                     break
-                seen.add(signature)
+
                 values = await self.dag_decider.decide(
-                    [instance],
+                    active,
                     evidence=evidence,
                     context=context,
                 )
-                slot_values = values.get(experience_uri, {})
-                changed_values = {
-                    name: value
-                    for name, value in slot_values.items()
-                    if instance.slot_values.get(name) != value
-                }
-                if not changed_values:
+                changed = False
+                for instance in active:
+                    slot_values = values.get(instance.experience_uri, {})
+                    changed_values = {
+                        name: value
+                        for name, value in slot_values.items()
+                        if instance.slot_values.get(name) != value
+                    }
+                    if not changed_values:
+                        continue
+                    instance.merge_slot_values(changed_values)
+                    (
+                        actions_by_key[instance.experience_uri],
+                        waiting_by_key[instance.experience_uri],
+                    ) = instance.advance()
+                    changed = True
+                if not changed:
                     break
-                instance.merge_slot_values(changed_values)
-                actions, waiting = instance.advance()
         except Exception as exc:
-            return {
-                "trajectory_uri": trajectory_uri,
-                "passed": False,
-                "reason": f"candidate DAG replay failed: {exc}",
-            }
+            error = str(exc)
+            for key in instances:
+                results[key] = _DagReplayResult(error=error, error_kind="replay")
+            return results
 
-        replay = _replay_summary(instance, actions=actions, waiting=waiting)
-        trajectory_passed = bool(gate_context.get("passed"))
-        rollout_passed = bool(gate_context.get("rollout_passed", trajectory_passed))
-        if trajectory_passed and instance.state == "completed":
-            return {
-                "trajectory_uri": trajectory_uri,
-                "passed": True,
-                "reason": "candidate preserves the successful trajectory",
-                "replay": replay,
-            }
-
-        if not trajectory_passed and instance.state == "completed":
-            return {
-                "trajectory_uri": trajectory_uri,
-                "passed": False,
-                "reason": "candidate still accepts the failed trajectory as complete",
-                "replay": replay,
-            }
-        if not actions:
-            return {
-                "trajectory_uri": trajectory_uri,
-                "passed": False,
-                "reason": "candidate detects an incomplete path but emits no corrective action",
-                "replay": replay,
-            }
-
-        if trajectory_passed and rollout_passed:
-            return {
-                "trajectory_uri": trajectory_uri,
-                "passed": False,
-                "reason": "candidate no longer completes for a successful rollout",
-                "replay": replay,
-            }
-
-        try:
-            relevance = await self._judge_corrective_actions(
-                source=source,
+        for key, instance in instances.items():
+            actions = actions_by_key[key]
+            results[key] = _DagReplayResult(
+                replay=_replay_summary(
+                    instance,
+                    actions=actions,
+                    waiting=waiting_by_key[key],
+                ),
                 actions=actions,
-                replay=replay,
-                gate_context=gate_context,
             )
-        except Exception as exc:
-            return {
-                "trajectory_uri": trajectory_uri,
-                "passed": False,
-                "reason": f"candidate corrective-action validation failed: {exc}",
-                "replay": replay,
+        return results
+
+    async def _judge_corrective_actions_batch(
+        self,
+        validations: list[tuple[_CandidateValidation, _DagReplayResult]],
+        *,
+        replay_results: dict[str, _DagReplayResult],
+    ) -> dict[int, float]:
+        candidates: dict[str, Any] = {}
+        questions: dict[str, dict[str, Any]] = {}
+        question_to_ordinal: dict[str, int] = {}
+        for index, (validation, candidate) in enumerate(validations):
+            question_id = (
+                "improvement_effective" if index == 0 else f"improvement_effective_{index}"
+            )
+            baseline = replay_results.get(_replay_key(validation, "baseline"))
+            gate_context = validation.gate_context
+            candidates[question_id] = {
+                "trajectory": _clip(
+                    str(gate_context.get("trajectory_summary") or ""),
+                    6000,
+                ),
+                "evaluation_feedback": _clip(
+                    json.dumps(gate_context.get("feedback") or [], ensure_ascii=False),
+                    8000,
+                ),
+                "actual_experience_execution": _clip(
+                    json.dumps(
+                        gate_context.get("experience_execution") or {},
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                    6000,
+                ),
+                "candidate_source": _clip(validation.source, 8000),
+                "candidate_replay": candidate.replay,
+                "current_actions": [action.model_dump(mode="json") for action in candidate.actions],
+                "baseline_source": (
+                    _clip(validation.baseline_source, 8000)
+                    if validation.baseline_source is not None
+                    else None
+                ),
+                "baseline_replay": baseline.replay if baseline is not None else None,
+                "baseline_error": baseline.error if baseline is not None else None,
             }
-        relevant = relevance >= self.config.noul_true_threshold
-        reattributed = trajectory_passed and not rollout_passed
+            comparison = (
+                "materially improves on the baseline Experience and "
+                if validation.baseline_source is not None
+                else ""
+            )
+            questions[question_id] = {
+                "type": "noul",
+                "instructions": (
+                    f"For candidate {question_id}, does its current actionable instruction "
+                    f"{comparison}directly address the recorded evaluation failure, so following "
+                    "it would prevent the same failure? Be strict: an unchanged, generic, "
+                    "unrelated, or already-satisfied instruction is false."
+                ),
+                "criteria": {
+                    "true": (
+                        "The candidate is better than its baseline when present and directly "
+                        "addresses the concrete failed requirement."
+                    ),
+                    "false": (
+                        "The candidate is unchanged, no better than its baseline, generic, "
+                        "unrelated, or would allow the same failure."
+                    ),
+                },
+            }
+            question_to_ordinal[question_id] = validation.ordinal
+
+        answers = await self.jev.evaluate(
+            state={"candidates": candidates},
+            questions=questions,
+        )
+        scores: dict[int, float] = {}
+        for question_id, ordinal in question_to_ordinal.items():
+            answer = answers.get(question_id)
+            score = answer.get("noul") if isinstance(answer, dict) else None
+            scores[ordinal] = (
+                float(score)
+                if isinstance(score, (int, float)) and not isinstance(score, bool)
+                else 0.0
+            )
+        return scores
+
+
+def _gate_context_key(gate_context: dict[str, Any]) -> str:
+    """Group DAGs that can be decided from the same normalized evidence."""
+    evidence = _parse_evidence(gate_context.get("evidence"))
+    return json.dumps(
+        [item.model_dump(mode="json") for item in evidence],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _replay_key(validation: _CandidateValidation, role: str) -> str:
+    return f"{validation.experience_uri}#improvement-gate-{role}-{validation.ordinal}"
+
+
+def _baseline_diagnostic(
+    validation: _CandidateValidation,
+    baseline: _DagReplayResult | None,
+) -> dict[str, Any]:
+    if validation.baseline_source is None:
+        return {}
+    if baseline is None:
+        return {"baseline_replay": None, "baseline_replay_error": "baseline was not replayed"}
+    diagnostic = {"baseline_replay": baseline.replay}
+    if baseline.error:
+        diagnostic["baseline_replay_error"] = baseline.error
+    return diagnostic
+
+
+def _preliminary_validation_result(
+    validation: _CandidateValidation,
+    *,
+    candidate: _DagReplayResult,
+    baseline: _DagReplayResult | None,
+) -> dict[str, Any] | None:
+    gate_context = validation.gate_context
+    trajectory_uri = str(gate_context.get("trajectory_uri") or "")
+    baseline_diagnostic = _baseline_diagnostic(validation, baseline)
+    if candidate.error:
+        reason = (
+            f"candidate DAG does not compile: {candidate.error}"
+            if candidate.error_kind == "compile"
+            else f"candidate DAG replay failed: {candidate.error}"
+        )
         return {
             "trajectory_uri": trajectory_uri,
-            "passed": relevant,
-            "reason": (
-                "candidate correction is attributable to the failed rollout"
-                if relevant and reattributed
-                else "candidate catches the failed trajectory with a relevant corrective action"
-                if relevant
-                else "candidate corrective action does not address the evaluation failure"
-            ),
-            "corrective_action_score": relevance,
-            "failure_reattributed": reattributed and relevant,
-            "replay": replay,
+            "passed": False,
+            "reason": reason,
+            **baseline_diagnostic,
+        }
+    if candidate.replay is None:
+        return {
+            "trajectory_uri": trajectory_uri,
+            "passed": False,
+            "reason": "candidate DAG replay did not produce a result",
+            **baseline_diagnostic,
         }
 
-    async def _judge_corrective_actions(
-        self,
-        *,
-        source: str,
-        actions: list[DagAction],
-        replay: dict[str, Any],
-        gate_context: dict[str, Any],
-    ) -> float:
-        state = {
-            "trajectory": _clip(str(gate_context.get("trajectory_summary") or ""), 6000),
-            "evaluation_feedback": _clip(
-                json.dumps(gate_context.get("feedback") or [], ensure_ascii=False),
-                8000,
-            ),
-            "actual_experience_execution": _clip(
-                json.dumps(
-                    gate_context.get("experience_execution") or {},
-                    ensure_ascii=False,
-                    default=str,
-                ),
-                6000,
-            ),
-            "candidate_source": _clip(source, 8000),
-            "candidate_replay": replay,
-            "current_actions": [action.model_dump(mode="json") for action in actions],
+    trajectory_passed = bool(gate_context.get("passed"))
+    rollout_passed = bool(gate_context.get("rollout_passed", trajectory_passed))
+    if trajectory_passed and candidate.replay["state"] == "completed":
+        return {
+            "trajectory_uri": trajectory_uri,
+            "passed": True,
+            "reason": "candidate preserves the successful trajectory",
+            "replay": candidate.replay,
+            **baseline_diagnostic,
         }
-        answers = await self.jev.evaluate(
-            state=state,
-            questions={
-                "improvement_effective": {
-                    "type": "noul",
-                    "instructions": (
-                        "Do the candidate Experience's current actionable instructions directly "
-                        "address the recorded evaluation failure, so following them would prevent "
-                        "the same failure? Be strict: a generic, unrelated, or already-satisfied "
-                        "instruction is false."
-                    ),
-                    "criteria": {
-                        "true": "The action directly addresses the concrete failed requirement.",
-                        "false": "The action is generic, unrelated, or would allow the same failure.",
-                    },
-                }
-            },
-        )
-        answer = answers.get("improvement_effective")
-        score = answer.get("noul") if isinstance(answer, dict) else None
-        return (
-            float(score) if isinstance(score, (int, float)) and not isinstance(score, bool) else 0.0
-        )
+    if not trajectory_passed and candidate.replay["state"] == "completed":
+        return {
+            "trajectory_uri": trajectory_uri,
+            "passed": False,
+            "reason": "candidate still accepts the failed trajectory as complete",
+            "replay": candidate.replay,
+            **baseline_diagnostic,
+        }
+    if not candidate.actions:
+        return {
+            "trajectory_uri": trajectory_uri,
+            "passed": False,
+            "reason": "candidate detects an incomplete path but emits no corrective action",
+            "replay": candidate.replay,
+            **baseline_diagnostic,
+        }
+    if trajectory_passed and rollout_passed:
+        return {
+            "trajectory_uri": trajectory_uri,
+            "passed": False,
+            "reason": "candidate no longer completes for a successful rollout",
+            "replay": candidate.replay,
+            **baseline_diagnostic,
+        }
+    return None
 
 
 def _gate_contexts_by_trajectory(

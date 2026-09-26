@@ -205,6 +205,12 @@ class PythonExtractionOutputProtocol(ExtractionOutputProtocol):
             f"  - Identity fields (primary key): {identity_label}. Calls with identical "
             "identity field values address the same memory object.",
         ]
+        if schema.operation_mode == "add_only":
+            lines.append(
+                f"  - {type_alias} is append-only. Create a new object for this extraction. "
+                "Never update, edit, drop, or delete an existing object. If an existing binding "
+                "is shown as context, treat it as read-only reference material."
+            )
         operation_field = context.operations_model.model_fields.get(schema.memory_type)
         schema_description = getattr(operation_field, "description", None)
         if schema_description:
@@ -1016,7 +1022,11 @@ class _PythonProgramCompiler:
             if not owner.existing:
                 self._error(node, "a memory created in this program cannot be deleted")
             if self.schemas[owner.memory_type].operation_mode == "add_only":
-                self._error(node, "delete() is unavailable for the selected memory schemas")
+                # Append-only history is authoritative: an attempted deletion can
+                # never take effect. Treat it as a compatibility no-op so one
+                # hallucinated cleanup statement does not discard valid creates
+                # from the rest of the extraction program.
+                return None
             replacement = kwargs.get("replacement")
             if replacement is not None and not isinstance(replacement, _MemoryObject):
                 self._error(node, "delete replacement must be a memory object")
@@ -1226,6 +1236,12 @@ class _PythonProgramCompiler:
                     if memory_field.merge_op == MergeOp.IMMUTABLE:
                         if memory_field.name in obj.fields:
                             fields[memory_field.name] = obj.fields[memory_field.name]
+                        elif memory_field.init_value is not None:
+                            # Hidden server-managed fields are absent from legacy
+                            # files and model-visible bindings. Supply their schema
+                            # default so an otherwise valid update can be parsed;
+                            # the authoritative server value is injected later.
+                            fields[memory_field.name] = memory_field.init_value
             payload[obj.memory_type].append({"page_id": obj.page_id, **fields})
         if self.context.link_enabled:
             payload["links"] = []

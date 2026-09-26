@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -32,6 +33,7 @@ def _context(
     passed: bool,
     rollout_passed: bool | None = None,
     trajectory_uri: str = TRAJECTORY_URI,
+    experience_execution: dict | None = None,
 ) -> dict:
     return {
         "trajectory_uri": trajectory_uri,
@@ -40,7 +42,7 @@ def _context(
         "rollout_passed": passed if rollout_passed is None else rollout_passed,
         "score": 1.0 if passed else 0.0,
         "feedback": [] if passed else ["Information 1628 was not communicated."],
-        "experience_execution": {},
+        "experience_execution": experience_execution or {},
         "evidence": [
             {"id": "message:1", "kind": "user_message", "summary": "Cancel booking A."},
             {
@@ -98,6 +100,7 @@ def _plan(
     experience_uri: str = EXPERIENCE_URI,
     trajectory_uri: str = TRAJECTORY_URI,
     target_name: str = "cancel",
+    before_source: str | None = None,
 ) -> PolicyUpdatePlan:
     return PolicyUpdatePlan(
         items=[
@@ -106,7 +109,7 @@ def _plan(
                 memory_type="experiences",
                 target_name=target_name,
                 target_uri=experience_uri,
-                before_content=None,
+                before_content=before_source,
                 after_content=source,
                 links=[
                     StoredLink(
@@ -135,6 +138,28 @@ class CompletesDecider:
         del evidence, context
         instance = instances[0]
         return {instance.experience_uri: {"known": True, "report": True}}
+
+
+class BatchCompletesDecider:
+    def __init__(self):
+        self.calls = []
+
+    async def decide(self, instances, *, evidence, context):
+        self.calls.append((list(instances), evidence, context))
+        return {instance.experience_uri: {"known": True, "report": True} for instance in instances}
+
+
+class BatchStopsAtReportDecider:
+    def __init__(self):
+        self.calls = []
+
+    async def decide(self, instances, *, evidence, context):
+        self.calls.append((list(instances), evidence, context))
+        return {
+            instance.experience_uri: {"known": True}
+            for instance in instances
+            if "known" not in instance.slot_values
+        }
 
 
 @pytest.mark.asyncio
@@ -261,8 +286,8 @@ async def test_merged_plan_keeps_independently_passing_candidate():
     )
     gate = ExperienceImprovementGate(
         config=DagDeciderConfig(provider="jev"),
-        dag_decider=CompletesDecider(),
-        jev=SimpleNamespace(evaluate=AsyncMock()),
+        dag_decider=BatchCompletesDecider(),
+        jev=SimpleNamespace(evaluate=AsyncMock(return_value={})),
     )
 
     result = await gate.validate(
@@ -286,6 +311,158 @@ async def test_merged_plan_keeps_independently_passing_candidate():
     assert diagnostic["atomic"] is False
     assert diagnostic["accepted_count"] == 1
     assert diagnostic["rejected_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_same_context_candidates_and_baselines_share_dag_replay_call():
+    second_experience = "viking://user/u/memories/experiences/refund.md"
+    second_trajectory = "viking://user/u/memories/trajectories/refund.md"
+    baseline = _source("State the previous total")
+    candidate = _source("State the corrected total")
+    plan = PolicyUpdatePlan(
+        items=[
+            *_plan(candidate, before_source=baseline).items,
+            *_plan(
+                candidate,
+                experience_uri=second_experience,
+                trajectory_uri=second_trajectory,
+                target_name="refund",
+                before_source=baseline,
+            ).items,
+        ]
+    )
+
+    async def complete_all_slots(*, state, questions):
+        del state
+        return {
+            question_id: {"type": question["type"], "noul": 0.99}
+            for question_id, question in questions.items()
+        }
+
+    jev = SimpleNamespace(evaluate=AsyncMock(side_effect=complete_all_slots))
+    gate = ExperienceImprovementGate(
+        config=DagDeciderConfig(provider="jev"),
+        jev=jev,
+    )
+
+    result = await gate.validate(
+        plan,
+        [
+            _gradient(candidate, passed=True),
+            _gradient(
+                candidate,
+                passed=True,
+                experience_uri=second_experience,
+                trajectory_uri=second_trajectory,
+            ),
+        ],
+        PolicySet(root_uri="viking://user/u/memories/experiences", policies=[]),
+        None,
+    )
+
+    assert len(result.items) == 2
+    jev.evaluate.assert_awaited_once()
+    assert len(jev.evaluate.await_args.kwargs["questions"]) == 8
+    diagnostics = result.metadata["experience_improvement_gate"]["candidates"]
+    assert all(
+        item["replays"][0]["baseline_replay"]["state"] == "completed" for item in diagnostics
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_update_compares_candidate_with_baseline_and_execution_feedback():
+    baseline = _source("Report whatever total is available")
+    candidate = _source("Report the verified total 1628")
+    execution = {
+        EXPERIENCE_URI: {
+            "revision": "before-update",
+            "executed_nodes": ["known"],
+            "current_nodes": ["report"],
+        }
+    }
+    gradient = _gradient(candidate, passed=False)
+    gradient.metadata[EXPERIENCE_GATE_CONTEXTS_KEY][0]["experience_execution"] = execution
+    jev = SimpleNamespace(
+        evaluate=AsyncMock(return_value={"improvement_effective": {"type": "noul", "noul": 0.97}})
+    )
+    decider = BatchStopsAtReportDecider()
+    gate = ExperienceImprovementGate(
+        config=DagDeciderConfig(provider="jev"),
+        dag_decider=decider,
+        jev=jev,
+    )
+
+    result = await gate.validate(
+        _plan(candidate, before_source=baseline),
+        [gradient],
+        PolicySet(root_uri="viking://user/u/memories/experiences", policies=[]),
+        None,
+    )
+
+    assert len(result.items) == 1
+    assert len(decider.calls) == 2
+    assert all(len(call[0]) == 2 for call in decider.calls)
+    diagnostic = result.metadata["experience_improvement_gate"]["candidates"][0]["replays"][0]
+    assert diagnostic["passed"] is True
+    assert diagnostic["baseline_replay"]["current_nodes"] == ["report"]
+    assert diagnostic["reason"] == "candidate improves on the baseline for the failed rollout"
+    judge_state = jev.evaluate.await_args.kwargs["state"]
+    candidate_state = judge_state["candidates"]["improvement_effective"]
+    assert json.loads(candidate_state["actual_experience_execution"]) == execution
+    assert candidate_state["baseline_source"] == baseline
+    assert candidate_state["candidate_source"] == candidate
+
+
+@pytest.mark.asyncio
+async def test_failed_candidates_share_corrective_action_jev_call():
+    second_experience = "viking://user/u/memories/experiences/refund.md"
+    second_trajectory = "viking://user/u/memories/trajectories/refund.md"
+    candidate = _source("Report the verified total")
+    plan = PolicyUpdatePlan(
+        items=[
+            *_plan(candidate).items,
+            *_plan(
+                candidate,
+                experience_uri=second_experience,
+                trajectory_uri=second_trajectory,
+                target_name="refund",
+            ).items,
+        ]
+    )
+    jev = SimpleNamespace(
+        evaluate=AsyncMock(
+            return_value={
+                "improvement_effective": {"type": "noul", "noul": 0.96},
+                "improvement_effective_1": {"type": "noul", "noul": 0.95},
+            }
+        )
+    )
+    gate = ExperienceImprovementGate(
+        config=DagDeciderConfig(provider="jev"),
+        dag_decider=BatchStopsAtReportDecider(),
+        jev=jev,
+    )
+
+    result = await gate.validate(
+        plan,
+        [
+            _gradient(candidate, passed=False),
+            _gradient(
+                candidate,
+                passed=False,
+                experience_uri=second_experience,
+                trajectory_uri=second_trajectory,
+            ),
+        ],
+        PolicySet(root_uri="viking://user/u/memories/experiences", policies=[]),
+        None,
+    )
+
+    assert len(result.items) == 2
+    jev.evaluate.assert_awaited_once()
+    call = jev.evaluate.await_args.kwargs
+    assert set(call["questions"]) == {"improvement_effective", "improvement_effective_1"}
+    assert set(call["state"]["candidates"]) == set(call["questions"])
 
 
 @pytest.mark.asyncio

@@ -137,15 +137,20 @@ correctness.
 
 `ExperienceGradientEstimator` is the reflection stage. It produces a complete candidate
 Experience, but that candidate is not published immediately. After patch merge, the Experience
-improvement gate compiles the final candidate and replays it from an empty instance against the
-source Trajectory's original conversation and tool-result evidence using Jev. For a successful
-Trajectory, the candidate must still complete. For a failed Trajectory, the candidate must stop
-before accepting the same failure and expose a current action that Jev judges directly relevant
-to the evaluation feedback. Validation is scoped to each candidate Experience and its linked
-Trajectories. Passing candidates may be applied when an unrelated candidate fails; a supersede
-delete is applied only with its accepted replacement. Unattributed merge-only deletes require
-every candidate in that merged plan to pass. Gate diagnostics remain on the training plan for
-inspection.
+improvement gate compiles the final candidate and, for an update, its stored baseline. It replays
+both from empty instances against the source Trajectory's original conversation and tool-result
+evidence using Jev. DAGs sharing the same normalized evidence are decided together, including
+candidate/baseline pairs; failed-path relevance checks are likewise emitted as one Jev request
+with one typed question per candidate. For a successful Trajectory, the candidate must still
+complete. For a failed Trajectory, the candidate must stop before accepting the same failure and
+expose a current action that Jev judges both directly relevant to the evaluation feedback and,
+when a baseline exists, materially better than the baseline replay. The runtime
+`experience_execution` snapshot remains provenance and diagnostic input; the replay from original
+evidence is the publication authority. Validation is scoped to each candidate Experience and its
+linked Trajectories. Passing candidates may be applied when an unrelated candidate fails; a
+supersede delete is applied only with its accepted replacement. Unattributed merge-only deletes
+require every candidate in that merged plan to pass. Gate diagnostics remain on the training plan
+for inspection.
 
 Agent Evolution is enabled by default. An account-level explicit `false` still disables
 Case/Trajectory/Experience learning for that account. Tau2's no-memory mode also disables

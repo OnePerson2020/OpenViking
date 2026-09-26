@@ -1382,7 +1382,7 @@ def test_python_rejects_invalid_or_unsafe_programs(program: str, message: str):
     assert message in error
 
 
-def test_python_rejects_delete_for_add_only_schema():
+def test_python_ignores_delete_for_existing_add_only_memory():
     memory_file = _existing_preference(
         "viking://user/alice/memories/preferences/editor.md", "editor", "Use Vim"
     )
@@ -1392,11 +1392,12 @@ def test_python_rejects_delete_for_add_only_schema():
 
     operations, error = protocol.parse("preferences_1.delete()\nsdk.commit()", context)
 
-    assert operations is None
-    assert "delete() is unavailable" in error
+    assert error is None
+    assert operations.preferences == []
+    assert not hasattr(operations, "delete_ids")
 
 
-def test_python_rejects_add_only_delete_when_another_schema_enables_deletes():
+def test_python_ignores_add_only_delete_when_another_schema_enables_deletes():
     memory_file = _existing_preference(
         "viking://user/alice/memories/preferences/editor.md", "editor", "Use Vim"
     )
@@ -1409,8 +1410,57 @@ def test_python_rejects_add_only_delete_when_another_schema_enables_deletes():
 
     operations, error = protocol.parse("preferences_1.delete()\nsdk.commit()", context)
 
-    assert operations is None
-    assert "delete() is unavailable" in error
+    assert error is None
+    assert operations.preferences == []
+    assert operations.delete_ids == []
+
+
+def test_python_keeps_valid_create_after_ignored_add_only_delete():
+    memory_file = _existing_preference(
+        "viking://user/alice/memories/preferences/editor.md", "editor", "Use Vim"
+    )
+    context = _context([_preference_schema(operation_mode="add_only")], files=[memory_file])
+    protocol = create_extraction_output_protocol("python")
+    contract = protocol.render_contract(context)
+    protocol.render_new_bindings(context, source="test read")
+
+    operations, error = protocol.parse(
+        "preferences_1.delete()\n"
+        "sdk.create_preferences(topic='shell', content='Use zsh', score=1)\n"
+        "sdk.commit()",
+        context,
+    )
+
+    assert error is None
+    assert len(operations.preferences) == 1
+    assert operations.preferences[0].topic == "shell"
+    assert "append-only" in contract
+
+
+def test_python_fills_missing_hidden_immutable_field_from_schema_default():
+    schema = _preference_schema()
+    schema.fields.append(
+        MemoryField(
+            name="experience_execution",
+            field_type=FieldType.STRING,
+            merge_op=MergeOp.IMMUTABLE,
+            init_value="{}",
+        )
+    )
+    memory_file = _existing_preference(
+        "viking://user/alice/memories/preferences/editor.md", "editor", "Use Vim"
+    )
+    context = _context([schema], files=[memory_file])
+    protocol = create_extraction_output_protocol("python")
+    _bind(protocol, context)
+
+    operations, error = protocol.parse(
+        "preferences_1.update(content='Use Neovim', score=1)\nsdk.commit()",
+        context,
+    )
+
+    assert error is None
+    assert operations.preferences[0].experience_execution == "{}"
 
 
 def test_python_aliases_non_identifier_memory_type_instead_of_raising():
