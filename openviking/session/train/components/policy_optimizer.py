@@ -202,8 +202,12 @@ class PatchMergePolicyOptimizer:
 def _case_experience_plan_items(
     operations: Any, gradients: list[SemanticGradient], policy_set: PolicySet
 ) -> list[PolicyPlanItem]:
-    if any(not gradient.metadata.get("validated_source_sessions") for gradient in gradients):
-        raise ValueError("PatchMerge received an Experience proposal that did not pass its Gate")
+    if any(
+        not gradient.metadata.get("proposal_source_sessions")
+        or not (gradient.metadata.get("experience_proposal_gate") or {}).get("passed")
+        for gradient in gradients
+    ):
+        raise ValueError("PatchMerge received an Experience proposal that was not admitted")
     if operations is None:
         return []
     if operations.errors:
@@ -245,7 +249,7 @@ def _case_experience_plan_items(
         for link in gradient.links:
             if link.link_type == "derived_from" and link.to_uri:
                 links[link.to_uri] = link.model_copy(update={"from_uri": target_uri})
-        for source in gradient.metadata.get("validated_source_sessions") or []:
+        for source in gradient.metadata.get("proposal_source_sessions") or []:
             source_uri = str(source.get("source_session_uri") or "")
             if source_uri:
                 source_sessions[source_uri] = dict(source)

@@ -29,4 +29,5 @@ class AgentEvolutionConfig(BaseModel):
     """Agent Evolution switch shared by cluster and account configuration."""
 
     enabled: bool = RuntimeField(default=True)
+    experience_gate_enabled: bool = RuntimeField(default=False)
     dag_decider: Optional[DagDeciderConfig] = RuntimeField(default=None)

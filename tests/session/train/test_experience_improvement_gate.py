@@ -13,6 +13,7 @@ from openviking.session.train.components.experience_improvement_gate import (
     EXPERIENCE_GATE_CONTEXTS_KEY,
     ExperienceImprovementGate,
     _bounded_success_evidence,
+    accept_proposals_without_gate,
 )
 from openviking.session.train.domain import PolicyPlanItem, PolicySet, PolicyUpdatePlan
 from openviking.session.train.engine import PolicyTrainingEngine
@@ -886,7 +887,7 @@ async def test_failed_proposal_gate_preserves_successful_session_anchor():
     )
 
     assert accepted == [gradient]
-    source_session = gradient.metadata["validated_source_sessions"][0]
+    source_session = gradient.metadata["proposal_source_sessions"][0]
     assert source_session["source_session_uri"] == SESSION_URI
     assert source_session["passed"] is False
     anchors = gradient.metadata["proposal_gate_anchor_sessions"]
@@ -918,3 +919,22 @@ def test_successful_session_witness_is_bounded_and_drops_system_messages():
     assert sum(len(item["summary"]) for item in bounded) <= 20_000
     assert bounded[0]["id"] == "first"
     assert bounded[-1]["id"] == "last"
+
+
+def test_disabled_gate_admits_proposal_and_preserves_source_session():
+    gradient = _gradient(_source(), passed=False)
+
+    accepted, metadata = accept_proposals_without_gate([gradient])
+
+    assert accepted == [gradient]
+    assert gradient.metadata["proposal_source_sessions"][0]["source_session_uri"] == SESSION_URI
+    gate = gradient.metadata["experience_proposal_gate"]
+    assert gate == {
+        "enabled": False,
+        "stage": "proposal",
+        "passed": True,
+        "accepted_count": 1,
+        "rejected_count": 0,
+        "reason": "Experience proposal gate is disabled",
+    }
+    assert metadata["experience_improvement_gate"]["enabled"] is False

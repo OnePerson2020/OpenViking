@@ -703,7 +703,8 @@ async def test_fixed_case_merge_groups_sessions_and_rebases_on_latest_policy(mon
             links=[StoredLink(from_uri=uri, to_uri=source, link_type="derived_from")],
             confidence=0.8,
             metadata={
-                "validated_source_sessions": [{"source_session_uri": source, "passed": True}]
+                "proposal_source_sessions": [{"source_session_uri": source, "passed": True}],
+                "experience_proposal_gate": {"passed": True, "enabled": True},
             },
         )
 

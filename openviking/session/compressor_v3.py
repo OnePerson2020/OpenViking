@@ -84,6 +84,9 @@ from openviking.session.train import (
     get_streaming_policy_trainer,
     make_streaming_policy_trainer_key,
 )
+from openviking.session.train.components.experience_improvement_gate import (
+    accept_proposals_without_gate,
+)
 from openviking.storage.viking_fs import get_viking_fs
 from openviking.telemetry import get_current_telemetry, tracer
 from openviking_cli.utils import get_logger
@@ -997,9 +1000,13 @@ class SessionCompressorV3:
             )
             runtime_config = get_openviking_config()
             dag_decider_config = runtime_config.agent_evolution.dag_decider
-            experience_gate = ExperienceImprovementGate(
-                config=dag_decider_config or DagDeciderConfig(provider="jev"),
-                jev_config=runtime_config.jev,
+            experience_gate = (
+                ExperienceImprovementGate(
+                    config=dag_decider_config or DagDeciderConfig(provider="jev"),
+                    jev_config=runtime_config.jev,
+                )
+                if runtime_config.agent_evolution.experience_gate_enabled
+                else None
             )
             exp_trainer = await get_streaming_policy_trainer(
                 key=make_streaming_policy_trainer_key(
@@ -1079,11 +1086,19 @@ class SessionCompressorV3:
                     vlm_resolver=self.vlm_resolver,
                 ).estimate(analysis, exp_trainer.policy_set, gradient_context)
                 proposed_exp_gradient_count += len(exp_gradients)
-                exp_gradients, proposal_gate_metadata = await experience_gate.validate_proposals(
-                    exp_gradients,
-                    exp_trainer.policy_set,
-                    gradient_context,
-                )
+                if experience_gate is None:
+                    exp_gradients, proposal_gate_metadata = accept_proposals_without_gate(
+                        exp_gradients
+                    )
+                else:
+                    (
+                        exp_gradients,
+                        proposal_gate_metadata,
+                    ) = await experience_gate.validate_proposals(
+                        exp_gradients,
+                        exp_trainer.policy_set,
+                        gradient_context,
+                    )
                 filtered_exp_gradient_count += int(
                     proposal_gate_metadata["experience_improvement_gate"]["rejected_count"]
                 )

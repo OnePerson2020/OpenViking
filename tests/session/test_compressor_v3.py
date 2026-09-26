@@ -599,22 +599,23 @@ async def test_train_from_extracted_cases_submits_streaming_rollout(monkeypatch)
         "openviking.session.train.components.gradient_estimator.ExperienceGradientEstimator.estimate",
         fake_estimate_exp_gradients,
     )
+    proposal_gate = AsyncMock(
+        side_effect=lambda gradients, policy_set, context: (
+            gradients,
+            {
+                "experience_improvement_gate": {
+                    "stage": "proposal",
+                    "passed": True,
+                    "accepted_count": len(gradients),
+                    "rejected_count": 0,
+                    "candidates": [],
+                }
+            },
+        )
+    )
     monkeypatch.setattr(
         "openviking.session.compressor_v3.ExperienceImprovementGate.validate_proposals",
-        AsyncMock(
-            side_effect=lambda gradients, policy_set, context: (
-                gradients,
-                {
-                    "experience_improvement_gate": {
-                        "stage": "proposal",
-                        "passed": True,
-                        "accepted_count": len(gradients),
-                        "rejected_count": 0,
-                        "candidates": [],
-                    }
-                },
-            )
-        ),
+        proposal_gate,
     )
 
     compressor = SessionCompressorV3(
@@ -639,6 +640,7 @@ async def test_train_from_extracted_cases_submits_streaming_rollout(monkeypatch)
     assert result["accepted_exp_gradient_count"] == 1
     assert result["filtered_exp_gradient_count"] == 0
     assert trainer_factory.await_args.kwargs.get("policy_update_gate") is None
+    proposal_gate.assert_not_awaited()
     assert len(submitted_gradients) == 1
     assert len(submitted_gradients[0]) == 1  # one exp gradient per case
     # Verify analysis was used
@@ -2001,6 +2003,17 @@ async def test_rejected_session_proposal_is_not_submitted_to_patch_merge(monkeyp
         AsyncMock(return_value=([], gate_metadata)),
     )
     compressor = SessionCompressorV3(vikingdb=None, rollout_analyzer=AsyncMock())
+    compressor._session_skill_extraction_enabled = lambda: False
+    monkeypatch.setattr(
+        "openviking.session.compressor_v3.get_openviking_config",
+        lambda: SimpleNamespace(
+            agent_evolution=SimpleNamespace(
+                experience_gate_enabled=True,
+                dag_decider=None,
+            ),
+            jev=None,
+        ),
+    )
     compressor.rollout_analyzer.analyze.return_value = RolloutAnalysis(
         evaluation=RubricEvaluation(False, 0.0, [], ["failed"]),
         metadata={"source_session_uri": "viking://user/u/sessions/s/history/archive_001"},

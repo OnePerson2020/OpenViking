@@ -181,7 +181,7 @@ class ExperienceImprovementGate:
             if not gated.items:
                 continue
 
-            gradient.metadata["validated_source_sessions"] = _stored_session_contexts(
+            gradient.metadata["proposal_source_sessions"] = _stored_session_contexts(
                 proposal_contexts
             )
             gradient.metadata["proposal_gate_anchor_sessions"] = _stored_session_contexts(
@@ -832,6 +832,51 @@ def _gate_contexts_by_target(
             if isinstance(value, dict) and value.get("source_session_uri"):
                 result.setdefault(target, {})[value["source_session_uri"]] = value
     return result
+
+
+def accept_proposals_without_gate(
+    gradients: list[SemanticGradient],
+) -> tuple[list[SemanticGradient], dict[str, Any]]:
+    """Mark structurally valid proposals ready for PatchMerge without Jev evaluation."""
+
+    candidates: list[dict[str, Any]] = []
+    for gradient in gradients:
+        proposal_contexts = list(
+            _gate_contexts_by_target([gradient]).get(gradient.target_uri or "", {}).values()
+        )
+        gradient.metadata["proposal_source_sessions"] = _stored_session_contexts(proposal_contexts)
+        gate = {
+            "enabled": False,
+            "stage": "proposal",
+            "passed": True,
+            "accepted_count": 1,
+            "rejected_count": 0,
+            "reason": "Experience proposal gate is disabled",
+        }
+        gradient.metadata["experience_proposal_gate"] = gate
+        candidates.append(
+            {
+                "target_uri": gradient.target_uri,
+                "target_name": gradient.target_name,
+                "passed": True,
+                "reason": gate["reason"],
+                "proposal_source_session_uri": _first_source_session_uri(proposal_contexts),
+            }
+        )
+    return list(gradients), {
+        "experience_improvement_gate": {
+            "enabled": False,
+            "stage": "proposal",
+            "passed": True,
+            "atomic": False,
+            "accepted_count": len(gradients),
+            "rejected_count": 0,
+            "jev_batch_count": 0,
+            "jev_split_count": 0,
+            "oversized_candidates": [],
+            "candidates": candidates,
+        }
+    }
 
 
 async def _successful_anchor_contexts(

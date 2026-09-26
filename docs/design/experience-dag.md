@@ -166,6 +166,12 @@ Successful anchor evidence is a bounded execution witness rather than a concaten
 system prompts are removed, each evidence record is limited to 2,000 characters, the combined
 witness is limited to 20,000 characters, and at most three recent successful anchors are used.
 
+`agent_evolution.experience_gate_enabled` controls this semantic proposal Gate and defaults to
+`false`. When disabled, every structurally valid proposal enters PatchMerge directly and is marked
+with `enabled=false` in diagnostics. PatchMerge and storage still enforce the fixed Case target,
+complete-DAG compilation, deletion restrictions, provenance, and concurrency guards. Setting the
+flag to `true` enables the successful-anchor behavior described above.
+
 For each Session proposal, acceptance requires:
 
 - A successful proposal still completes its own path and preserves grounded obligations.
