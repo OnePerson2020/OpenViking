@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any
@@ -17,6 +16,10 @@ from openviking.session.memory.agent_experience_context_provider import (
     AgentExperienceContextProvider,
 )
 from openviking.session.memory.dataclass import MemoryFile, StoredLink
+from openviking.session.memory.experience_dag import (
+    MAX_EVIDENCE_SUMMARY_CHARS,
+    tool_evidence_summary,
+)
 from openviking.session.memory.extract_loop import ExtractLoop
 from openviking.session.memory.memory_isolation_handler import MemoryIsolationHandler
 from openviking.session.train.components.experience_improvement_gate import (
@@ -389,7 +392,7 @@ def _messages_to_gate_evidence(messages: list[Any]) -> list[dict[str, str]]:
                 {
                     "id": f"message:{message_index}",
                     "kind": f"{role}_message",
-                    "summary": content[:4096],
+                    "summary": content[:MAX_EVIDENCE_SUMMARY_CHARS],
                 }
             )
         for part_index, part in enumerate(getattr(message, "parts", []) or []):
@@ -398,21 +401,17 @@ def _messages_to_gate_evidence(messages: list[Any]) -> list[dict[str, str]]:
             if not tool_name or not tool_output:
                 continue
             tool_input = getattr(part, "tool_input", None)
-            summary = json.dumps(
-                {
-                    "tool_name": tool_name,
-                    "tool_input": tool_input,
-                    "tool_output": tool_output,
-                    "tool_status": getattr(part, "tool_status", None),
-                },
-                ensure_ascii=False,
-                default=str,
+            summary = tool_evidence_summary(
+                tool_name,
+                tool_output,
+                tool_input=tool_input,
+                tool_status=getattr(part, "tool_status", None),
             )
             evidence.append(
                 {
                     "id": f"message:{message_index}:tool:{part_index}",
                     "kind": "tool_result",
-                    "summary": summary[:4096],
+                    "summary": summary,
                 }
             )
     return evidence[-256:]

@@ -7,9 +7,12 @@ import json
 import uuid
 from typing import Any
 
+from openviking.session.memory.experience_dag import (
+    MAX_EVIDENCE_SUMMARY_CHARS,
+    tool_evidence_summary,
+)
+
 GUIDANCE_MARKER = "[DAG Experience Guidance]"
-_MAX_EVIDENCE_SUMMARY_CHARS = 4096
-_TRUNCATION_SUFFIX = "...[truncated]"
 
 
 class Tau2DagExperienceRuntime:
@@ -89,9 +92,9 @@ def _execution_evidence(messages: list[dict[str, Any]]) -> tuple[list[dict[str, 
         name = str(message.get("name", "") or "")
         kind = "tool_result" if role == "tool" else f"{role}_message"
         summary = (
-            _tool_evidence_summary(name, content)
+            tool_evidence_summary(name, content)
             if role == "tool"
-            else content[:_MAX_EVIDENCE_SUMMARY_CHARS]
+            else content[:MAX_EVIDENCE_SUMMARY_CHARS]
         )
         evidence.append({"id": evidence_id, "kind": kind, "summary": summary})
         context.append(
@@ -99,39 +102,27 @@ def _execution_evidence(messages: list[dict[str, Any]]) -> tuple[list[dict[str, 
                 "evidence_id": evidence_id,
                 "role": role,
                 "tool_name": name or None,
-                "content": content[:4096],
+                "content": content[:MAX_EVIDENCE_SUMMARY_CHARS],
             }
         )
-    return evidence, json.dumps(context, ensure_ascii=False)
+    return evidence, _bounded_context_json(context)
 
 
-def _tool_evidence_summary(tool_name: str, tool_output: str) -> str:
-    """Keep tool identity visible to Jev while preserving a valid bounded JSON value."""
-    bounded_name = tool_name[:512] or None
-
-    def render(output: str) -> str:
-        return json.dumps(
-            {"tool_name": bounded_name, "tool_output": output},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-
-    complete = render(tool_output)
-    if len(complete) <= _MAX_EVIDENCE_SUMMARY_CHARS:
-        return complete
-
-    low = 0
-    high = len(tool_output)
-    best = render(_TRUNCATION_SUFFIX)
-    while low <= high:
-        midpoint = (low + high) // 2
-        candidate = render(tool_output[:midpoint] + _TRUNCATION_SUFFIX)
-        if len(candidate) <= _MAX_EVIDENCE_SUMMARY_CHARS:
-            best = candidate
-            low = midpoint + 1
-        else:
-            high = midpoint - 1
-    return best
+def _bounded_context_json(context: list[dict[str, Any]]) -> str:
+    selected: list[dict[str, Any]] = []
+    for item in reversed(context):
+        candidate = [item, *selected]
+        encoded = json.dumps(candidate, ensure_ascii=False)
+        if len(encoded) > MAX_EVIDENCE_SUMMARY_CHARS:
+            if selected:
+                break
+            clipped = dict(item)
+            clipped["content"] = str(clipped.get("content") or "")[
+                -MAX_EVIDENCE_SUMMARY_CHARS // 2 :
+            ]
+            return json.dumps([clipped], ensure_ascii=False)
+        selected = candidate
+    return json.dumps(selected, ensure_ascii=False)
 
 
 def _action_outcomes(

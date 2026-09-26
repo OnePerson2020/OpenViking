@@ -19,6 +19,7 @@ from openviking.session.memory.experience_dag import (
     GeneralNode,
     IfElseBranch,
     TellAgent,
+    clip_evidence_summary,
 )
 from openviking.telemetry import tracer
 from openviking_cli.utils.config.agent_evolution_config import DagDeciderConfig
@@ -214,7 +215,14 @@ def _build_state(
         if selected and used + size > max_chars:
             break
         if size > max_chars:
-            item = {**item, "summary": item["summary"][-max_chars:]}
+            item = {
+                **item,
+                "summary": clip_evidence_summary(
+                    str(item.get("kind") or ""),
+                    item["summary"],
+                    max_chars,
+                ),
+            }
             size = len(item["summary"])
         selected.append(item)
         used += size

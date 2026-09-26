@@ -11,7 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 MAX_NODES = 256
 MAX_CONTENT_BYTES = 256 * 1024
+MAX_EVIDENCE_SUMMARY_CHARS = 128 * 1024
 DEFAULT_BRANCH_CHOICE = "__default__"
+_TRUNCATION_SUFFIX = "...[truncated]"
 
 
 class DagModel(BaseModel):
@@ -210,7 +212,74 @@ class DagAction(DagModel):
 class DagEvidenceRef(DagModel):
     id: str = Field(min_length=1, max_length=128)
     kind: str = Field(min_length=1, max_length=64)
-    summary: str = Field(min_length=1, max_length=4096)
+    summary: str = Field(min_length=1, max_length=MAX_EVIDENCE_SUMMARY_CHARS)
+
+
+def tool_evidence_summary(
+    tool_name: str,
+    tool_output: str,
+    *,
+    tool_input: object | None = None,
+    tool_status: object | None = None,
+    max_chars: int = MAX_EVIDENCE_SUMMARY_CHARS,
+) -> str:
+    """Serialize tool evidence while keeping its identity visible after truncation."""
+    payload: dict[str, object] = {
+        "tool_name": tool_name[:512] or None,
+        "tool_output": tool_output,
+    }
+    if tool_input is not None:
+        payload["tool_input"] = tool_input
+    if tool_status is not None:
+        payload["tool_status"] = tool_status
+
+    def render(output: str) -> str:
+        return json.dumps(
+            {**payload, "tool_output": output},
+            ensure_ascii=False,
+            default=str,
+            separators=(",", ":"),
+        )
+
+    complete = render(tool_output)
+    if len(complete) <= max_chars:
+        return complete
+
+    # Tool identity and result matter more than optional request metadata when
+    # fitting one evidence item into the request schema.
+    payload.pop("tool_input", None)
+    low = 0
+    high = len(tool_output)
+    best = render(_TRUNCATION_SUFFIX)
+    while low <= high:
+        midpoint = (low + high) // 2
+        candidate = render(tool_output[:midpoint] + _TRUNCATION_SUFFIX)
+        if len(candidate) <= max_chars:
+            best = candidate
+            low = midpoint + 1
+        else:
+            high = midpoint - 1
+    return best
+
+
+def clip_evidence_summary(kind: str, summary: str, max_chars: int) -> str:
+    """Clip one Jev evidence value without dropping structured tool identity."""
+    if len(summary) <= max_chars:
+        return summary
+    if kind == "tool_result":
+        try:
+            payload = json.loads(summary)
+        except (TypeError, ValueError):
+            payload = None
+        if isinstance(payload, dict) and payload.get("tool_name"):
+            return tool_evidence_summary(
+                str(payload["tool_name"]),
+                str(payload.get("tool_output") or ""),
+                tool_input=payload.get("tool_input"),
+                tool_status=payload.get("tool_status"),
+                max_chars=max_chars,
+            )
+    return summary[-max_chars:]
 
 
 class DagCompletedNode(DagModel):

@@ -59,7 +59,10 @@ restores their session-scoped instances, decides node states and returns only th
 `instructions`. Detailed per-Experience transitions remain in `experiences` for observability.
 Callers may provide bounded evidence records with `id`, `kind` and `summary`; unknown citations
 reject the corresponding Experience update. Suggesting an action does not mark it complete:
-unfulfilled actions remain available on later requests.
+unfulfilled actions remain available on later requests. Individual evidence summaries may carry
+up to 128 KiB rather than the former 4096-character limit. The final Jev state is still bounded by
+the configured aggregate budget; structured tool evidence is clipped without dropping its
+`tool_name`.
 
 Jev is configured as a reusable top-level decision service, while Agent Evolution only selects
 it as the DAG decision provider:

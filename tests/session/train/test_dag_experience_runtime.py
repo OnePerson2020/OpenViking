@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from benchmark.tau2.train.dag_experience_runtime import GUIDANCE_MARKER, Tau2DagExperienceRuntime
+from openviking.session.memory.experience_dag import MAX_EVIDENCE_SUMMARY_CHARS
 
 URI = "viking://user/default/memories/experiences/order.md"
 
@@ -99,7 +100,7 @@ def test_tool_evidence_summary_is_valid_json_after_bounded_truncation():
             {
                 "role": "tool",
                 "name": "cancel_reservation",
-                "content": 'result with quotes " and slashes \\' * 1000,
+                "content": 'result with quotes " and slashes \\' * 10_000,
             },
         ]
     )
@@ -109,7 +110,7 @@ def test_tool_evidence_summary_is_valid_json_after_bounded_truncation():
         "kind": "assistant_message",
         "summary": "I will cancel the reservation now.",
     }
-    assert len(evidence[1]["summary"]) <= 4096
+    assert 4096 < len(evidence[1]["summary"]) <= MAX_EVIDENCE_SUMMARY_CHARS
     parsed = json.loads(evidence[1]["summary"])
     assert parsed["tool_name"] == "cancel_reservation"
     assert parsed["tool_output"].endswith("...[truncated]")

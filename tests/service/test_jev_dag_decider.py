@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,7 +9,12 @@ import pytest
 
 from openviking.models.jev import JevClient, JevError, JevPayloadTooLarge
 from openviking.service.experience_dag_decider import ExperienceDagDecider
-from openviking.session.memory.experience_dag import Dag, DagEvidenceRef, DagInstance
+from openviking.session.memory.experience_dag import (
+    Dag,
+    DagEvidenceRef,
+    DagInstance,
+    tool_evidence_summary,
+)
 from openviking.session.memory.experience_dag_compiler import compile_dag
 from openviking_cli.utils.config.agent_evolution_config import DagDeciderConfig
 from openviking_cli.utils.config.jev_config import JevConfig
@@ -348,3 +354,31 @@ async def test_dag_decider_omits_uncertain_or_invalid_answers():
     decider = ExperienceDagDecider(DagDeciderConfig(provider="jev"), jev=jev)
 
     assert await decider.decide([instance], evidence=[], context="state") == {}
+
+
+@pytest.mark.asyncio
+async def test_dag_decider_preserves_tool_name_when_clipping_large_evidence():
+    instance = _instance()
+    jev = SimpleNamespace(evaluate=AsyncMock(return_value={}))
+    decider = ExperienceDagDecider(
+        DagDeciderConfig(provider="jev", max_state_chars=1024),
+        jev=jev,
+    )
+    evidence = [
+        DagEvidenceRef(
+            id="tool:1",
+            kind="tool_result",
+            summary=tool_evidence_summary(
+                "cancel_reservation",
+                "x" * 10_000,
+            ),
+        )
+    ]
+
+    await decider.decide([instance], evidence=evidence, context="state")
+
+    selected = jev.evaluate.await_args.kwargs["state"]["evidence"][0]
+    assert len(selected["summary"]) <= 1024
+    payload = json.loads(selected["summary"])
+    assert payload["tool_name"] == "cancel_reservation"
+    assert payload["tool_output"].endswith("...[truncated]")
