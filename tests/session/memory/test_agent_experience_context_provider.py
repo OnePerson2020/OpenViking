@@ -124,6 +124,8 @@ async def test_agent_experience_prefetch_starts_with_conversation_and_new_trajec
     assert add_tool_call_pair.call_args_list[0].kwargs["result"]["uri"] == provider.trajectory_uri
     assert messages[-1]["role"] == "user"
     assert "candidate_experience" in messages[-1]["content"]
+    assert "exactly ONE experience entry" in messages[-1]["content"]
+    assert "MUST produce multiple entries" not in messages[-1]["content"]
 
 
 @pytest.mark.asyncio

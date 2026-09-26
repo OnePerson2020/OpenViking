@@ -311,7 +311,7 @@ All memory content must be written in {output_language}.
                         "Treat `candidate_experience` as existing memories you may update, replace, or skip.",
                         "Treat `candidate_source_trajectory` as reference-only context for understanding a candidate experience; do not modify it directly.",
                         "Based on the above, decide whether to **Update**, **Replace**, **Create**, or **Skip**. Output only restricted Python memory SDK code.",
-                        "A single trajectory covering multiple user intents MUST produce multiple entries.",
+                        "Produce exactly ONE experience entry for this intent-scoped `new_trajectory`; represent dependent steps and branches inside its DAG.",
                     ]
                 ),
             }
