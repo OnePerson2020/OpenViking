@@ -8,7 +8,10 @@ import httpx
 import pytest
 
 from openviking.models.jev import JevClient, JevError, JevPayloadTooLarge
-from openviking.service.experience_dag_decider import ExperienceDagDecider
+from openviking.service.experience_dag_decider import (
+    ExperienceDagDecider,
+    LlmDagDecisionEvaluator,
+)
 from openviking.session.memory.experience_dag import (
     Dag,
     DagEvidenceRef,
@@ -93,6 +96,34 @@ intent.default(deny)"""
         experience_uri="viking://user/u/memories/experiences/cancel.md",
         dag=Dag.model_validate_json(compile_dag(source)),
     )
+
+
+@pytest.mark.asyncio
+async def test_llm_dag_decision_evaluator_uses_one_structured_model_call():
+    model = SimpleNamespace(
+        get_completion_async=AsyncMock(
+            return_value='```json\n{"answers":{"slot_0":{"type":"noul","noul":0.9}}}\n```'
+        )
+    )
+    evaluator = LlmDagDecisionEvaluator(model)
+
+    answers = await evaluator.evaluate(
+        state={"evidence": [{"kind": "user_message", "summary": "Order 123"}]},
+        questions={
+            "slot_0": {
+                "type": "noul",
+                "instructions": "Has the order ID been supplied?",
+            }
+        },
+    )
+
+    assert answers == {"slot_0": {"type": "noul", "noul": 0.9}}
+    model.get_completion_async.assert_awaited_once()
+    call = model.get_completion_async.await_args.kwargs
+    assert call["thinking"] is False
+    assert call["max_tokens"] == 8192
+    payload = json.loads(call["messages"][1]["content"])
+    assert set(payload["questions"]) == {"slot_0"}
 
 
 @pytest.mark.asyncio
@@ -301,7 +332,7 @@ async def test_dag_decider_batches_noul_and_choice_and_compacts_evidence():
         },
     }
     jev = SimpleNamespace(evaluate=AsyncMock(return_value=answers))
-    decider = ExperienceDagDecider(DagDeciderConfig(provider="jev"), jev=jev)
+    decider = ExperienceDagDecider(DagDeciderConfig(provider="jev"), evaluator=jev)
     evidence = [
         DagEvidenceRef(id="system:0", kind="system_message", summary="large system prompt"),
         DagEvidenceRef(
@@ -330,6 +361,8 @@ async def test_dag_decider_batches_noul_and_choice_and_compacts_evidence():
     assert "context" not in call["state"]
     assert len(call["questions"]) == 6
     assert call["questions"]["slot_0"]["type"] == "noul"
+    assert "assistant_message_delivered" in call["questions"]["slot_2"]["criteria"]["true"]
+    assert "Ordinary assistant_message text" in call["questions"]["slot_2"]["criteria"]["true"]
     assert call["questions"]["slot_4"]["type"] == "choice"
     assert "__default__" in call["questions"]["slot_4"]["criteria"]
     assert "__unknown__" in call["questions"]["slot_4"]["criteria"]
@@ -351,7 +384,7 @@ async def test_dag_decider_omits_uncertain_or_invalid_answers():
             }
         )
     )
-    decider = ExperienceDagDecider(DagDeciderConfig(provider="jev"), jev=jev)
+    decider = ExperienceDagDecider(DagDeciderConfig(provider="jev"), evaluator=jev)
 
     assert await decider.decide([instance], evidence=[], context="state") == {}
 
@@ -362,7 +395,7 @@ async def test_dag_decider_preserves_tool_name_when_clipping_large_evidence():
     jev = SimpleNamespace(evaluate=AsyncMock(return_value={}))
     decider = ExperienceDagDecider(
         DagDeciderConfig(provider="jev", max_state_chars=1024),
-        jev=jev,
+        evaluator=jev,
     )
     evidence = [
         DagEvidenceRef(

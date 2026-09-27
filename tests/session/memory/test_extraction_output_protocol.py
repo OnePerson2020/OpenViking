@@ -330,7 +330,7 @@ def test_python_create_uses_fixed_case_experience_schema():
     ]
 
 
-def test_experience_schema_requires_atomic_nodes_and_pre_mutation_disclosures():
+def test_experience_schema_defines_conditional_reminders_not_action_paths():
     registry = MemoryTypeRegistry(load_schemas=False)
     registry.load_from_yaml(str(resolve_memory_templates_dir() / "experiences.yaml"))
     schema = registry.get("experiences")
@@ -338,13 +338,20 @@ def test_experience_schema_requires_atomic_nodes_and_pre_mutation_disclosures():
 
     contract = create_extraction_output_protocol("python").render_contract(context)
 
-    assert "Every node represents exactly one observable obligation" in contract
-    assert "Map every concrete requirement in the Case rubric or evaluation feedback" in contract
-    assert "collect facts -> communicate required pre-action facts" in contract
-    assert "A post-action summary cannot substitute" in contract
-    assert 'ask("Tell the total and ask for confirmation")` is invalid' in contract
-    assert "tell_refund.then(confirm_cancel)" in contract
-    assert "confirm_cancel.then(cancel)" in contract
+    assert "conditional reminders, not a task plan" in contract
+    assert "Full-replacement SDK syntax is mandatory for this field" in contract
+    assert "Never call or assign `sdk.existing(...)` yourself" in contract
+    assert 'existing_experience.content.update("""<complete DAG source>""")' in contract
+    assert "Never pass a complete DAG to `content.edit(...)`" in contract
+    assert "Do not map every Case requirement or every observed tool call into a node" in contract
+    assert (
+        "generated Experiences must not use `ask(...)`, `call(...)`, or `choose(...)`" in contract
+    )
+    assert "Every root-to-leaf path must end in a `tell(...)` reminder" in contract
+    assert "reminder nodes must not have outgoing edges" in contract
+    assert "total_requested.then(remind_total_scope)" in contract
+    assert "reservations_known.then(remind_total_scope)" in contract
+    assert "confirm_cancel.then(cancel)" not in contract
 
 
 def test_python_create_populates_hidden_trajectory_execution_from_schema_default():

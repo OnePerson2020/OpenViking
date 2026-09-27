@@ -200,6 +200,36 @@ async def test_agent_loop_gates_multimodal_result_by_provider(make_loop, support
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_keeps_experience_reminder_and_does_not_reinject_it(make_loop):
+    provider = _MediaProvider([[_image_call("call-1")]])
+    loop = make_loop(provider=provider, max_iterations=2)
+    reminder = "[Experience Reminder]\nRemember the complete total."
+    experience_context_provider = AsyncMock(return_value=reminder)
+    captured_experience_messages = []
+
+    final, *_ = await loop._run_agent_loop(
+        messages=[{"role": "user", "content": "read it"}],
+        session_key=SessionKey(type="cli", channel_id="default", chat_id="experience-reminder"),
+        publish_events=False,
+        tool_registry=_ImageRegistry(),
+        experience_context_provider=experience_context_provider,
+        captured_experience_messages=captured_experience_messages,
+    )
+
+    assert final == "done"
+    assert experience_context_provider.await_count == 2
+    assert [message for message in provider.calls[0] if message.get("content") == reminder] == [
+        {"role": "user", "content": reminder}
+    ]
+    assert [message for message in provider.calls[1] if message.get("content") == reminder] == [
+        {"role": "user", "content": reminder}
+    ]
+    assert captured_experience_messages == [
+        {"role": "user", "content": reminder, "after_tool_count": 0}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_limits_media_across_parallel_tool_results(make_loop, monkeypatch):
     monkeypatch.setattr(loop_module, "MAX_INLINE_TOOL_RESULT_MEDIA_BYTES", 5)
 

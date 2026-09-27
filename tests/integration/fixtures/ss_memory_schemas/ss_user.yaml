@@ -1,0 +1,46 @@
+memory_type: ss_user
+enabled: true
+stage: user
+peer_enabled: false
+operation_mode: upsert
+directory: "viking://user/{{ user_space }}/memories/ss"
+filename_template: "user.md"
+description: |
+  SS 用户级记忆。正文只能来自 role=user 的明确表达，只记录用户明确说明可跨项目、
+  跨任务复用的偏好和协作约定。当前项目的创作规则、一次性输出格式、临时授权、
+  Agent 建议、工具结果、系统上下文以及角色行为都不能写入用户级记忆。
+
+  创建门槛（必须满足）：
+  - 至少一个非空字段有用户原话支持，且用户明确表示该要求适用于其他项目或未来协作。
+  - 如果 collaboration_preferences 和 stable_preferences 都没有合格证据，必须 no-op。
+  - 禁止用空字符串、空 blocks、只有标题的占位内容调用 set_ss_user。
+
+  作用域规则：
+  - ss_user：跨项目的沟通、确认、修改说明和协作偏好；需要“以后所有项目”“每次协作”
+    等明确表述，仅在一个项目内重复不足以成为用户级证据。
+  - ss_project：当前项目内跨多个 Plot 生效的整体风格、人物、声音、道具和制作规则。
+  - ss_plot：只属于一个 Plot（分场）的剧情、空间、表演、节奏或衔接。
+  - ss_clip：只属于一个 Clip（片段）的时长、版本、参考、首尾帧或局部修改边界。
+  同一事实只写入一个层级，明确的窄作用域优先。当前项目的“所有 Plot”仍属于
+  ss_project，不属于 ss_user。
+fields:
+  - name: collaboration_preferences
+    type: string
+    merge_op: patch
+    description: |
+      用户明确声明跨项目生效的协作偏好，包括回复方式、差异说明、确认流程和组织方式。
+      保留条件与例外，排除一次性要求和仅在当前项目中出现的偏好。
+  - name: stable_preferences
+    type: string
+    merge_op: patch
+    description: |
+      用户明确声明可跨越当前项目复用的其他稳定偏好，不从单项目行为中推断。
+content_template: |-
+  ## 协作偏好
+  {{ collaboration_preferences }}
+
+  ## 稳定偏好
+  {{ stable_preferences }}
+embedding_template: |-
+  {{ collaboration_preferences }}
+  {{ stable_preferences }}

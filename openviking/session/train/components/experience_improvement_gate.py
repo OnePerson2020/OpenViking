@@ -86,7 +86,7 @@ class ExperienceImprovementGate:
         if self.jev is None and self.jev_config is not None:
             self.jev = JevClient(self.jev_config)
         if self.dag_decider is None and self.jev is not None:
-            self.dag_decider = ExperienceDagDecider(config=self.config, jev=self.jev)
+            self.dag_decider = ExperienceDagDecider(config=self.config, evaluator=self.jev)
 
     @tracer(
         "train.proposal_gate.experience.validate",

@@ -1,0 +1,78 @@
+memory_type: ss_clip
+enabled: true
+stage: user
+peer_enabled: false
+operation_mode: upsert
+directory: "viking://resources/ss_memory/projects"
+filename_template: "{{ project_id }}/plots/{{ plot_id }}/clips/{{ clip_id }}/clip.md"
+description: |
+  SS Clip（片段）记忆。正文只能来自 role=user 的明确表达。记录只属于一个具体 Clip 的
+  叙事任务、时长、动作链、参考、连续性、基准 Take 和精确修改边界。project_id、
+  plot_id、clip_id 必须由 SS_CONTEXT 或已解析引用支持。
+
+  创建门槛（必须满足）：
+  - 至少存在一条用户原话，通过明确引用或可被工具唯一解析的序号/名称指向该 Clip；
+    没有此类原话时必须 no-op。
+  - 工具创建的 Clip、Take、标题、时长、生成状态或选中版本只能解析身份和状态，
+    不能复制为记忆正文，也不能单独触发文件创建。
+  - 针对整个 Plot 的拆分、节奏、重生成或多个 Clip 的共同衔接仍属于 ss_plot；
+    只有用户为当前 Clip 给出独立要求时才写入 ss_clip。
+  - 只有 Clip 标题、工具时长、继承规则或泛化连续性时，不创建文件。
+
+  作用域与层级：
+  - 每个 ss_clip 只属于一个父 ss_plot，该 Plot 再属于一个 ss_project；project_id 和
+    plot_id 都是必需父键，禁止把 Clip 直接挂到 Project 或其他 Plot。
+  - 同一条消息对多个 Clip 给出不同要求时拆成多个 ss_clip 操作，不能合并各自时长和基准。
+  - Plot 整体剧情、空间或总节奏写入 ss_plot；跨多个 Plot 的规则写入 ss_project；
+    跨项目偏好写入 ss_user。
+  - Take 是 Clip 的候选生成版本，不是第五层记忆。只有用户明确选择、引用或指定某个
+    Take 为修改基准时，才在 edit_constraints 中记录 take_id 和对应修改边界。
+  同一事实只写入一个层级，明确的窄作用域优先。
+fields:
+  - name: project_id
+    type: string
+    merge_op: immutable
+    description: 稳定父项目 ID。
+  - name: plot_id
+    type: string
+    merge_op: immutable
+    description: 已解析上下文中的稳定父 Plot ID。
+  - name: clip_id
+    type: string
+    merge_op: immutable
+    description: 已解析上下文中的稳定 Clip ID。
+  - name: narrative_and_timing
+    type: string
+    merge_op: patch
+    description: Clip 的叙事目的、动作链、用户要求的时长以及首尾停留。
+  - name: visual_and_audio
+    type: string
+    merge_op: patch
+    description: Clip 特有的人物、道具、画面、对白、声音和参考约束。
+  - name: continuity
+    type: string
+    merge_op: patch
+    description: |
+      前后 Clip ID 以及跨边界必须保持的具体状态，离线物化后供线上直接读取。
+  - name: edit_constraints
+    type: string
+    merge_op: patch
+    description: |
+      用户明确指定的基准 take_id / 资源版本、允许修改的内容和必须保持不变的内容。
+content_template: |-
+  ## 叙事与时长
+  {{ narrative_and_timing }}
+
+  ## 画面与声音
+  {{ visual_and_audio }}
+
+  ## 衔接与依赖
+  {{ continuity }}
+
+  ## Take 与修改边界
+  {{ edit_constraints }}
+embedding_template: |-
+  {{ narrative_and_timing }}
+  {{ visual_and_audio }}
+  {{ continuity }}
+  {{ edit_constraints }}

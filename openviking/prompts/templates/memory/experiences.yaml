@@ -1,6 +1,8 @@
 memory_type: experiences
 description: |
-  A reusable SOP DAG distilled from agent execution, stored as a complete Python program.
+  A reusable conditional-reminder DAG distilled from agent execution, stored as a complete
+  Python program. It describes when the agent needs a reminder and what the reminder says;
+  it is not a successful action path or an executable SOP.
 
 directory: "viking://user/{{ user_space }}/memories/experiences"
 filename_template: "{{ experience_name }}.md"
@@ -25,86 +27,74 @@ fields:
       from an empty graph: always start with `dag = workflow("...")` and include every
       node that the final DAG needs. Existing candidate contents are Python source; rewrite the
       complete source when updating rather than outputting only a mutation.
-      Node factories derive the stable slot name from their Python variable:
-      - ask("information to obtain")
-      - call("available_tool", "parameter suggestion")
-      - check("condition to observe in context")
-      - tell("action to perform")
-      - choose("question whose answer selects one named case")
-      Atomic node and evaluation-obligation rules:
-      - Every node represents exactly one observable obligation. Split information collection,
-        calculation, user communication, confirmation, and state mutation into separate nodes.
-      - Words such as "and", "then", "while", "同时", "并且" or "然后" usually indicate that
-        a description contains multiple obligations and must be split.
-      - Map every concrete requirement in the Case rubric or evaluation feedback to its own node.
-        If feedback says required information was not communicated, add a dedicated `tell(...)`
-        node for that information; do not hide it inside a generic summary node.
-      - `ask(...)` requests exactly one missing value or one explicit confirmation. It must not
-        also calculate or communicate required business information.
-      - `tell(...)` communicates one result or one closely related result set. State what must be
-        communicated, which previously collected evidence it uses, and whether it uses the state
-        before or after a mutation.
-      - `call(...)` represents one tool obligation. Its description must state the required input
-        evidence and intended effect without combining a later confirmation or communication.
-      Mutation barrier rules:
-      - Before any tool call that creates, updates, cancels, deletes, books, pays, transfers, or
-        otherwise changes external state, create explicit predecessor nodes for every required
-        pre-action disclosure and for the user's confirmation.
-      - Use this order: collect facts -> communicate required pre-action facts -> obtain explicit
-        confirmation -> execute state-changing tools -> communicate the final result.
-      - Information computed from pre-mutation state must be communicated before the first
-        mutation. A post-action summary cannot substitute for a required pre-action disclosure.
-      - Never combine a required disclosure and confirmation in one `ask(...)`. For example,
-        `ask("Tell the total and ask for confirmation")` is invalid. Use a `tell(...)` node for
-        the total followed by a separate `ask(...)` confirmation node.
+      Full-replacement SDK syntax is mandatory for this field:
+      - Use the system-provided existing-object variable directly. Never call or assign
+        `sdk.existing(...)` yourself.
+      - Replace an existing DAG with exactly
+        `existing_experience.content.update("""<complete DAG source>""")`.
+      - Never pass a complete DAG to `content.edit(...)` or `content.drop(...)`; those methods
+        are snippet patch operations and are invalid for an Experience replacement.
+      Experience semantics:
+      - An Experience is a set of conditional reminders, not a task plan, tool trace, successful
+        execution path, rubric transcription, or complete SOP.
+      - Capture only a non-obvious risk, boundary, exception, calculation scope, ordering hazard,
+        or decision rule that the Session evidence shows the agent may otherwise miss.
+      - Do not reproduce ordinary task steps that the base policy and tool definitions already
+        specify. Do not map every Case requirement or every observed tool call into a node.
+      - A Case Experience may contain multiple independent condition-to-reminder rules. Keep
+        unrelated rules as separate subgraphs instead of connecting them into an artificial path.
+      New Experience DAGs use only these node factories. The Python variable is the stable slot
+      name:
+      - check("one observable condition in the current conversation or tool evidence")
+      - tell("one precise reminder to inject into the agent context")
+      The compiler accepts other factories for existing programs, but generated Experiences must
+      not use `ask(...)`, `call(...)`, or `choose(...)`. If information or an action is still
+      needed, remind the agent what to verify or do; do not turn that action into a DAG step.
+      When an existing candidate is an action-path DAG, replace obsolete action nodes with the
+      smallest equivalent condition-to-reminder rules rather than preserving its workflow shape.
+      Condition rules:
+      - Each `check(...)` is a trigger predicate, not an instruction. It must be directly
+        decidable from the supplied user messages, assistant messages, or tool results.
+      - State the applicability boundary explicitly. Split independent conditions into separate
+        check nodes. Multiple `.then(reminder)` edges into the same reminder have AND semantics.
+      - Conditions describe evidence that already exists, never future steps that the agent is
+        expected to perform. Unknown evidence leaves the reminder inactive.
+      Reminder rules:
+      - Each `tell(...)` is an instruction shown to the agent when its predecessor conditions are
+        satisfied. It is not a claim that the instruction has already been followed.
+      - Every root-to-leaf path must end in a `tell(...)` reminder, and reminder nodes must not
+        have outgoing edges.
+      - Make the reminder actionable and testable: state the exact scope, timing, inclusion or
+        exclusion rule, and failure to avoid. Prefer one coherent correction over a generic
+        request to "be careful" or a summary of the whole Case.
+      - Generalize rollout-specific identifiers and values unless they are invariant parts of the
+        canonical Case. Do not invent rules unsupported by the Session or evaluation evidence.
       Relationship methods use node object variables, never IDs:
       - source.then(target1, target2) creates one-to-many fan-out.
       - condition.if_true(target), condition.if_false(target) define boolean branches.
-      - choice.case("label", target), choice.default(target) define named branches.
-      A complete conditional looks like:
-      eligible = check("Check eligibility")
-      cancel = call("cancel_reservation", "Use the confirmed reservation")
-      transfer = call("transfer_to_human_agents", "Include the reason")
-      eligible.if_true(cancel)
-      eligible.if_false(transfer)
-      Declare all node variables before relation calls. Every final source needs exactly one
+      A boolean branch may route to different reminders, and an omitted branch terminates without
+      a reminder. Declare all node variables before relation calls. Every program needs exactly one
       `dag = workflow(...)` assignment. The compiler generates internal node IDs and reverse
-      dependencies. Multiple `.then(target)` edges to the same target are an AND join: that
-      target waits for every source node to complete.
+      dependencies.
       Only node declarations and these relation calls are allowed. No imports, loops, functions,
       arbitrary method calls, attribute access, expressions or real tool execution.
       Graphs must be acyclic and nonempty (a single node is allowed), with at most 256 nodes.
       Predecessors have AND semantics: a node with multiple incoming edges waits until every
-      predecessor completes. Use fan-out when later steps are independent.
+      predecessor condition is satisfied.
       Boolean branch slots come from any node connected with `if_true/if_false`; use this form for
-      yes/no confirmations so a false answer follows the explicit false edge or terminates that
-      branch. Named branch slots come from `choose(...).case/default`.
-      Every non-choice slot has a boolean value suitable for a Noul decision. AskUser is true
-      only after the requested information appears in context; CallTool is true only after a
-      successful matching tool result; TellAgent is true only after the instruction was carried
-      out; Check is true only when its condition holds. False or unknown does not advance a
-      non-branch node. Never store the actual user answer or tool-result object in slot values;
-      those values remain in conversation evidence for the agent to use.
-      A choose slot contains exactly one declared `.case(...)` label. When `.default(...)` applies,
-      its value is the reserved label `__default__`. Checks are passive; use ask/call when missing
-      information requires an action.
+      true/false applicability. A Check is true only when its condition holds. False or unknown
+      must not activate a `.then(...)` reminder. TellAgent is the reminder emitted for an active
+      rule; whether the agent later follows it is downstream execution evidence, not another
+      business-process step in this DAG.
       Memory retrieval and lifecycle operations are outside the business DAG. Never create
       nodes for `search_exp`, `search_experience` or `read_experience`.
-      Each DAG covers the complete canonical Case, including its dependent intents. Generalize instance-specific identifiers and use only tools
-      observed in the input. Preserve alternate paths and put guard conditions before actions.
       Natural-language descriptions must be in {{ language }}; constructor names stay in English.
       Example content:
-      dag = workflow("User asks to cancel an order after reviewing the refund")
-      order_id = ask("What is the order ID?")
-      order = call("query_order", "Use order_id from context")
-      tell_refund = tell("Before cancellation, calculate and communicate the refund from the original order")
-      confirm_cancel = ask("Ask for explicit confirmation to cancel the order")
-      cancel = call("cancel_order", "Cancel the confirmed order")
-      tell_result = tell("Communicate the cancellation and refund result")
-      order_id.then(order)
-      order.then(tell_refund)
-      tell_refund.then(confirm_cancel)
-      confirm_cancel.then(cancel)
-      cancel.then(tell_result)
+      dag = workflow("Remind the agent about the scope of an upcoming-travel total")
+      total_requested = check("The user asks for the total cost of upcoming travel")
+      reservations_known = check("The context contains every reservation and enough dates and prices to determine which ones are upcoming")
+      remind_total_scope = tell("Calculate the total from the pre-mutation state and include every upcoming reservation, including reservations that the user also plans to modify or cancel; show the included items so the scope is unambiguous")
+      total_requested.then(remind_total_scope)
+      reservations_known.then(remind_total_scope)
 
     merge_op: replace

@@ -6,7 +6,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from benchmark.tau2.train.dag_experience_runtime import GUIDANCE_MARKER, Tau2DagExperienceRuntime
+from benchmark.tau2.train.dag_experience_runtime import (
+    EXPERIENCE_REMINDER_MARKER,
+    Tau2DagExperienceRuntime,
+)
 from openviking.session.memory.experience_dag import MAX_EVIDENCE_SUMMARY_CHARS
 
 URI = "viking://user/default/memories/experiences/order.md"
@@ -58,13 +61,19 @@ async def test_autorecall_uses_live_evidence_and_one_session():
     runtime.client = client
     messages = [
         {"role": "user", "content": "Order 123"},
-        {"role": "user", "content": GUIDANCE_MARKER + " old action"},
+        {"role": "user", "content": EXPERIENCE_REMINDER_MARKER + " old action"},
         {"role": "tool", "name": "read_experience", "content": "An old SOP"},
         {"role": "assistant", "content": "Checking", "reasoning_content": "private"},
         {"role": "tool", "name": "query_order", "content": "Order confirmed"},
     ]
-    assert (await runtime.search_exp(messages)).startswith(GUIDANCE_MARKER)
-    await runtime.search_exp(messages)
+    reminder = await runtime.search_exp(messages)
+    assert reminder.startswith(EXPERIENCE_REMINDER_MARKER)
+    assert '\n[\n  {\n    "experience_uri":' in reminder
+    assert (
+        json.loads(reminder.removeprefix(EXPERIENCE_REMINDER_MARKER).strip())[0]["slot_name"]
+        == "known"
+    )
+    assert await runtime.search_exp(messages) is None
     client.ensure_session.assert_awaited_once_with(runtime.session_id)
     context = client.search_exp.call_args.args[1]
     evidence = client.search_exp.call_args.kwargs["evidence"]
@@ -116,6 +125,58 @@ def test_tool_evidence_summary_is_valid_json_after_bounded_truncation():
     assert "...[truncated]..." in parsed["tool_output"]
     assert parsed["tool_output"].startswith("result with quotes")
     assert parsed["tool_output"].endswith("slashes \\")
+
+
+def test_execution_evidence_marks_only_delivered_assistant_content():
+    from benchmark.tau2.train.dag_experience_runtime import _execution_evidence
+
+    evidence, _ = _execution_evidence(
+        [
+            {"role": "assistant", "content": "internal tool-call narration"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-ok",
+                        "type": "function",
+                        "function": {
+                            "name": "communicate_with_user",
+                            "arguments": json.dumps({"content": "visible explicit message"}),
+                        },
+                    },
+                    {
+                        "id": "call-failed",
+                        "type": "function",
+                        "function": {
+                            "name": "communicate_with_user",
+                            "arguments": json.dumps({"content": "not delivered"}),
+                        },
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-ok",
+                "name": "communicate_with_user",
+                "content": "User reply",
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-failed",
+                "name": "communicate_with_user",
+                "content": "Error: delivery failed",
+            },
+            {"role": "assistant", "content": "visible routed message"},
+        ],
+        delivered_assistant_messages=["visible routed message"],
+    )
+
+    by_summary = {item["summary"]: item["kind"] for item in evidence}
+    assert by_summary["internal tool-call narration"] == "assistant_message"
+    assert by_summary["visible explicit message"] == "assistant_message_delivered"
+    assert by_summary["visible routed message"] == "assistant_message_delivered"
+    assert "not delivered" not in by_summary
 
 
 @pytest.mark.asyncio

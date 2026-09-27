@@ -1,0 +1,76 @@
+memory_type: ss_plot
+enabled: true
+stage: user
+peer_enabled: false
+operation_mode: upsert
+directory: "viking://resources/ss_memory/projects"
+filename_template: "{{ project_id }}/plots/{{ plot_id }}/plot.md"
+description: |
+  SS Plot（分场）记忆。正文只能来自 role=user 的明确表达。记录只属于一个 Plot 的
+  剧情状态，以及该 Plot 的空间、表演、节奏和衔接约束。project_id 和 plot_id
+  必须由 SS_CONTEXT、用户明确引用或已解析引用支持；recorded_current_focus 仅是提示，
+  用户明确指向和已解析引用优先。
+
+  创建门槛（必须满足）：
+  - 至少存在一条明确作用于该 Plot 的用户原话；移除 ID、工具标题、标签、时长和状态后，
+    这条原话仍然构成有用记忆。否则必须 no-op。
+  - 工具证据、current focus、Plot 标题或“该 Plot 存在”只能确定 plot_id，不能成为正文，
+    也不能单独触发文件创建。
+  - “每个 Plot”“全部 Plot”“某个 Plot 范围”或“全片”的规则属于 ss_project，
+    不得按工具列出的 plot_id 批量下沉。
+  - 只有 Plot 名称、继承的项目规则、泛化的转场要求或“注意前后衔接”时，不创建文件。
+
+  作用域与层级：
+  - 每个 ss_plot 只属于一个 ss_project；project_id 是父键，plot_id 在该项目内唯一。
+  - 一个 Plot 可以拥有零个或多个 ss_clip 子级，Clip 独有事实不能上卷到 Plot。
+  - 用户描述整个 Plot，或多个 Clip 共同构成的剧情、空间、表演和总节奏时使用 ss_plot。
+  - 用户明确引用一个 Clip、指定 Clip 时长、基准 Take、仅修改某项或相邻 Clip 连续性时，
+    使用 ss_clip，即使 current focus 指向父 Plot。
+  - 跨多个 Plot 的规则写入 ss_project；跨项目偏好写入 ss_user。
+  同一事实只写入一个层级，明确的窄作用域优先。
+fields:
+  - name: project_id
+    type: string
+    merge_op: immutable
+    description: 来自 SS_CONTEXT 的稳定父项目 ID。
+  - name: plot_id
+    type: string
+    merge_op: immutable
+    description: |
+      上下文证据支持的稳定 Plot ID；不能使用 Plot 序号或标题代替，也不能盲信冲突的 current focus。
+  - name: story_state
+    type: string
+    merge_op: patch
+    description: |
+      该 Plot 已确认的地点、人物、剧情事实、情绪原因和叙事事件；需要时保留准确对白。
+  - name: visual_constraints
+    type: string
+    merge_op: patch
+    description: 该 Plot 特有的空间、调度、构图、光线、服装和道具规则。
+  - name: performance_and_audio
+    type: string
+    merge_op: patch
+    description: |
+      该 Plot 特有的表演、情绪、对白、声音和总节奏；区分 Plot 总时长与各 Clip 时长。
+  - name: continuity
+    type: string
+    merge_op: patch
+    description: |
+      该 Plot 与其他 Plot 衔接所需的最小已确认事实，离线物化后供线上直接读取。
+content_template: |-
+  ## 剧情与分场状态
+  {{ story_state }}
+
+  ## 画面与空间
+  {{ visual_constraints }}
+
+  ## 表演、声音与节奏
+  {{ performance_and_audio }}
+
+  ## 衔接与依赖
+  {{ continuity }}
+embedding_template: |-
+  {{ story_state }}
+  {{ visual_constraints }}
+  {{ performance_and_audio }}
+  {{ continuity }}

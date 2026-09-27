@@ -29,10 +29,10 @@ body remains complete standalone Python source. For example:
 ```python
 sdk.create_experiences(
     experience_name="check_order",  # exact canonical Case name
-    content='''dag = workflow("User asks about an order")
-order_id = ask("What is the order ID?")
-order = call("query_order", "Use order_id from context")
-order_id.then(order)
+    content='''dag = workflow("Remind the agent about duplicate cancellation")
+duplicate_requested = check("The user asks to cancel a possibly duplicate order")
+remind_verify_duplicate = tell("Verify which order is the duplicate before cancellation")
+duplicate_requested.then(remind_verify_duplicate)
 ''',
 )
 sdk.commit()
@@ -48,9 +48,10 @@ proposal is merged against the latest Experience instead of overwriting concurre
 Case links use the same policy lock boundary when their backlinks are updated.
 
 For updates, the model reads the old source and emits a complete replacement program. Every
-program begins with `dag = workflow(...)`, declares nodes through `ask/call/check/tell/choose`,
-and adds relationships through object references. Node variable names stay stable for unchanged
-behavior. The compiler generates internal IDs.
+program begins with `dag = workflow(...)`, declares observable trigger conditions with `check(...)`
+and reminder leaves with `tell(...)`, and adds relationships through object references. New
+Experience programs do not encode the agent's complete action path. Node variable names stay stable
+for unchanged behavior. The compiler generates internal IDs.
 
 The interpreter permits literals, lists, dictionaries, variable assignments and the listed
 constructors/methods. Imports, loops, arbitrary calls, attribute reads and computation are
@@ -87,8 +88,7 @@ up to 16,384 characters rather than the former 4,096-character limit. The final 
 the configured aggregate budget; structured tool evidence is clipped without dropping its
 `tool_name`.
 
-Jev is configured as a reusable top-level decision service, while Agent Evolution only selects
-it as the DAG decision provider:
+The DAG decision provider is selectable. `jev` uses the reusable System One service:
 
 ```json
 {
@@ -111,15 +111,35 @@ it as the DAG decision provider:
 }
 ```
 
-One `search_exp` call translates unresolved nodes across active Experience instances into typed
-System One questions. Questions are kept in one request while the conservative estimated input is
-within `max_input_tokens`; larger sets are bisected without duplicating or truncating questions.
-An HTTP 413, or a 422 explicitly reporting a context-length/input-token overflow, triggers the
+`vlm` uses the account's configured language model instead and does not require a `jev` block:
+
+```json
+{
+  "agent_evolution": {
+    "dag_decider": {
+      "provider": "vlm",
+      "noul_true_threshold": 0.7,
+      "noul_false_threshold": 0.3,
+      "choice_confidence_threshold": 0.5,
+      "max_state_chars": 32768
+    }
+  }
+}
+```
+
+Both providers receive all unresolved expressions across the active Experience DAGs in one model
+call. Their typed answers are validated and merged into each session-scoped DAG instance; the
+deterministic DAG executor, not the model, then selects the next actions.
+
+With `jev`, questions are kept in one request while the conservative estimated input is within
+`max_input_tokens`; larger sets are bisected without duplicating or truncating questions. An HTTP
+413, or a 422 explicitly reporting a context-length/input-token overflow, triggers the
 same split. Boolean nodes become Noul questions and conditional branches become Choice questions.
 Jev never generates business values: identifiers and tool-result objects stay in the evidence
 table. Missing, malformed or uncertain answers leave nodes pending. Transient Jev failures do not
 invalidate the Experience and never fall back to slow generative slot filling when the Jev
-provider is selected.
+provider is selected. With `vlm`, the same typed question contract is sent to the account model;
+malformed or incomplete responses leave the Experiences active for a later attempt.
 
 The in-repository HTTP client also provides:
 
@@ -142,11 +162,11 @@ particular, `call("search_exp")`, `call("search_experience")`, and
 
 The Tau2 VikingBot executor calls server-side `search_exp` automatically before every model
 decision. The server directly searches Experience memories and returns only selected DAG
-instructions; recall is not exposed as an agent tool. The executor replaces the previous
-guidance with the new instructions and uses a unique runtime session for every rollout.
-Runtime events are included in rollout memory artifacts (and `dag_runtime` metadata). Each
-transition stores the bounded evidence table, newly completed nodes with their cited evidence
-IDs, and the lifecycle of prior actions (`issued`, `pending`, `completed` or `superseded`).
+instructions; recall is not exposed as an agent tool. Each newly reached action is retained once as
+a `[Experience Reminder]` user message, while already injected `(Experience URI, node ID)` pairs are
+not injected again. A unique runtime session is used for every rollout. `memory_context.md` contains
+only the final per-Experience execution snapshot; full transition evidence remains available in
+`dag_runtime` metadata for diagnostics.
 
 When a rollout is committed, `experience_execution` carries the final runtime snapshot keyed
 by Experience URI: revision, state, slot values and evidence citations, executed/current nodes,

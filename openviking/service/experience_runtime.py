@@ -31,7 +31,7 @@ from openviking_cli.exceptions import ConflictError, InvalidArgumentError, Permi
 from openviking_cli.utils.config.agent_evolution_config import DagDeciderConfig
 from openviking_cli.utils.config.jev_config import JevConfig
 
-from .experience_dag_decider import ExperienceDagDecider
+from .experience_dag_decider import ExperienceDagDecider, LlmDagDecisionEvaluator
 
 
 class AdvanceExperienceRequest(DagModel):
@@ -202,8 +202,8 @@ class ExperienceRuntime:
         instructions: list[ExperienceInstruction] = []
         errors: list[SearchExperienceError] = []
         invalid_uris: set[str] = set()
-        if self.dag_decider_config is not None and self.dag_decider_config.provider == "jev":
-            experiences_by_uri, batch_errors, invalid_uris = await self._advance_many_with_jev(
+        if self.dag_decider_config is not None:
+            experiences_by_uri, batch_errors, invalid_uris = await self._advance_many_with_decider(
                 session_uri,
                 active_uris,
                 request,
@@ -296,7 +296,7 @@ class ExperienceRuntime:
         finally:
             await self.viking_fs._async_agfs.pathlock_release(lease)
 
-    async def _advance_many_with_jev(
+    async def _advance_many_with_decider(
         self,
         session_uri: str,
         experience_uris: list[str],
@@ -330,13 +330,34 @@ class ExperienceRuntime:
 
         if self.dag_decider is not None:
             decider = self.dag_decider
-        elif self.jev_config is not None and self.dag_decider_config is not None:
+        elif (
+            self.dag_decider_config is not None
+            and self.dag_decider_config.provider == "jev"
+            and self.jev_config is not None
+        ):
             decider = ExperienceDagDecider(
                 config=self.dag_decider_config,
-                jev=JevClient(self.jev_config),
+                evaluator=JevClient(self.jev_config),
+            )
+        elif self.dag_decider_config is not None and self.dag_decider_config.provider == "vlm":
+            if self.vlm_resolver is None:
+                error = "VLM DAG decider is enabled but the account VLM resolver is missing"
+                errors.extend(
+                    SearchExperienceError(
+                        experience_uri=item.uri,
+                        error=error,
+                        retryable=True,
+                    )
+                    for item in loaded
+                )
+                return _unpersisted_results(loaded), errors, invalid_uris
+            vlm = await self.vlm_resolver.get_vlm(ctx.account_id)
+            decider = ExperienceDagDecider(
+                config=self.dag_decider_config,
+                evaluator=LlmDagDecisionEvaluator(vlm),
             )
         else:
-            error = "Jev DAG decider is enabled but the shared jev configuration is missing"
+            error = "DAG decision provider configuration is missing"
             errors.extend(
                 SearchExperienceError(
                     experience_uri=item.uri,

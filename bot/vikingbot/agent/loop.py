@@ -1358,6 +1358,7 @@ class AgentLoop:
         context_compact_budget: int | None = None,
         status_note_provider: Any | None = None,
         experience_context_provider: Any | None = None,
+        captured_experience_messages: list[dict[str, Any]] | None = None,
         skill_runtime: Any | None = None,
     ) -> tuple[str | None, str | None, list[dict], dict[str, int], int]:
         """
@@ -1402,6 +1403,8 @@ class AgentLoop:
                 behavior is unchanged.
             experience_context_provider: Optional async callback accepting the current messages
                 and returning fresh server-side experience guidance before each model call.
+            captured_experience_messages: Optional mutable list populated with newly injected
+                Experience Reminder user messages and their position in the tool history.
 
         Returns:
             tuple of (final_content, final_reasoning_content, tools_used, token_usage, iteration)
@@ -1421,7 +1424,13 @@ class AgentLoop:
             "cache_read_input_tokens": 0,
         }
         write_exp_injected = False
-        experience_note = None
+        injected_experience_notes = {
+            str(message.get("content") or "")
+            for message in messages
+            if isinstance(message, dict)
+            and message.get("role") == "user"
+            and str(message.get("content") or "").startswith("[Experience Reminder]")
+        }
         stop_tools = set(stop_tool_names or [])
 
         def accumulate_token_usage(response: Any) -> None:
@@ -1462,12 +1471,17 @@ class AgentLoop:
 
             if experience_context_provider is not None:
                 note = await experience_context_provider(messages)
-                if experience_note is not None:
-                    messages = [m for m in messages if m is not experience_note]
-                    experience_note = None
-                if note:
-                    experience_note = {"role": "user", "content": note}
-                    messages.append(experience_note)
+                if note and note not in injected_experience_notes:
+                    experience_message = {"role": "user", "content": note}
+                    messages.append(experience_message)
+                    injected_experience_notes.add(note)
+                    if captured_experience_messages is not None:
+                        captured_experience_messages.append(
+                            {
+                                **experience_message,
+                                "after_tool_count": len(tools_used),
+                            }
+                        )
 
             tool_definitions = active_tools.get_definitions(
                 ov_tools_enable=ov_tools_enable,

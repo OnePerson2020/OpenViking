@@ -1,0 +1,68 @@
+memory_type: ss_project
+enabled: true
+stage: user
+peer_enabled: false
+operation_mode: upsert
+directory: "viking://resources/ss_memory/projects"
+filename_template: "{{ project_id }}/project.md"
+description: |
+  SS 项目级记忆。正文只能来自 role=user 的明确表达。记录在同一项目内跨多个 Plot
+  或 Clip 生效的持久规则，包括整体创作方向、通用制作规范、角色与道具标准，以及
+  仍然有效的项目工作约定。project_id 必须来自 SS_CONTEXT。
+
+  创建门槛（必须满足）：
+  - 用户原话明确作用于当前项目、多个 Plot、一个 Plot 范围或重复出现的项目实体。
+  - 不得因为全量抽取同时看到了某个 Plot，就把该 Plot 的剧情、时长、对白、分镜或
+    局部修改上卷到 ss_project。
+  - 移除 Plot/Clip 局部事实和工具元数据后，如果没有项目级事实，必须 no-op。
+  - 已被覆盖的旧要求和临时工作状态不能继续作为有效项目记忆。
+
+  作用域与层级：
+  - ss_project 是同 project_id 下所有 ss_plot 的父级；ss_plot 再作为 ss_clip 的父级。
+  - “所有 Plot 都要生成转场空镜”只在 ss_project 写一次，不能为每个 Plot/Clip
+    批量创建占位文件。
+  - 一个 Plot 的剧情、空间、表演、总节奏或跨 Plot 衔接写入 ss_plot。
+  - 一个具体 Clip 的版本、时长、参考、局部修改和相邻 Clip 衔接写入 ss_clip。
+  - 跨项目协作偏好写入 ss_user。
+  同一事实只写入一个层级，明确的窄作用域优先。
+fields:
+  - name: project_id
+    type: string
+    merge_op: immutable
+    description: 来自 SS_CONTEXT 的稳定项目 ID，不从显示名称推断。
+  - name: creative_direction
+    type: string
+    merge_op: patch
+    description: 用户确认的项目整体风格与创作意图，保留具体参考对象。
+  - name: shared_rules
+    type: string
+    merge_op: patch
+    description: |
+      跨多个 Plot 生效的制作规则，保留适用范围、条件、例外、时间、语言、连续性和写实要求。
+  - name: entity_constraints
+    type: string
+    merge_op: patch
+    description: |
+      项目级角色、声音、身份、服装、道具和选定参考标准，优先使用稳定业务对象 ID。
+  - name: workflow_constraints
+    type: string
+    merge_op: patch
+    description: |
+      当前仍有效的项目工作约定，排除已完成任务和“我暂时离开时自动确认”等临时授权。
+content_template: |-
+  ## 创作方向
+  {{ creative_direction }}
+
+  ## 通用制作规则
+  {{ shared_rules }}
+
+  ## 角色与道具标准
+  {{ entity_constraints }}
+
+  ## 有效工作约定
+  {{ workflow_constraints }}
+embedding_template: |-
+  {{ creative_direction }}
+  {{ shared_rules }}
+  {{ entity_constraints }}
+  {{ workflow_constraints }}

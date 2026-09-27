@@ -4,10 +4,11 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
-from openviking.models.jev import JevClient
+from openviking.models.vlm.llm import parse_json_from_response
 from openviking.session.memory.experience_dag import (
     DEFAULT_BRANCH_CHOICE,
     AskUser,
@@ -34,10 +35,62 @@ class _QuestionTarget:
     choices: tuple[str, ...] = ()
 
 
+_LLM_DECISION_PROMPT = """Evaluate every supplied Experience DAG question against the shared state.
+Return only one JSON object with this shape: {"answers": {"question_id": answer}}.
+For a `noul` question, answer with {"type": "noul", "noul": <number from 0 to 1>}.
+For a `choice` question, answer with {"type": "choice", "choice": "<one listed choice>",
+"confidence": <number from 0 to 1>}.
+Follow each question's instructions and criteria independently. Omit a question when the state
+does not contain enough evidence. Do not call tools and do not add prose outside the JSON object.
+"""
+
+
+@dataclass(slots=True)
+class LlmDagDecisionEvaluator:
+    """Evaluate a batch of DAG expressions with the account's configured language model."""
+
+    vlm: Any
+
+    @tracer("experience.dag.llm_evaluate", ignore_args=True, ignore_result=True)
+    async def evaluate(
+        self,
+        *,
+        state: Any,
+        questions: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        if not questions:
+            return {}
+        response = await self.vlm.get_completion_async(
+            messages=[
+                {"role": "system", "content": _LLM_DECISION_PROMPT},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"state": state, "questions": questions},
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            thinking=False,
+            max_tokens=8192,
+        )
+        if getattr(response, "tool_calls", None) or getattr(
+            response, "finish_reason", "stop"
+        ) not in ("stop", "end_turn"):
+            raise ValueError("LLM DAG decision did not return a complete text response")
+        parsed = parse_json_from_response(response)
+        answers = parsed.get("answers") if isinstance(parsed, dict) else None
+        if not isinstance(answers, dict):
+            raise ValueError("LLM DAG decision response has no answers object")
+        if any(not isinstance(answer, dict) for answer in answers.values()):
+            raise ValueError("LLM DAG decision answers must be objects")
+        return answers
+
+
 @dataclass(slots=True)
 class ExperienceDagDecider:
     config: DagDeciderConfig
-    jev: JevClient
+    evaluator: Any
 
     @tracer("experience.dag.decide", ignore_args=True, ignore_result=True)
     async def decide(
@@ -51,7 +104,7 @@ class ExperienceDagDecider:
         if not questions:
             return {}
 
-        answers = await self.jev.evaluate(
+        answers = await self.evaluator.evaluate(
             state=_build_state(
                 instances,
                 evidence=evidence,
@@ -100,6 +153,7 @@ def _question_for_node(
     node: GeneralNode,
 ) -> tuple[dict[str, Any], _QuestionTarget]:
     prefix = f"Experience {instance.experience_uri}; workflow: {instance.dag.applicability}. "
+    provider = node.slot_provider
     if isinstance(node, ConditionalBranch):
         criteria = {
             label: f'The evidence selects the declared branch "{label}".'
@@ -126,14 +180,28 @@ def _question_for_node(
             ),
         )
 
+    if isinstance(provider, TellAgent):
+        criteria = {
+            "true": (
+                "An assistant_message_delivered evidence item directly establishes that the "
+                "instruction was communicated to the user. Ordinary assistant_message text, "
+                "including text emitted alongside another tool call, does not count as delivery."
+            ),
+            "false": (
+                "No assistant_message_delivered evidence item establishes that the instruction "
+                "was communicated to the user."
+            ),
+        }
+    else:
+        criteria = {
+            "true": "The evidence directly establishes completion or truth.",
+            "false": "The evidence does not establish completion or truth.",
+        }
     return (
         {
             "type": "noul",
             "instructions": prefix + _node_question(node),
-            "criteria": {
-                "true": "The evidence directly establishes completion or truth.",
-                "false": "The evidence does not establish completion or truth.",
-            },
+            "criteria": criteria,
         },
         _QuestionTarget(
             experience_uri=instance.experience_uri,
@@ -162,7 +230,7 @@ def _node_question(node: GeneralNode) -> str:
     if isinstance(provider, Check):
         return f"Does the evidence establish this condition: {provider.check_info}"
     if isinstance(provider, TellAgent):
-        return f"Has the agent completed this instruction: {provider.instruction}"
+        return f"Has the agent delivered this instruction to the user: {provider.instruction}"
     return f"Has DAG slot {node.slot_name} completed successfully?"
 
 
@@ -204,7 +272,13 @@ def _build_state(
     relevant = [
         item.model_dump(mode="json")
         for item in evidence
-        if item.kind in {"user_message", "assistant_message", "tool_result"}
+        if item.kind
+        in {
+            "user_message",
+            "assistant_message",
+            "assistant_message_delivered",
+            "tool_result",
+        }
         and item.summary.strip()
         and item.summary.strip() != "Reflect on the results and decide next steps."
     ]

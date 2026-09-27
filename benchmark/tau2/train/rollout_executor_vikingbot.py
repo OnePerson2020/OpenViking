@@ -376,6 +376,7 @@ class VikingBotTau2RolloutExecutor:
             token_usage,
             iteration,
             memory_content,
+            experience_messages,
         ) = await _run_agent(
             agent=agent,
             system_prompt=system_prompt,
@@ -418,6 +419,7 @@ class VikingBotTau2RolloutExecutor:
                 evaluation_result=evaluation_result,
                 reward=reward,
                 artifact_created_at=_tau2_policy_current_time_iso(system_prompt),
+                experience_messages=experience_messages,
             ),
             policy_snapshot_id=context.policy_snapshot_id,
             evaluation=_tau2_evaluation(reward=reward, evaluation_result=evaluation_result),
@@ -530,7 +532,13 @@ def _tau2_user_reply_terminates(reply: Any) -> bool:
     return any(tok in text for tok in _TAU2_USER_STOP_TOKENS + _TAU2_USER_TRANSFER_TOKENS)
 
 
-def _make_tau2_plain_text_router(*, publish_events: bool, bus: Any, session_key: Any):
+def _make_tau2_plain_text_router(
+    *,
+    publish_events: bool,
+    bus: Any,
+    session_key: Any,
+    record_delivered_assistant_message: Callable[[str], None] | None = None,
+):
     """Build an `on_plain_text` callback that forwards assistant text via communicate_with_user.
 
     In tau2 bench, plain assistant text is semantically equivalent to calling
@@ -575,6 +583,9 @@ def _make_tau2_plain_text_router(*, publish_events: bool, bus: Any, session_key:
             openviking_connection=ctx.openviking_connection,
         )
         duration_ms = (time.perf_counter() - started_at) * 1000
+        execute_success = _viking_is_tool_result_success(user_reply)
+        if execute_success and record_delivered_assistant_message is not None:
+            record_delivered_assistant_message(text)
         args_str = json.dumps({"content": text}, ensure_ascii=False)
         logger.info("[TAU2_PLAIN_TEXT]: routed assistant text through communicate_with_user")
         logger.info(f"[TOOL_CALL]: communicate_with_user({args_str[:200]})")
@@ -602,7 +613,7 @@ def _make_tau2_plain_text_router(*, publish_events: bool, bus: Any, session_key:
                 "args": args_str,
                 "result": user_reply,
                 "duration": duration_ms,
-                "execute_success": _viking_is_tool_result_success(user_reply),
+                "execute_success": execute_success,
                 "input_token": 0,
                 "output_token": _cal(user_reply, text_type="mixed"),
                 "auto": True,
@@ -825,24 +836,25 @@ async def _run_agent(
         messages,
         business_current_time=_tau2_policy_current_time_display(system_prompt),
     )
-    user_memory = None
-    for msg in messages:
-        content = msg.get("content", "") if isinstance(msg, dict) else ""
-        if not isinstance(content, str):
-            continue
-        # User memory (用户记忆) - starts with "## Current Session"
-        if content.startswith("## Current Session"):
-            user_memory = _extract_memory_content(content)
-
-    memory_content = _merge_memories(user_memory, None)
+    memory_content = None
     stage_started_at = time.perf_counter()
+    runtime = getattr(agent, "_tau2_dag_runtime", None)
     plain_text_router = _make_tau2_plain_text_router(
         publish_events=False,
         bus=getattr(agent, "bus", None),
         session_key=session_key,
+        record_delivered_assistant_message=(
+            runtime.record_delivered_assistant_message if runtime else None
+        ),
     )
-    runtime = getattr(agent, "_tau2_dag_runtime", None)
-    runtime_kwargs = {"experience_context_provider": runtime.search_exp} if runtime else {}
+    runtime_kwargs = (
+        {
+            "experience_context_provider": runtime.search_exp,
+            "captured_experience_messages": runtime.reminder_messages,
+        }
+        if runtime
+        else {}
+    )
     try:
         result = await agent._run_agent_loop(
             messages=messages,
@@ -862,8 +874,13 @@ async def _run_agent(
         timings.record("agent_loop", stage_started_at)
     final_content, final_reasoning_content, tools_used, token_usage, iteration = result
     if runtime and runtime.events:
-        guidance = "[DAG Experience Guidance]\n" + json.dumps(runtime.events, ensure_ascii=False)
-        memory_content = _merge_memories(memory_content, guidance)
+        from openviking.session.train.components.session_analyzer import (
+            experience_execution_from_runtime,
+        )
+
+        execution = experience_execution_from_runtime({"events": runtime.events})
+        if execution:
+            memory_content = "[Experience Execution]\n" + json.dumps(execution, ensure_ascii=False)
     if _last_tool_name(tools_used) == "done":
         final_content = None
         final_reasoning_content = None
@@ -874,6 +891,7 @@ async def _run_agent(
         token_usage,
         iteration,
         memory_content,
+        list(runtime.reminder_messages) if runtime else [],
     )
 
 
@@ -992,39 +1010,6 @@ def _safe_session_fragment(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in value)[:80] or "rollout"
 
 
-MEMORY_PROMPT_PREFIX = "## Current Session\nChannel: cli\n\n---\n\n"
-MEMORY_PROMPT_SUFFIX = (
-    "---\n\nReply in the same language as the user's query, ignoring the language of "
-    "the reference materials. User's query:"
-)
-
-
-def _extract_memory_content(content: str) -> str | None:
-    start = content.find(MEMORY_PROMPT_PREFIX)
-    end = content.rfind(MEMORY_PROMPT_SUFFIX)
-    if start == -1 or end == -1:
-        return None
-    start += len(MEMORY_PROMPT_PREFIX)
-    if start > end:
-        return None
-    return content[start:end]
-
-
-def _merge_memories(user_memory: str | None, exp_memory: str | None) -> str | None:
-    """合并用户记忆和经验记忆，去重。
-
-    两者都为 None 时返回 None；只有一个时直接返回它；都有时拼接并标记类型。
-    """
-    parts: list[str] = []
-    if user_memory and user_memory.strip():
-        parts.append(f"## User Memories\n{user_memory.strip()}")
-    if exp_memory and exp_memory.strip():
-        parts.append(f"## Experience Memories\n{exp_memory.strip()}")
-    if not parts:
-        return None
-    return "\n\n---\n\n".join(parts)
-
-
 def _build_rollout_messages(
     *,
     system_prompt: str,
@@ -1034,6 +1019,7 @@ def _build_rollout_messages(
     evaluation_result: Any,
     reward: Any,
     artifact_created_at: str | None = None,
+    experience_messages: list[dict[str, Any]] | None = None,
 ) -> list[Message]:
     messages = [
         _metadata_message(
@@ -1043,8 +1029,32 @@ def _build_rollout_messages(
         ),
     ]
     messages.append(_message("tau2-user", "user", user_prompt, created_at=artifact_created_at))
+    pending_experience_messages = list(experience_messages or [])
+    appended_experience_message_indexes: set[int] = set()
+
+    def append_experience_messages(after_tool_count: int) -> None:
+        for reminder_index, reminder in enumerate(pending_experience_messages):
+            if reminder_index in appended_experience_message_indexes:
+                continue
+            if reminder.get("after_tool_count", 0) != after_tool_count:
+                continue
+            content = str(reminder.get("content") or "").strip()
+            if content:
+                messages.append(
+                    _message(
+                        f"tau2-experience-reminder-{reminder_index}",
+                        "user",
+                        content,
+                        created_at=artifact_created_at,
+                    )
+                )
+                appended_experience_message_indexes.add(reminder_index)
+
+    append_experience_messages(0)
     if isinstance(tools_used, list):
         for idx, tool_info in enumerate(tools_used):
+            if idx:
+                append_experience_messages(idx)
             if not isinstance(tool_info, dict):
                 continue
             tool_name = str(tool_info.get("tool_name") or "unknown")
@@ -1093,6 +1103,7 @@ def _build_rollout_messages(
                     created_at=artifact_created_at,
                 )
             )
+        append_experience_messages(len(tools_used))
     if final_content and str(final_content).strip():
         messages.append(
             _message("tau2-final", "assistant", str(final_content), created_at=artifact_created_at)

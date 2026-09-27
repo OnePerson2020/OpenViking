@@ -246,6 +246,51 @@ def test_tau2_task_terminated_reply_stops_plain_text_loop():
     assert _tau2_user_reply_terminates("Task Terminated") is True
 
 
+@pytest.mark.asyncio
+async def test_tau2_plain_text_router_records_delivered_assistant_message():
+    from benchmark.tau2.train.rollout_executor_vikingbot import _make_tau2_plain_text_router
+
+    delivered = []
+
+    class FakeTools:
+        @staticmethod
+        def has(name):
+            return name == "communicate_with_user"
+
+        @staticmethod
+        async def execute(name, arguments, **kwargs):
+            assert name == "communicate_with_user"
+            assert arguments == {"content": "visible answer"}
+            return "user reply"
+
+    route = _make_tau2_plain_text_router(
+        publish_events=False,
+        bus=None,
+        session_key=SimpleNamespace(),
+        record_delivered_assistant_message=delivered.append,
+    )
+    result = await route(
+        SimpleNamespace(
+            text="visible answer",
+            reasoning_content=None,
+            messages=[],
+            tools=FakeTools(),
+            session_key=SimpleNamespace(),
+            sandbox_manager=None,
+            sender_id="user",
+            memory_peer_ids=None,
+            memory_owner_user_ids=None,
+            openviking_connection=None,
+        )
+    )
+
+    assert delivered == ["visible answer"]
+    assert result.messages == [
+        {"role": "assistant", "content": "visible answer"},
+        {"role": "user", "content": "user reply"},
+    ]
+
+
 def test_tau2_reward_info_is_json_safe_in_rollout_messages_and_evaluation():
     import json
 
@@ -629,7 +674,7 @@ async def test_tau2_vikingbot_blocking_setup_and_reward_are_offloaded(monkeypatc
     async def fake_run_agent(**kwargs):
         calls.append(("run_agent", threading.get_ident()))
         calls.append(("case_lookup", kwargs.get("case_lookup")))
-        return "final", None, [], {}, 1, None
+        return "final", None, [], {}, 1, None, []
 
     monkeypatch.setattr(module, "_tool_provider_cls", lambda: FakeTau2BenchToolProvider)
     monkeypatch.setattr(module, "_build_agent", lambda *args, **kwargs: FakeAgent())
@@ -780,9 +825,28 @@ async def test_tau2_run_agent_injects_experience_without_loader_tool(monkeypatch
             self.temperature = None
             self.max_iterations = 3
             self._tau2_dag_runtime = SimpleNamespace(
-                search_exp=AsyncMock(return_value="[DAG Experience Guidance]\n[]"),
+                search_exp=AsyncMock(
+                    return_value='[Experience Reminder]\n[\n  {\n    "slot": "check"\n  }\n]'
+                ),
                 close=AsyncMock(),
-                events=[],
+                events=[
+                    {
+                        "experience_uri": "viking://user/default/memories/experiences/case.md",
+                        "state": "running",
+                        "revision": 1,
+                        "slot_values": {"condition": True},
+                        "node_slots": {"1": "condition", "2": "remind"},
+                        "executed_nodes": [1],
+                        "current_nodes": [2],
+                        "waiting_for_context": [],
+                        "actions": [{"node_id": 2, "slot_name": "remind"}],
+                        "completed_nodes": [],
+                        "action_outcomes": [{"node_id": 2, "status": "issued"}],
+                        "evidence": [{"id": "message:0", "summary": "large duplicated input"}],
+                    }
+                ],
+                reminder_messages=[],
+                record_delivered_assistant_message=lambda content: None,
             )
 
         _chat_with_stream_events = real_imports["AgentLoop"]._chat_with_stream_events
@@ -838,7 +902,33 @@ async def test_tau2_run_agent_injects_experience_without_loader_tool(monkeypatch
     messages = observed["llm_messages"]
     assert not observed.get("sandbox_writes")
     assert not observed.get("sandbox_reads")
-    assert any("[DAG Experience Guidance]" in str(msg.get("content")) for msg in messages)
+    assert any("[Experience Reminder]" in str(msg.get("content")) for msg in messages)
     assert [tool["tool_name"] for tool in tools_used] == ["done"]
     assert tools_used[0]["execute_success"] is True
     assert agent.provider.call_count == 1
+    assert result[6] == [
+        {
+            "role": "user",
+            "content": '[Experience Reminder]\n[\n  {\n    "slot": "check"\n  }\n]',
+            "after_tool_count": 0,
+        }
+    ]
+    assert result[5].startswith("[Experience Execution]\n")
+    assert "large duplicated input" not in result[5]
+
+    rollout_messages = module._build_rollout_messages(
+        system_prompt="tau2 policy",
+        user_prompt="user query",
+        tools_used=tools_used,
+        final_content=None,
+        evaluation_result=None,
+        reward=1.0,
+        experience_messages=result[6],
+    )
+    reminder_messages = [
+        message
+        for message in rollout_messages
+        if message.role == "user" and "[Experience Reminder]" in message.content
+    ]
+    assert len(reminder_messages) == 1
+    assert reminder_messages[0].id == "tau2-experience-reminder-0"

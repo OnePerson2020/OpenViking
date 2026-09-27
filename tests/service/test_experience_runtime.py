@@ -196,6 +196,47 @@ async def test_search_exp_batches_all_active_dags_through_one_decider_call(env):
 
 
 @pytest.mark.asyncio
+async def test_search_exp_batches_all_active_dags_through_one_vlm_call(env):
+    ctx, fs, model, resolver = env
+    fs.files[fs._uri_to_path(EXPERIENCE_TWO, ctx)] = fs.files[fs._uri_to_path(EXPERIENCE, ctx)]
+    fs.find_memories = [SimpleNamespace(uri=EXPERIENCE), SimpleNamespace(uri=EXPERIENCE_TWO)]
+    model.get_completion_async.return_value = json.dumps(
+        {
+            "answers": {
+                "slot_0": {"type": "noul", "noul": 0.99},
+                "slot_1": {"type": "noul", "noul": 0.99},
+                "slot_2": {"type": "noul", "noul": 0.99},
+                "slot_3": {"type": "noul", "noul": 0.99},
+            }
+        }
+    )
+    runtime = ExperienceRuntime(
+        fs,
+        resolver,
+        dag_decider_config=DagDeciderConfig(provider="vlm"),
+    )
+
+    result = await runtime.search(
+        "viking://session/s1",
+        SearchExperienceRequest(
+            context="Order 123",
+            evidence=[{"id": "message:1", "kind": "user_message", "summary": "Order 123"}],
+        ),
+        ctx,
+    )
+
+    assert {item.experience_uri for item in result.experiences} == {
+        EXPERIENCE,
+        EXPERIENCE_TWO,
+    }
+    assert all(item.state == "completed" for item in result.experiences)
+    assert result.active_experience_uris == []
+    assert result.errors == []
+    resolver.get_vlm.assert_awaited_once_with(ctx.account_id)
+    model.get_completion_async.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_missing_jev_config_keeps_experience_active_without_vlm_fallback(env):
     ctx, fs, model, resolver = env
     runtime = ExperienceRuntime(
