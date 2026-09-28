@@ -118,8 +118,11 @@ class VolcengineCollection(ICollection):
         error = metadata.get("Error", {}) if isinstance(metadata, dict) else {}
         code = error.get("Code", "UnknownError")
         message = error.get("Message", response.text)
-        return ConnectionError(
-            f"Request to {action} failed: {response.status_code} {code} {message}"
+        return ConnectionError.from_http_response(
+            action=action,
+            status_code=response.status_code,
+            reason=str(message),
+            code=str(code),
         )
 
     def _console_post(self, data: Dict[str, Any], action: str):
@@ -291,7 +294,11 @@ class VolcengineCollection(ICollection):
             return result.get("result", {})
         except json.JSONDecodeError:
             if raise_for_status:
-                raise ConnectionError(f"Request to {path} failed: invalid JSON response")
+                raise ConnectionError(
+                    f"Request to {path} failed: invalid JSON response",
+                    action=path,
+                    reason="invalid JSON response",
+                )
             return {}
 
     def _data_get(self, path: str, params: Dict[str, Any]):

@@ -8,7 +8,9 @@ class TestSearchAdvanced:
         find_resp = api_client.find(
             query="test",
             limit=5,
-            filter={"type": "resource"},
+            # Filters use the metadata DSL; a bare {"type": "resource"} is not a
+            # valid filter node, and backends that validate filters reject it with 400.
+            filter={"op": "must", "field": "context_type", "conds": ["resource"]},
         )
         assert find_resp.status_code == 200, (
             f"find with filter should return 200, got {find_resp.status_code}: {find_resp.text[:200]}"

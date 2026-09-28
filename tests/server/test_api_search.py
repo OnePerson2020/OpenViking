@@ -121,6 +121,51 @@ async def test_find_omits_content_when_read_is_not_requested(
     assert "content" not in response.json()["result"]["resources"][0]
 
 
+async def test_find_vikingdb_filter_rejection_returns_400_not_500(
+    client: httpx.AsyncClient, service, monkeypatch
+):
+    from openviking.storage.vectordb.collection.volcengine_api_key_collection import (
+        VolcengineApiKeyCollection,
+    )
+
+    class _Response:
+        status_code = 400
+        text = "Invalid filter param"
+
+        @staticmethod
+        def json():
+            return {
+                "code": "InvalidParameter",
+                "message": "Invalid filter param: filter must contain 'op' key, "
+                "actual filter: map[type:resource]",
+            }
+
+    collection = VolcengineApiKeyCollection(
+        api_key="vk-test-token",
+        host="https://vikingdb.example.com",
+        meta_data={"ProjectName": "default", "CollectionName": "context"},
+    )
+    monkeypatch.setattr(collection.data_client, "do_req", lambda *args, **kwargs: _Response())
+
+    async def fake_find(**kwargs):
+        collection._data_post("/api/vikingdb/data/search/vector", {"filter": kwargs.get("filter")})
+
+    monkeypatch.setattr(service.search, "find", fake_find)
+
+    response = await client.post(
+        "/api/v1/search/find",
+        json={"query": "test", "limit": 5, "filter": {"type": "resource"}},
+    )
+
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["code"] == "INVALID_ARGUMENT"
+    assert "filter must contain 'op' key" in error["message"]
+    assert "/api/vikingdb" not in error["message"]
+    assert error["details"]["upstream_status_code"] == 400
+    assert error["details"]["upstream_code"] == "InvalidParameter"
+
+
 async def test_find_keeps_hit_without_content_when_read_fails(
     client: httpx.AsyncClient, service, monkeypatch
 ):
@@ -1281,9 +1326,7 @@ async def test_glob_forwards_tags_and_tag_projection_to_filesystem_service(monke
     )
 
     await search_router.glob(
-        search_router.GlobRequest(
-            pattern="**/*.md", tags=["env=prod"], include_tags=True
-        ),
+        search_router.GlobRequest(pattern="**/*.md", tags=["env=prod"], include_tags=True),
         _ctx=RequestContext(user=UserIdentifier("acct", "alice"), role=Role.USER),
     )
 

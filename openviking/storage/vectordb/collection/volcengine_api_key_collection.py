@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
+import requests  # type: ignore
+
 from openviking.storage.errors import ConnectionError
 from openviking.storage.vectordb.collection.collection import ICollection
 from openviking.storage.vectordb.collection.result import (
@@ -51,15 +53,33 @@ class VolcengineApiKeyCollection(ICollection):
         except json.JSONDecodeError:
             result = {}
 
-        message = ""
+        code = None
         if isinstance(result, dict):
+            code = result.get("code")
             message = (
                 result.get("message") or result.get("msg") or result.get("error") or response.text
             )
         else:
             message = response.text
 
-        return ConnectionError(f"Request to {action} failed: {response.status_code} {message}")
+        return ConnectionError.from_http_response(
+            action=action,
+            status_code=response.status_code,
+            reason=str(message),
+            code=str(code) if code is not None else None,
+        )
+
+    def _do_req(self, method: str, path: str, **kwargs: Any):
+        try:
+            return self.data_client.do_req(method, path, **kwargs)
+        except requests.RequestException as e:
+            raise ConnectionError(
+                f"Request to {path} failed: {type(e).__name__}",
+                error_type="connection_error",
+                retryable=True,
+                action=path,
+                reason=type(e).__name__,
+            ) from e
 
     @staticmethod
     def _sanitize_uri_value(v: Any) -> Any:
@@ -173,7 +193,7 @@ class VolcengineApiKeyCollection(ICollection):
         safe_data = self._sanitize_payload(data)
         if isinstance(safe_data, dict) and "filter" in safe_data:
             safe_data["filter"] = self._normalize_date_time_filter(safe_data["filter"])
-        response = self.data_client.do_req("POST", path, req_body=safe_data)
+        response = self._do_req("POST", path, req_body=safe_data)
         if response.status_code != 200:
             raise self._build_response_error(response, path)
         try:
@@ -184,7 +204,7 @@ class VolcengineApiKeyCollection(ICollection):
             return {}
 
     def _data_get(self, path: str, params: Dict[str, Any]):
-        response = self.data_client.do_req("GET", path, req_params=params)
+        response = self._do_req("GET", path, req_params=params)
         if response.status_code != 200:
             raise self._build_response_error(response, path)
         try:

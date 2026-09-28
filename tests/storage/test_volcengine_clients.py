@@ -2,6 +2,7 @@ import pytest
 import requests
 from volcengine.base.Request import Request
 
+from openviking.storage.errors import ConnectionError as StorageConnectionError
 from openviking.storage.vectordb.collection.volcengine_clients import (
     ClientForConsoleApi,
     ClientForDataApi,
@@ -1117,8 +1118,10 @@ def test_http_adapter_strict_count_propagates_http_failure(monkeypatch):
         )
     )
 
-    with pytest.raises(requests.HTTPError, match="503 unavailable"):
+    with pytest.raises(StorageConnectionError) as exc_info:
         adapter.strict_count()
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.reason == "unavailable"
 
 
 def test_http_collection_update_index_preserves_explicit_empty_scalar_index(monkeypatch):
@@ -1150,3 +1153,58 @@ def test_http_collection_update_index_preserves_explicit_empty_scalar_index(monk
 
     assert captured["url"].endswith("UpdateVikingdbIndex")
     assert captured["json"]["ScalarIndex"] == "[]"
+
+
+def test_volcengine_api_key_collection_errors_carry_downstream_status(monkeypatch):
+    from openviking.storage.errors import ConnectionError as VectorStoreConnectionError
+    from openviking.storage.vectordb.collection.volcengine_api_key_collection import (
+        VolcengineApiKeyCollection,
+    )
+
+    class _Response:
+        status_code = 400
+        text = "bad filter"
+
+        @staticmethod
+        def json():
+            return {"code": "InvalidParameter", "message": "bad filter"}
+
+    collection = VolcengineApiKeyCollection(
+        api_key="vk-test-token",
+        host="https://vikingdb.example.com",
+        meta_data={"ProjectName": "default", "CollectionName": "context"},
+    )
+    monkeypatch.setattr(collection.data_client, "do_req", lambda *args, **kwargs: _Response())
+
+    with pytest.raises(VectorStoreConnectionError) as caught:
+        collection._data_post("/api/vikingdb/data/search/vector", {"filter": {"type": "x"}})
+
+    assert caught.value.status_code == 400
+    assert caught.value.code == "InvalidParameter"
+    assert caught.value.error_type == "http_client_error"
+    assert caught.value.retryable is False
+
+
+def test_volcengine_api_key_collection_wraps_transport_errors(monkeypatch):
+    from openviking.storage.errors import ConnectionError as VectorStoreConnectionError
+    from openviking.storage.vectordb.collection.volcengine_api_key_collection import (
+        VolcengineApiKeyCollection,
+    )
+
+    collection = VolcengineApiKeyCollection(
+        api_key="vk-test-token",
+        host="https://vikingdb.example.com",
+        meta_data={"ProjectName": "default", "CollectionName": "context"},
+    )
+
+    def _raise(*args, **kwargs):
+        raise requests.ConnectTimeout("timed out")
+
+    monkeypatch.setattr(collection.data_client, "do_req", _raise)
+
+    with pytest.raises(VectorStoreConnectionError) as caught:
+        collection._data_post("/api/vikingdb/data/search/vector", {})
+
+    assert caught.value.status_code is None
+    assert caught.value.error_type == "connection_error"
+    assert caught.value.retryable is True

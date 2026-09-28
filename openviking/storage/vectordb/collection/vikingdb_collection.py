@@ -55,21 +55,11 @@ class VikingDBCollection(ICollection):
             code = None
             message = response.text
 
-        status_code = response.status_code
-        error_type = (
-            "http_client_error"
-            if 400 <= status_code < 500
-            else "http_server_error"
-            if status_code >= 500
-            else "http_error"
-        )
-        return VikingDBException(
-            f"Request to {action} failed: {status_code} {message}",
-            status_code=status_code,
-            code=str(code) if code is not None else None,
-            error_type=error_type,
-            retryable=status_code == 429 or status_code >= 500,
+        return VikingDBException.from_http_response(
             action=action,
+            status_code=response.status_code,
+            reason=str(message),
+            code=str(code) if code is not None else None,
         )
 
     def _console_post(self, data: Dict[str, Any], action: str):

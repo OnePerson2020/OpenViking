@@ -19,7 +19,7 @@ from openviking.pyagfs.exceptions import (
 )
 from openviking.server.error_mapping import map_exception
 from openviking.server.models import ERROR_CODE_TO_HTTP_STATUS
-from openviking.storage.errors import LockAcquisitionError, ResourceBusyError
+from openviking.storage.errors import LockAcquisitionError, ResourceBusyError, VikingDBException
 from openviking_cli.exceptions import (
     FailedPreconditionError,
     InvalidArgumentError,
@@ -276,6 +276,151 @@ def test_git_auth_failure_remains_a_client_error():
     assert error.code == GIT_AUTH_FAILED
     assert ERROR_CODE_TO_HTTP_STATUS.get(error.code, 500) == 400
     assert error_response(error.code, error.message).status_code == 400
-    assert response_from_result(
-        {"status": "error", "code": error.code, "errors": [error.message]}
-    ).status_code == 400
+    assert (
+        response_from_result(
+            {"status": "error", "code": error.code, "errors": [error.message]}
+        ).status_code
+        == 400
+    )
+
+
+class _VikingDBResponse:
+    def __init__(self, status_code: int, payload: dict):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = str(payload)
+
+    def json(self):
+        return self._payload
+
+
+def _vikingdb_api_key_error(status_code: int, payload: dict) -> Exception:
+    from openviking.storage.vectordb.collection.volcengine_api_key_collection import (
+        VolcengineApiKeyCollection,
+    )
+
+    return VolcengineApiKeyCollection._build_response_error(
+        _VikingDBResponse(status_code, payload), "/api/vikingdb/data/search/vector"
+    )
+
+
+def test_vikingdb_invalid_filter_maps_to_invalid_argument():
+    err = _vikingdb_api_key_error(
+        400,
+        {
+            "code": "InvalidParameter",
+            "message": "Invalid filter param: filter must contain 'op' key, "
+            "actual filter: map[type:resource]",
+        },
+    )
+
+    mapped = map_exception(err)
+
+    assert isinstance(mapped, InvalidArgumentError)
+    assert ERROR_CODE_TO_HTTP_STATUS[mapped.code] == 400
+    assert "filter must contain 'op' key" in mapped.message
+    assert "/api/vikingdb" not in mapped.message
+    assert "/api/vikingdb" not in mapped.details["reason"]
+    assert mapped.details["upstream_status_code"] == 400
+    assert mapped.details["upstream_code"] == "InvalidParameter"
+    assert mapped.details["service"] == "vector store"
+
+
+def test_vikingdb_error_details_redact_credentials():
+    err = _vikingdb_api_key_error(
+        400, {"code": "InvalidParameter", "message": "bad request api_key=vk-secret-value"}
+    )
+
+    mapped = map_exception(err)
+
+    assert mapped.code == "INVALID_ARGUMENT"
+    assert "vk-secret-value" not in mapped.message
+    assert "vk-secret-value" not in str(mapped.details)
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_code", "expected_http"),
+    [
+        (422, "INVALID_ARGUMENT", 400),
+        (429, "RESOURCE_EXHAUSTED", 429),
+        (401, "UNAVAILABLE", 503),
+        (403, "UNAVAILABLE", 503),
+        (404, "UNAVAILABLE", 503),
+        (500, "UNAVAILABLE", 503),
+        (502, "UNAVAILABLE", 503),
+        (503, "UNAVAILABLE", 503),
+    ],
+)
+def test_vikingdb_http_statuses_map_without_internal_error(
+    status_code, expected_code, expected_http
+):
+    err = _vikingdb_api_key_error(status_code, {"code": "Err", "message": "downstream"})
+
+    mapped = map_exception(err)
+
+    assert mapped.code == expected_code
+    assert ERROR_CODE_TO_HTTP_STATUS[mapped.code] == expected_http
+    assert mapped.details["upstream_status_code"] == status_code
+
+
+def test_vikingdb_private_client_error_maps_to_vector_store_error():
+    from openviking.storage.vectordb.collection.vikingdb_collection import VikingDBCollection
+
+    err = VikingDBCollection._build_response_error(
+        _VikingDBResponse(400, {"code": "InvalidParameter", "message": "bad filter"}),
+        "/api/vikingdb/data/search/vector",
+    )
+
+    mapped = map_exception(err)
+
+    assert mapped.code == "INVALID_ARGUMENT"
+    assert mapped.message == "Vector store rejected the request: bad filter"
+
+
+def test_vector_store_connection_failure_maps_to_unavailable():
+    from openviking.storage.errors import ConnectionError as VectorStoreConnectionError
+
+    err = VectorStoreConnectionError(
+        "Request to /api/vikingdb/data/search/vector failed: ConnectTimeout",
+        error_type="connection_error",
+        retryable=True,
+    )
+
+    mapped = map_exception(err)
+
+    assert mapped.code == "UNAVAILABLE"
+    assert ERROR_CODE_TO_HTTP_STATUS[mapped.code] == 503
+    assert "upstream_status_code" not in mapped.details
+
+
+def test_vikingdb_error_is_found_through_explicit_cause():
+    cause = _vikingdb_api_key_error(400, {"message": "bad filter"})
+    try:
+        raise RuntimeError("search failed") from cause
+    except RuntimeError as wrapped:
+        mapped = map_exception(wrapped)
+
+    assert mapped.code == "INVALID_ARGUMENT"
+
+
+def test_http_collection_client_error_maps_to_invalid_argument(monkeypatch):
+    from openviking.storage.vectordb.collection.http_collection import HttpCollection
+
+    class _Response:
+        status_code = 400
+        text = '{"code": "InvalidParameter", "message": "bad filter"}'
+
+    monkeypatch.setattr(
+        "openviking.storage.vectordb.collection.http_collection.requests.post",
+        lambda *args, **kwargs: _Response(),
+    )
+    collection = HttpCollection(meta_data={"ProjectName": "p", "CollectionName": "c"})
+
+    with pytest.raises(VikingDBException) as exc_info:
+        collection.search_by_scalar("idx", field="updated_at")
+
+    mapped = map_exception(exc_info.value)
+    assert mapped.code == "INVALID_ARGUMENT"
+    assert mapped.message == "Vector store rejected the request: bad filter"
+    assert mapped.details["upstream_status_code"] == 400
+    assert mapped.details["upstream_code"] == "InvalidParameter"

@@ -15,6 +15,7 @@ class VikingDBException(Exception):
         error_type: str | None = None,
         retryable: bool = False,
         action: str | None = None,
+        reason: str | None = None,
     ) -> None:
         super().__init__(message)
         # 私有化下游需要结构化判定重试边界；默认值保持其他存储后端原有异常语义。
@@ -23,6 +24,38 @@ class VikingDBException(Exception):
         self.error_type = error_type
         self.retryable = retryable
         self.action = action
+        # Downstream's own error text, without the internal request path; safe to surface to callers.
+        self.reason = reason
+
+    @classmethod
+    def from_http_response(
+        cls,
+        *,
+        action: str,
+        status_code: int,
+        reason: str,
+        code: str | None = None,
+    ):
+        """Build an error that carries the downstream HTTP status structurally.
+
+        Remote vector-store clients raise this on any non-2xx response so the server
+        can return the downstream status class instead of a generic 500.
+        """
+        if 400 <= status_code < 500:
+            error_type = "http_client_error"
+        elif status_code >= 500:
+            error_type = "http_server_error"
+        else:
+            error_type = "http_error"
+        return cls(
+            f"Request to {action} failed: {status_code} {reason}",
+            status_code=status_code,
+            code=code,
+            error_type=error_type,
+            retryable=status_code == 429 or status_code >= 500,
+            action=action,
+            reason=reason,
+        )
 
 
 class StorageException(VikingDBException):

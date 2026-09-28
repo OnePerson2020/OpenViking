@@ -5,6 +5,7 @@ import ast
 import re
 from typing import Any, Iterator
 
+from openviking.observability.http_error_context import sanitize_public_http_error
 from openviking.pyagfs.exceptions import (
     AGFSAlreadyExistsError,
     AGFSClientError,
@@ -29,7 +30,8 @@ from openviking.pyagfs.exceptions import (
     AGFSTimeoutError,
     GitConcurrentCommitError,
 )
-from openviking.storage.errors import LockAcquisitionError, ResourceBusyError
+from openviking.storage.errors import ConnectionError as VectorStoreConnectionError
+from openviking.storage.errors import LockAcquisitionError, ResourceBusyError, VikingDBException
 from openviking.utils.exceptions import HTTP_STATUS_TO_ERROR_CODE, error_code_from_http_status
 from openviking_cli.exceptions import (
     ConflictError,
@@ -44,6 +46,11 @@ from openviking_cli.exceptions import (
     UnavailableError,
     UnimplementedError,
 )
+
+_VECTOR_STORE_SERVICE = "vector store"
+# Downstream 4xx statuses that reflect how this server is configured (its
+# credentials, collection or index), not what the API caller sent.
+_VECTOR_STORE_SERVER_SIDE_4XX = frozenset({401, 403, 404})
 
 _KNOWN_HTTP_STATUS_CODES = frozenset(HTTP_STATUS_TO_ERROR_CODE)
 _UPSTREAM_ERROR_MARKERS = (
@@ -394,6 +401,49 @@ def _map_upstream_api_error(exc: Exception) -> OpenVikingError | None:
     return None
 
 
+def _find_vector_store_error(exc: Exception) -> VikingDBException | None:
+    """Return the vector-store HTTP/connection error raised by a collection client.
+
+    Only the raised exception and its explicit ``raise ... from`` causes are
+    inspected, so an unrelated error raised while handling one is not remapped.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, VikingDBException) and (
+            current.status_code is not None or isinstance(current, VectorStoreConnectionError)
+        ):
+            return current
+        current = current.__cause__
+    return None
+
+
+def _map_vector_store_error(exc: VikingDBException) -> OpenVikingError:
+    status = _coerce_http_status(exc.status_code)
+    # Surface only the downstream's own reason; the internal request path stays in logs.
+    public = sanitize_public_http_error(
+        code=exc.code or "", message=_trim_message(exc.reason or "request failed")
+    )
+    details: dict[str, Any] = {"service": _VECTOR_STORE_SERVICE, "reason": public.message}
+    if status is not None:
+        details["upstream_status_code"] = status
+    if public.code:
+        details["upstream_code"] = public.code
+
+    if status is not None and 400 <= status < 500 and status not in _VECTOR_STORE_SERVER_SIDE_4XX:
+        if status == 429:
+            return ResourceExhaustedError(
+                f"Vector store rate limit exceeded: {public.message}", details=details
+            )
+        return InvalidArgumentError(
+            f"Vector store rejected the request: {public.message}", details=details
+        )
+    unavailable = UnavailableError(_VECTOR_STORE_SERVICE, reason=public.message)
+    unavailable.details.update(details)
+    return unavailable
+
+
 def is_not_found_error(exc: Exception) -> bool:
     if isinstance(exc, FileNotFoundError):
         return True
@@ -561,6 +611,9 @@ def map_exception(
             or "connection refused" in lowered
         ):
             return UnavailableError("storage backend", reason=message)
+    vector_store_error = _find_vector_store_error(exc)
+    if vector_store_error is not None:
+        return _map_vector_store_error(vector_store_error)
     upstream_mapped = _map_upstream_api_error(exc)
     if upstream_mapped is not None:
         return upstream_mapped

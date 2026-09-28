@@ -117,4 +117,5 @@ class VikingDBClient:
                 error_type="connection_error",
                 retryable=True,
                 action=path,
+                reason=type(e).__name__,
             ) from e

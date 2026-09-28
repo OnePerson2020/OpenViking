@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 import openviking
+from openviking.storage.errors import ConnectionError
 from openviking.storage.vectordb.collection.collection import Collection, ICollection
 from openviking.storage.vectordb.collection.result import (
     AggregateResult,
@@ -25,9 +26,28 @@ headers = {
 }
 
 
+def _raise_for_status(response, action: str) -> None:
+    """Raise a storage error that keeps the downstream HTTP status on any non-2xx response."""
+    if 200 <= response.status_code < 300:
+        return
+    try:
+        result = json.loads(response.text)
+    except (TypeError, ValueError):
+        result = None
+    reason, code = response.text, None
+    if isinstance(result, dict):
+        reason = result.get("message") or result.get("msg") or result.get("error") or reason
+        code = result.get("code")
+    raise ConnectionError.from_http_response(
+        action=action,
+        status_code=response.status_code,
+        reason=str(reason),
+        code=str(code) if code is not None else None,
+    )
+
+
 def _parse_success_response(response, operation: str) -> Dict[str, Any]:
-    if response.status_code != 200:
-        raise RuntimeError(f"Failed to {operation}: HTTP {response.status_code}: {response.text}")
+    _raise_for_status(response, operation)
     result = json.loads(response.text)
     error_code = result.get("code")
     if error_code != 0:
@@ -62,11 +82,9 @@ def get_or_create_http_collection(
         meta_data["ScalarIndex"] = json.dumps(meta_data["ScalarIndex"])
     response = requests.post(url, headers=headers, json=meta_data, timeout=DEFAULT_TIMEOUT)
     # logger.info(f"CreateVikingdbCollection response: {response.text}")
-    if response.status_code == 200:
-        http_collection = HttpCollection(host, port, meta_data)
-        return Collection(http_collection)
-    else:
-        raise Exception(f"Failed to get or create collection: {response.text}")
+    _raise_for_status(response, "CreateVikingdbCollection")
+    http_collection = HttpCollection(host, port, meta_data)
+    return Collection(http_collection)
 
 
 def list_vikingdb_collections(
@@ -183,10 +201,7 @@ class HttpCollection(ICollection):
             data["ScalarIndex"] = json.dumps(meta_data["ScalarIndex"])
         response = requests.post(url, headers=headers, json=data, timeout=DEFAULT_TIMEOUT)
         # logger.info(f"CreateVikingdbCollection response: {response.text}")
-        if response.status_code != 200:
-            raise Exception(f"Failed to create index: {response.text}")
-
-        pass
+        _raise_for_status(response, "CreateVikingdbIndex")
 
     def has_index(self, index_name: str):
         indexes = self.list_indexes()
@@ -635,7 +650,7 @@ class HttpCollection(ICollection):
             timeout=DEFAULT_TIMEOUT,
         )
         # logger.info(f"SearchByScalar response: {response.text}")
-        response.raise_for_status()
+        _raise_for_status(response, "api/vikingdb/data/search/scalar")
 
         data = json.loads(response.text).get("data", {})
         result = SearchResult()
@@ -674,7 +689,7 @@ class HttpCollection(ICollection):
             },
             timeout=DEFAULT_TIMEOUT,
         )
-        response.raise_for_status()
+        _raise_for_status(response, "api/vikingdb/data/aggregate")
         result = json.loads(response.text)
         data = result.get("data", {})
         return self._parse_aggregate_result(data, op, field)
