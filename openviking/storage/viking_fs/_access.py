@@ -555,6 +555,7 @@ class _AccessMixin:
         sort_by: Optional[str] = None,
         sort_order: str = "asc",
         ctx: Optional[RequestContext] = None,
+        directories_only: bool = False,
         *,
         include_expired: bool = False,
     ):
@@ -598,6 +599,7 @@ class _AccessMixin:
                 offset=raw_offset,
                 sort_by=sort_by,
                 sort_order=sort_order,
+                directories_only=directories_only,
             )
             if not raw_entries:
                 return
