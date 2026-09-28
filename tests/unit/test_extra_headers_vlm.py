@@ -8,8 +8,8 @@ import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-from openai import OpenAI
 import pytest
+from openai import OpenAI
 from volcenginesdkarkruntime._exceptions import ArkAPIStatusError
 
 from openviking.models.vlm.backends.litellm_vlm import (
