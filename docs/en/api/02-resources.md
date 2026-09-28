@@ -750,7 +750,7 @@ ov add-resource ./guide.md --ttl-relative 7
 ov update-resource-config viking://resources/docs --ttl-relative 30
 ```
 
-HTTP uses `POST /api/v1/resources` for imports and `PATCH /api/v1/resources/config` with `uri` and one TTL parameter for future policy changes. The corresponding MCP tools are `add_resource` and `update_resource_config`. External Connector imports use the configured directory policy; per-import TTL parameters on that route are rejected.
+HTTP uses `POST /api/v1/resources` for imports and `PATCH /api/v1/resources/config` with `uri` and a relative retention in whole days for future directory defaults; omit the duration to disable. Directory defaults do not accept absolute deadlines. The corresponding MCP tools are `add_resource` and `update_resource_config`. External Connector imports use the configured directory policy; per-import TTL parameters on that route are rejected.
 
 `GET /api/v1/resources/ttl?uri=...` returns one file's retention metadata. `PATCH /api/v1/resources/ttl` accepts an exact file `uri` and exactly one of `ttl_relative` (whole days) or `expires_at` (a future ISO 8601 timestamp). It supports previously unmanaged live files even with global TTL disabled. Relative retention uses the latest successful content update time; editing retention alone does not reset it. Absolute edits select a fixed deadline and clear the relative duration. Existing generation and content are preserved. Directories are rejected; use `PATCH /api/v1/resources/config` for defaults applied to future files. Expired files cannot be revived. See the [document TTL API](12-content.md#document-expiry) for examples.
 

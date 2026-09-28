@@ -406,10 +406,7 @@ async def test_apply_operations_skips_stale_source_session_generation(monkeypatc
             assert uri == "viking://user/u/sessions/session-1/.meta.json"
             assert ctx is request.ctx
             assert include_expired is True
-            return (
-                '{"expires_at":"2999-01-01T00:00:00.000Z",'
-                '"ttl_generation":"generation-2"}'
-            )
+            return '{"expires_at":"2999-01-01T00:00:00.000Z","ttl_generation":"generation-2"}'
 
     fs = _SessionFS()
     acquire = AsyncMock(return_value={"lease_ref": "session-fenced-lease"})
@@ -418,7 +415,7 @@ async def test_apply_operations_skips_stale_source_session_generation(monkeypatc
         "openviking.session.memory.streaming_memory_updater.get_viking_fs", lambda: fs
     )
     monkeypatch.setattr(
-        "openviking.session.memory.streaming_memory_updater._acquire_stable_operation_lease",
+        "openviking.session.memory.streaming_memory_updater.acquire_memory_operation_lease",
         acquire,
     )
     monkeypatch.setattr(
@@ -434,9 +431,7 @@ async def test_apply_operations_skips_stale_source_session_generation(monkeypatc
     assert result.edited_uris == []
     assert result.deleted_uris == []
     apply.assert_not_awaited()
-    fs._async_agfs.pathlock_release.assert_awaited_once_with(
-        {"lease_ref": "session-fenced-lease"}
-    )
+    fs._async_agfs.pathlock_release.assert_awaited_once_with({"lease_ref": "session-fenced-lease"})
 
 
 async def test_streaming_apply_migrates_uri_under_one_stable_lease(monkeypatch):

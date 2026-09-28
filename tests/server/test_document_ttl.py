@@ -198,9 +198,8 @@ async def test_expiry_change_supersedes_cleanup_and_preserves_content(
         )
         assert before.content == after.content
         assert after.extra_fields == {
-            **before.extra_fields,
+            **{key: value for key, value in before.extra_fields.items() if key != "ttl_days"},
             "expires_at": new_expiry,
-            "ttl_days": None,
         }
     else:
         assert await fs.read_file(uri, ctx=ctx) == raw
@@ -398,6 +397,20 @@ async def test_cli_sdk_configuration_and_document_expiry_chain(ttl_admin_app, se
         assert (await sdk.get_ttl(uri))["expires_at"] == expiry
         record = await service.viking_fs.ttl_registry.get(account, uri)
         assert record.expires_at == expiry
+        await sdk.create_session(session_id="cli-ttl")
+        session_uri = ROOT + "/sessions/cli-ttl"
+        if binary:
+            await cli("ttl", "set", session_uri, "--ttl-relative", "30")
+            session_fields = await cli("ttl", "get", session_uri)
+        else:
+            session_fields = await sdk.update_ttl(session_uri, ttl_relative=30)
+        assert session_fields["ttl_days"] == 30
+        assert await sdk.get_ttl(session_uri) == session_fields
+        assert parse_iso_datetime(session_fields["expires_at"]) - parse_iso_datetime(
+            session_fields["received_at"]
+        ) == timedelta(days=30)
+        session_record = await service.viking_fs.ttl_registry.get(account, session_uri)
+        assert session_record.expires_at == session_fields["expires_at"]
     finally:
         await sdk.close()
         server.should_exit = True
@@ -503,3 +516,130 @@ async def test_sdk_and_mcp_set_unmanaged_file_retention_without_global_policy(
             response = await http.patch("/api/v1/content/ttl", json={"uri": uri, **payload})
             assert response.status_code == 400, response.text
         assert await sdk.get_ttl(uri) == changed
+
+
+@pytest.mark.asyncio
+async def test_session_retention_edit_and_append_use_latest_content_time(
+    client, service, monkeypatch
+):
+    import ast
+
+    from openviking.server import mcp_endpoint
+    from openviking.session import session as session_module
+    from openviking_cli.client.http import AsyncHTTPClient
+
+    await request(client, "post", "/api/v1/sessions", json={"session_id": "manual-ttl"})
+    uri = ROOT + "/sessions/manual-ttl"
+    meta_uri = uri + "/.meta.json"
+    before = json.loads(await service.viking_fs.read_file(meta_uri, ctx=root_ctx()))
+    sdk = AsyncHTTPClient(url="http://testserver", account="default", user="default")
+    sdk._http = client
+    first = await sdk.update_ttl(uri, ttl_relative=7)
+    original_record = await service.viking_fs.ttl_registry.get("default", uri)
+    assert first["ttl_days"] == 7
+    assert parse_iso_datetime(first["expires_at"]) - parse_iso_datetime(
+        first["received_at"]
+    ) == timedelta(days=7)
+    changed_at = format_iso8601(parse_iso_datetime(first["received_at"]) + timedelta(days=1))
+    monkeypatch.setattr(session_module, "get_current_timestamp", lambda: changed_at)
+    await request(
+        client,
+        "post",
+        "/api/v1/sessions/manual-ttl/messages",
+        json={"role": "user", "content": "A new message renews retention."},
+    )
+    renewed = await request(client, "get", "/api/v1/content/ttl", params={"uri": uri})
+    assert renewed["received_at"] == changed_at
+    assert parse_iso_datetime(renewed["expires_at"]) - parse_iso_datetime(
+        first["expires_at"]
+    ) == timedelta(days=1)
+    assert renewed["ttl_generation"] == first["ttl_generation"]
+    token = mcp_endpoint._mcp_ctx.set(root_ctx())
+    try:
+        revised = ast.literal_eval(await mcp_endpoint.update_ttl(uri, ttl_relative=30))
+    finally:
+        mcp_endpoint._mcp_ctx.reset(token)
+    assert revised["received_at"] == changed_at
+    assert parse_iso_datetime(revised["expires_at"]) - parse_iso_datetime(changed_at) == timedelta(
+        days=30
+    )
+    after = json.loads(await service.viking_fs.read_file(meta_uri, ctx=root_ctx()))
+    assert after["created_at"] == before["created_at"]
+    assert after["message_count"] == 1
+    assert (await service.viking_fs.ttl_registry.get("default", uri)).expires_at == revised[
+        "expires_at"
+    ]
+    # Configuration-only changes and failed content writes cannot renew TTL.
+    monkeypatch.setattr(
+        session_module,
+        "get_current_timestamp",
+        lambda: format_iso8601(parse_iso_datetime(changed_at) + timedelta(days=1)),
+    )
+    await request(
+        client,
+        "patch",
+        "/api/v1/sessions/manual-ttl/config",
+        json={"memory_extraction_config": {"events": {"tags": ["updated-config"]}}},
+    )
+    assert await sdk.get_ttl(uri) == revised
+    with monkeypatch.context() as failure:
+        failure.setattr(
+            service.viking_fs,
+            "append_file",
+            AsyncMock(side_effect=OSError("storage temporarily unavailable")),
+        )
+        failed = await client.post(
+            "/api/v1/sessions/manual-ttl/messages",
+            json={"role": "user", "content": "Must not renew TTL"},
+        )
+        assert failed.status_code == 500
+    assert await sdk.get_ttl(uri) == revised
+    persisted = json.loads(await service.viking_fs.read_file(meta_uri, ctx=root_ctx()))
+    assert persisted["message_count"] == 1
+    # Directory edits are relative only and cannot silently switch to a fixed deadline.
+    response = await client.patch(
+        "/api/v1/content/ttl", json={"uri": uri, "expires_at": "2999-01-01T00:00:00Z"}
+    )
+    assert response.status_code == 400
+    assert await sdk.get_ttl(uri) == revised
+    summary_uri = uri + "/.abstract.md"
+    await service.viking_fs.write_file(summary_uri, "Retained summary", ctx=root_ctx())
+    real_expired = ttl.is_expired
+    now = parse_iso_datetime(first["expires_at"]) + timedelta(seconds=1)
+    monkeypatch.setattr(ttl, "is_expired", lambda value, **_: real_expired(value, now=now))
+    cleanup = TTLCleanupService(service=service, service_loop=asyncio.get_running_loop())
+    assert (await _cleanup_once(cleanup, original_record))["skipped"] == "renewed"
+    now = parse_iso_datetime(revised["expires_at"]) + timedelta(days=2)
+    assert (await client.get("/api/v1/sessions/manual-ttl")).status_code == 404
+    assert (
+        await client.get("/api/v1/content/read", params={"uri": uri + "/messages.jsonl"})
+    ).status_code == 404
+    response = await client.patch("/api/v1/content/ttl", json={"uri": uri, "ttl_relative": 60})
+    assert response.status_code == 404
+    record = await service.viking_fs.ttl_registry.get("default", uri)
+    assert (await _cleanup_once(cleanup, record))["deleted"]
+    assert await service.viking_fs.exists(uri, ctx=root_ctx())
+    assert await service.viking_fs.read_file(summary_uri, ctx=root_ctx()) == "Retained summary"
+    assert not await service.viking_fs.exists(
+        uri + "/messages.jsonl", ctx=root_ctx(), include_expired=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_retention_requires_owner_access(client, ttl_admin_app, service):
+    from openviking.server.auth import get_request_context
+    from openviking.server.identity import RequestContext, Role
+    from openviking_cli.session.user_id import UserIdentifier
+
+    await request(client, "post", "/api/v1/sessions", json={"session_id": "private-ttl"})
+    uri = ROOT + "/sessions/private-ttl"
+    stranger = RequestContext(user=UserIdentifier("default", "stranger"), role=Role.USER)
+    ttl_admin_app.dependency_overrides[get_request_context] = lambda: stranger
+    try:
+        response = await client.patch("/api/v1/content/ttl", json={"uri": uri, "ttl_relative": 7})
+        assert response.status_code == 403, response.text
+        response = await client.get("/api/v1/content/ttl", params={"uri": uri})
+        assert response.status_code == 403, response.text
+    finally:
+        ttl_admin_app.dependency_overrides.pop(get_request_context)
+    assert await service.viking_fs.ttl_registry.get("default", uri) is None

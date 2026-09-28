@@ -1249,21 +1249,24 @@ async def _maybe_sitemap_hint(path: str) -> str:
         return ""
 
 
-@mcp.tool()
+@_mcp_error_results()
+@mcp.tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
 async def get_ttl(uri: str) -> str:
-    """Read a live event/resource document's frozen cleanup time and TTL owner."""
+    """Read a live event/resource file or session's frozen cleanup time and TTL owner."""
     ctx = _get_ctx()
     uri = validate_request_viking_uri(uri, ctx)
     return str(await get_service().fs.get_ttl(uri, ctx))
 
 
-@mcp.tool()
+@_mcp_error_results()
+@mcp.tool(annotations=_RETRY_SAFE_DESTRUCTIVE_TOOL_ANNOTATIONS)
 async def update_ttl(
     uri: str, expires_at: Optional[str] = None, ttl_relative: Optional[int] = None
 ) -> str:
-    """Set a live event/resource document's cleanup time (ISO 8601 with timezone).
+    """Set a live event/resource file or session's cleanup time (ISO 8601 with timezone).
 
-    Provide relative whole days or a future absolute timestamp. Works with
+    Files accept relative whole days or a future absolute timestamp; sessions
+    accept relative whole days only. Works with
     global TTL disabled and on previously unmanaged files. Resource files have
     independent lifetimes; directory defaults are changed with
     update_resource_config. Does not revive expired data or change policy for
@@ -1274,13 +1277,12 @@ async def update_ttl(
     return str(await get_service().fs.update_ttl(uri, expires_at, ctx, ttl_relative=ttl_relative))
 
 
-@mcp.tool()
-async def update_resource_config(
-    uri: str, ttl_relative: Optional[int] = None, ttl_absolute: Optional[int] = None
-) -> str:
-    """Set TTL for future resource imports at a path; omit both values to disable.
+@_mcp_error_results()
+@mcp.tool(annotations=_RETRY_SAFE_DESTRUCTIVE_TOOL_ANNOTATIONS)
+async def update_resource_config(uri: str, ttl_relative: Optional[int] = None) -> str:
+    """Set relative TTL for future resource imports; omit ttl_relative to disable.
 
-    ttl_relative is whole days; ttl_absolute is a Unix timestamp in seconds.
+    ttl_relative is a positive number of whole days.
     Existing resources retain their frozen expiry.
     """
     ctx = _get_ctx()
@@ -1288,7 +1290,7 @@ async def update_resource_config(
 
     uri = validate_content_target_uri(uri, ctx, kind="resource")
     result = await get_service().resources.update_resource_config(
-        uri, ctx, ttl_relative=ttl_relative, ttl_absolute=ttl_absolute
+        uri, ctx, ttl_relative=ttl_relative
     )
     return f"Resource TTL policy updated: {result}"
 

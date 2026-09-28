@@ -189,9 +189,7 @@ async def test_resume_queued_commit_continues_phase2(monkeypatch):
 async def test_phase1_does_not_renew_frozen_ttl(monkeypatch):
     session_uri = "viking://user/default/sessions/session-1"
     message = Message(id="old-user", role="user", parts=[TextPart("old question")])
-    storage = _MemoryVikingFS(
-        {f"{session_uri}/messages.jsonl": f"{message.to_jsonl()}\n"}
-    )
+    storage = _MemoryVikingFS({f"{session_uri}/messages.jsonl": f"{message.to_jsonl()}\n"})
     tracker = TaskTracker(_TaskStore())
     monkeypatch.setattr("openviking.session.session._enabled_memory_types", lambda: set())
     monkeypatch.setattr("openviking.service.task_tracker.get_task_tracker", lambda: tracker)
@@ -248,7 +246,7 @@ async def test_phase2_completion_renews_from_one_persisted_timestamp():
 
     assert completed_at == "2999-02-03T04:05:06.000Z"
     persisted = json.loads(files[f"{session_uri}/.meta.json"])
-    assert persisted["received_at"] == "2999-01-01T00:00:00.000Z"
+    assert persisted["received_at"] == completed_at
     assert persisted["expires_at"] == "2999-02-05T04:05:06.000Z"
 
 
@@ -314,7 +312,7 @@ async def test_done_recovery_repairs_ttl_with_original_completion_time():
         set_task_tracker(None)
 
     persisted = json.loads(files[f"{session_uri}/.meta.json"])
-    assert persisted["received_at"] == "2026-01-01T00:00:00.000Z"
+    assert persisted["received_at"] == completed_at
     assert persisted["expires_at"] == "2026-02-05T04:05:06.000Z"
 
 

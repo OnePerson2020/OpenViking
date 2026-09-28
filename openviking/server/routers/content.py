@@ -113,7 +113,7 @@ class UpdateTTLRequest(DocumentTTL):
 
 @router.get("/ttl")
 async def get_ttl(uri: str = Query(...), _ctx: RequestContext = Depends(get_request_context)):
-    """Read a live event/resource's frozen expiry and owning document URI."""
+    """Read a live event/resource file or session's expiry and owning URI."""
     uri = validate_request_viking_uri(resolve_path_variables(uri), _ctx)
     return Response(status="ok", result=await get_service().fs.get_ttl(uri, _ctx))
 
@@ -122,7 +122,7 @@ async def get_ttl(uri: str = Query(...), _ctx: RequestContext = Depends(get_requ
 async def update_ttl(
     request: UpdateTTLRequest, _ctx: RequestContext = Depends(get_request_context)
 ):
-    """Change an existing event/resource's cleanup time; expired objects cannot be revived."""
+    """Change a live event/resource file or session's retention without reviving expired data."""
     uri = validate_request_viking_uri(resolve_path_variables(request.uri), _ctx)
     return Response(
         status="ok",

@@ -466,7 +466,7 @@ Parser 或 Understanding API 后端自身的限制和上传行为。
 
 TTL 策略默认关闭。`ov.conf` 的 `ttl` 是服务启动基线；运行时复用集群／account 配置覆盖，不需要修改云端向量 schema。一个库的全局策略是其 account 的 `ttl.global`，只影响 user events、peer events 和 sessions。公共／用户／peer resources 属于长期记忆，使用独立的 `ttl.resources` 默认值，绝不继承 `ttl.global`。用户和 peer ID 由 URI 范围匹配，没有独立的用户级配置层。
 
-event 和 session 按“最近目录显式策略 → 对应范围默认 → 库全局默认 → 关闭”解析；resource 按“单次导入显式参数 → 最近目录显式策略 → resources 默认 → 关闭”解析。`inherit` 在对应链路中继续向上查找，`disabled` 阻断继承；`days` 使用正整数天，`absolute` 仅适用于 resources 范围／目录及资源导入。目录匹配采用路径边界；`events/2026` 比 `events` 更近，不会匹配 `events/20260`。
+event 和 session 按“最近目录显式策略 → 对应范围默认 → 库全局默认 → 关闭”解析；resource 按“单次导入显式参数 → 最近目录显式策略 → resources 默认 → 关闭”解析。`inherit` 在对应链路中继续向上查找，`disabled` 阻断继承；`days` 使用正整数天，`absolute` 仅用于资源导入和单文件设置，不支持范围或目录默认策略。目录匹配采用路径边界；`events/2026` 比 `events` 更近，不会匹配 `events/20260`。
 
 ```json
 {
@@ -490,7 +490,7 @@ ov admin get-configuration --account-id default
 ov admin patch-configuration --account-id default --settings '{"ttl":{"global":{"mode":"days","ttl_days":90}}}'
 ```
 
-CLI 省略 `--account-id` 时操作集群层。Python HTTP SDK 对应 `admin_get_configuration(account_id)`、`admin_patch_configuration(settings, account_id)`。event 公开写入、记忆抽取、session 创建和 resource 导入会按上述 resource/global 隔离规则读取合并后的运行时配置。策略变更只影响新对象；已有对象保留自身保存的策略：event/resource 内容成功更新和 session 成功 commit 会按保存的 `ttl_days` 顺延相对期限，resource 绝对期限保持不变。resource 目录策略只是分别复制给下属新文件的默认值，不形成目录期限、不限制已有后代，也不删除目录。调整已有 event/resource 文件的清理时间使用 [文档到期时间接口](../api/12-content.md#文档到期时间)。
+CLI 省略 `--account-id` 时操作集群层。Python HTTP SDK 对应 `admin_get_configuration(account_id)`、`admin_patch_configuration(settings, account_id)`。event 公开写入、记忆抽取、session 创建和 resource 导入会按上述 resource/global 隔离规则读取合并后的运行时配置。策略变更只影响新对象；已有对象保留自身保存的策略：event/resource 内容成功更新、session 追加消息和成功 commit 会按保存的 `ttl_days` 顺延相对期限，resource 绝对期限保持不变。resource 目录策略只是分别复制给下属新文件的默认值，不形成目录期限、不限制已有后代，也不删除目录。调整已有 event/resource 文件的清理时间使用 [文档到期时间接口](../api/12-content.md#文档到期时间)。
 
 `ttl_cleanup` 独立控制物理删除执行器。它默认 `enabled: true`，但所有 TTL 策略默认关闭时没有到期任务。关闭执行器会暂停新的物理删除并保留重试状态；已到期 L2 仍会立即逻辑不可见。调度器同时使用扫描抖动和稳定的逐对象清理偏移，避免所有租户集中在 UTC 0 点删除。
 

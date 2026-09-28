@@ -113,12 +113,13 @@ async def test_policy_switches_are_atomic_and_keep_other_directories(account):
                 }
             }
         )
-        await patch({"directories": {first: {"mode": "absolute", "ttl_absolute": 2000000000}}})
+        with pytest.raises(ValueError):
+            await patch({"directories": {first: {"mode": "absolute", "ttl_absolute": 2000000000}}})
         effective = await resolve_ttl_config(
             SimpleNamespace(runtime_config_manager=manager), "acct"
         )
-        assert effective.directories[first].ttl_absolute == 2000000000
-        assert effective.directories[first].ttl_days is None
+        assert effective.directories[first].ttl_absolute is None
+        assert effective.directories[first].ttl_days == 30
         assert effective.directories[sibling].ttl_days == 7
         await patch({"directories": {first: {"mode": "disabled"}}})
         assert (

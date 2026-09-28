@@ -334,18 +334,16 @@ enum AclCommands {
 #[derive(Subcommand)]
 enum Commands {
     // --- Data Operations ---
-    /// [Data] Inspect or change an existing event/resource document's cleanup time
+    /// [Data] Inspect or change an existing event/resource file or session's cleanup time
     Ttl {
         #[command(subcommand)]
         action: TtlCommands,
     },
-    /// [Data] Set the TTL policy for future imports at a resource path; omit both values to disable
+    /// [Data] Set relative TTL for future imports at a resource path; omit ttl-relative to disable
     UpdateResourceConfig {
         uri: String,
-        #[arg(long, conflicts_with = "ttl_absolute", value_parser = clap::value_parser!(i64).range(1..=365000))]
+        #[arg(long, value_parser = clap::value_parser!(i64).range(1..=365000))]
         ttl_relative: Option<i64>,
-        #[arg(long, value_parser = clap::value_parser!(i64).range(1..=253402300799))]
-        ttl_absolute: Option<i64>,
     },
     /// [Data] Add resources into OpenViking
     AddResource {
@@ -3436,12 +3434,8 @@ async fn main() {
             };
             result.map(|value| output::output_success(&value, ctx.output_format, ctx.compact))
         }
-        Commands::UpdateResourceConfig {
-            uri,
-            ttl_relative,
-            ttl_absolute,
-        } => {
-            let body = serde_json::json!({"uri": uri, "ttl_relative": ttl_relative, "ttl_absolute": ttl_absolute});
+        Commands::UpdateResourceConfig { uri, ttl_relative } => {
+            let body = serde_json::json!({"uri": uri, "ttl_relative": ttl_relative});
             ctx.get_client()
                 .patch::<_, serde_json::Value>("/api/v1/resources/config", &body, &[])
                 .await
@@ -4068,17 +4062,27 @@ mod tests {
             "ov",
             "update-resource-config",
             "viking://~/resources/reports",
-            "--ttl-absolute",
-            "2000000000",
+            "--ttl-relative",
+            "30",
         ])
         .unwrap();
         assert!(matches!(
             cli.command,
             Commands::UpdateResourceConfig {
-                ttl_absolute: Some(2000000000),
+                ttl_relative: Some(30),
                 ..
             }
         ));
+        assert!(
+            Cli::try_parse_from([
+                "ov",
+                "update-resource-config",
+                "viking://~/resources/reports",
+                "--ttl-absolute",
+                "2000000000",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

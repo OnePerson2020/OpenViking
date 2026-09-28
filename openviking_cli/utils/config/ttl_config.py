@@ -146,11 +146,10 @@ class TTLConfig(BaseModel):
                 "ttl.global mode must be 'disabled' or 'days' ('inherit' is not "
                 "allowed at the global level)"
             )
-        if any(
-            getattr(self, scope).mode == "absolute"
-            for scope in ("user_events", "peer_events", "sessions")
-        ):
-            raise ValueError("absolute TTL policies are supported only for resources")
+        if any(getattr(self, scope).mode == "absolute" for scope in TTL_SCOPES):
+            raise ValueError(
+                "absolute TTL is supported for resource imports, not directory defaults"
+            )
         normalized: Dict[str, TTLPolicy] = {}
         for raw_uri, policy in self.directories.items():
             uri = raw_uri.rstrip("/")
@@ -161,14 +160,8 @@ class TTLConfig(BaseModel):
                 )
             if uri in normalized:
                 raise ValueError(f"duplicate ttl directory after normalization: {uri}")
-            parts = uri.removeprefix("viking://").split("/")
-            resource = (
-                parts[0] == "resources"
-                or (len(parts) >= 3 and parts[2] == "resources")
-                or (len(parts) >= 5 and parts[2] == "peers" and parts[4] == "resources")
-            )
-            if policy.mode == "absolute" and not resource:
-                raise ValueError("absolute TTL policies are supported only for resources")
+            if policy.mode == "absolute":
+                raise ValueError("absolute TTL is supported for resource imports, not directories")
             normalized[uri] = policy
         self.directories = normalized
         return self
@@ -219,10 +212,8 @@ class TTLConfig(BaseModel):
     @property
     def enabled(self) -> bool:
         """True when TTL resolves to an active expiry for at least one scope."""
-        return (
-            self.resources.mode == "absolute"
-            or any(self.resolve_scope(scope) is not None for scope in TTL_SCOPES)
-            or any(policy.mode in {"days", "absolute"} for policy in self.directories.values())
+        return any(self.resolve_scope(scope) is not None for scope in TTL_SCOPES) or any(
+            policy.mode == "days" for policy in self.directories.values()
         )
 
 

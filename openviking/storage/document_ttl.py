@@ -1,13 +1,15 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""Explicit retention edits for live event and resource files."""
+"""Explicit retention edits for live files and sessions."""
 
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from openviking.core.ttl import (
     OBJECT_TYPE_EVENT,
     OBJECT_TYPE_RESOURCE_FILE,
+    OBJECT_TYPE_SESSION,
     TTL_FIELD_NAMES,
     compute_expires_at,
     hidden_by_ttl,
@@ -44,6 +46,9 @@ async def _document_target(fs, uri, *, ctx):
             )
         fields = await read_resource_fields(fs, OBJECT_TYPE_RESOURCE_FILE, uri, ctx=ctx)
         return OBJECT_TYPE_RESOURCE_FILE, fields or {}, stat
+    if ttl_object_for_uri(uri) == (OBJECT_TYPE_SESSION, uri):
+        fields = json.loads(await fs.read_file(f"{uri}/.meta.json", ctx=ctx))
+        return OBJECT_TYPE_SESSION, fields, stat
     if ttl_object_for_uri(uri, is_dir=bool(stat.get("isDir"))) == (OBJECT_TYPE_EVENT, uri):
         memory = MemoryFileUtils.read(await fs.read_file(uri, ctx=ctx), uri=uri)
         return (
@@ -51,7 +56,7 @@ async def _document_target(fs, uri, *, ctx):
             {key: value for key, value in memory.extra_fields.items() if key in TTL_FIELD_NAMES},
             stat,
         )
-    raise InvalidArgumentError("uri must identify an event file or resource document")
+    raise InvalidArgumentError("uri must identify an event file, resource document or session")
 
 
 def _public_fields(uri, fields):
@@ -60,7 +65,7 @@ def _public_fields(uri, fields):
 
 
 async def get_document_ttl(fs, uri: str, *, ctx) -> dict:
-    """Read the exact file's retention snapshot once."""
+    """Read a live file or session's retention snapshot."""
     _, fields, _ = await _document_target(fs, uri, ctx=ctx)
     return _public_fields(uri, fields)
 
@@ -68,7 +73,7 @@ async def get_document_ttl(fs, uri: str, *, ctx) -> dict:
 async def update_document_expiry(
     fs, uri: str, expires_at: str | None = None, *, ctx, ttl_relative: int | None = None
 ) -> dict:
-    """Set file retention under its source lock, even when global TTL is off."""
+    """Set retention under the object's source lock, even when global TTL is off."""
     try:
         policy = DocumentTTL(expires_at=expires_at, ttl_relative=ttl_relative)
         expiry = (
@@ -81,15 +86,38 @@ async def update_document_expiry(
     except (ValueError, TypeError) as exc:
         raise InvalidArgumentError(str(exc)) from exc
     kind, original, _ = await _document_target(fs, uri, ctx=ctx)
+    if kind == OBJECT_TYPE_SESSION and policy.expires_at is not None:
+        raise InvalidArgumentError("session directories support relative retention only")
     await fs._ensure_access(uri, ctx, action=AclAction.WRITE)
-    lease = await fs._async_agfs.pathlock_acquire_exact(fs._uri_to_path(uri, ctx=ctx))
+    acquire = (
+        fs._async_agfs.pathlock_acquire_tree
+        if kind == OBJECT_TYPE_SESSION
+        else fs._async_agfs.pathlock_acquire_exact
+    )
+    # A retention edit may race with an ordinary content update. Wait for the
+    # current writer, then re-read its snapshot while holding the same lock.
+    lease = await acquire(fs._uri_to_path(uri, ctx=ctx), timeout_secs=30.0)
     try:
         live_kind, fields, stat = await _document_target(fs, uri, ctx=ctx)
         if (live_kind, fields.get("ttl_generation")) != (kind, original.get("ttl_generation")):
             raise ConflictError("document changed while updating its expiry; reload and retry")
         # Retention edits do not count as content updates. Preserve the saved
         # content timestamp; unmanaged files start from the storage modification time.
-        if fields.get("received_at"):
+        if kind == OBJECT_TYPE_SESSION:
+            timestamps = [
+                parse_iso_datetime(fields[key])
+                for key in ("received_at", "last_message_at", "created_at")
+                if fields.get(key)
+            ]
+            # Older sessions renewed expires_at without updating received_at.
+            if fields.get("ttl_days") and fields.get("expires_at"):
+                timestamps.append(
+                    parse_iso_datetime(fields["expires_at"]) - timedelta(days=fields["ttl_days"])
+                )
+            if not timestamps:
+                raise InvalidArgumentError("session content update time is unavailable")
+            updated = max(timestamps)
+        elif fields.get("received_at"):
             updated = parse_iso_datetime(fields["received_at"])
         else:
             mtime = fs._ls_entry_mtime(stat)
@@ -108,6 +136,8 @@ async def update_document_expiry(
             memory = MemoryFileUtils.read(await fs.read_file(uri, ctx=ctx), uri=uri)
             memory.extra_fields.update(fields)
             await fs.write_file(uri, MemoryFileUtils.write(memory), ctx=ctx, lease_ref=lease)
+        elif kind == OBJECT_TYPE_SESSION:
+            await fs.write_file(f"{uri}/.meta.json", json.dumps(fields), ctx=ctx, lease_ref=lease)
         else:
             await write_resource_fields(fs, kind, uri, fields, ctx=ctx, lease_ref=lease)
     finally:

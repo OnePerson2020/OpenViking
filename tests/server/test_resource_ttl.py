@@ -81,9 +81,7 @@ async def test_import_assigns_per_file_ttl_and_updates_use_file_mtime(
     ) == timedelta(days=7)
     record = await service.viking_fs.ttl_registry.get("default", file_uri)
     assert record.object_type == "resource_file"
-    assert (await resource_ttl_fields(service.viking_fs, file_uri, ctx=root_ctx()))[
-        "content_md5"
-    ]
+    assert (await resource_ttl_fields(service.viking_fs, file_uri, ctx=root_ctx()))["content_md5"]
     root_record = await service.viking_fs.ttl_registry.get("default", uri)
     if file_uri == uri:
         assert root_record == record
@@ -116,9 +114,7 @@ async def test_import_assigns_per_file_ttl_and_updates_use_file_mtime(
     renewed = response.json()["result"]
     assert renewed["ttl_days"] == 7
     assert renewed["ttl_generation"] == frozen["ttl_generation"]
-    assert parse_iso_datetime(renewed["received_at"]) > parse_iso_datetime(
-        frozen["received_at"]
-    )
+    assert parse_iso_datetime(renewed["received_at"]) > parse_iso_datetime(frozen["received_at"])
     assert parse_iso_datetime(renewed["expires_at"]) - parse_iso_datetime(
         renewed["received_at"]
     ) == timedelta(days=7)
@@ -135,6 +131,10 @@ async def test_directory_policy_is_incremental_and_keeps_cluster_defaults(client
         "/api/v1/resources/config", json={"uri": policy_uri, "ttl_relative": 7}
     )
     assert response.status_code == 200, response.text
+    rejected = await client.patch(
+        "/api/v1/resources/config", json={"uri": policy_uri, "ttl_absolute": 2000000000}
+    )
+    assert rejected.status_code == 400, rejected.text
     first = await prepare_resource_ttl(
         fs, policy_uri + "/one.txt", is_dir=False, existing=False, ctx=ctx, lease_ref=None
     )
@@ -200,16 +200,12 @@ async def test_parent_watch_updates_live_files_without_restoring_unchanged_expir
         },
     )
     entries = await fs.tree(root, node_limit=None, level_limit=None, ctx=ctx)
-    expired_uri = next(
-        entry["uri"] for entry in entries if entry["uri"].endswith("/expired.md")
-    )
+    expired_uri = next(entry["uri"] for entry in entries if entry["uri"].endswith("/expired.md"))
     live_uri = next(entry["uri"] for entry in entries if entry["uri"].endswith("/live.md"))
     expired_fields = await prepare_resource_ttl(
         fs, expired_uri, is_dir=False, existing=False, ctx=ctx, lease_ref=None
     )
-    await prepare_resource_ttl(
-        fs, live_uri, is_dir=False, existing=False, ctx=ctx, lease_ref=None
-    )
+    await prepare_resource_ttl(fs, live_uri, is_dir=False, existing=False, ctx=ctx, lease_ref=None)
     expired_fields["expires_at"] = "2000-01-01T00:00:00.000Z"
     expired_fields["content_md5"] = content_md5(expired_body.encode())
     from openviking.storage.resource_ttl import write_resource_fields

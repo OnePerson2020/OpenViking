@@ -756,7 +756,7 @@ ov add-resource ./guide.md --ttl-relative 7
 ov update-resource-config viking://resources/docs --ttl-relative 30
 ```
 
-HTTP 导入使用 `POST /api/v1/resources`；修改后续策略使用 `PATCH /api/v1/resources/config`，传入 `uri` 和一个 TTL 参数。MCP 对应 `add_resource`、`update_resource_config`。外部 Connector 导入使用已配置的目录策略，该路径不接受单次导入 TTL 参数。
+HTTP 导入使用 `POST /api/v1/resources`；修改后续策略使用 `PATCH /api/v1/resources/config`，传入 `uri` 和相对保留天数，省略天数表示关闭。目录默认策略不接受绝对期限。MCP 对应 `add_resource`、`update_resource_config`。外部 Connector 导入使用已配置的目录策略，该路径不接受单次导入 TTL 参数。
 
 `GET /api/v1/resources/ttl?uri=...` 读取单个文件的保留元数据。`PATCH /api/v1/resources/ttl` 接受精确文件 `uri`，并且必须在 `ttl_relative`（整数天数）与 `expires_at`（未来的 ISO 8601 时间）中选择一个。全局 TTL 关闭时，也支持为此前未纳管的存活文件设置期限。相对时长从最近一次成功内容更新时间起算，修改有效期不重置该时间；设置绝对时间会选择固定期限并清空相对时长。已有 generation 和正文保留。目录 URI 会被拒绝，目录对后续新文件的默认值使用 `PATCH /api/v1/resources/config` 调整。已过期文件不能通过此接口恢复。示例见 [文档 TTL API](12-content.md#文档到期时间)。
 

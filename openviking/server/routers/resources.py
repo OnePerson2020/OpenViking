@@ -5,7 +5,7 @@
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from openviking.core.path_variables import resolve_path_variables
 from openviking.core.uri_validation import validate_content_target_uri
@@ -137,9 +137,10 @@ class AddResourceRequest(ResourceTTL):
         return self
 
 
-class UpdateResourceConfigRequest(ResourceTTL):
+class UpdateResourceConfigRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     uri: str
+    ttl_relative: Optional[StrictInt] = Field(default=None, ge=1, le=365000)
 
 
 class UpdateResourceTTLRequest(DocumentTTL):
@@ -153,7 +154,7 @@ async def update_resource_config(
 ):
     uri = validate_content_target_uri(resolve_path_variables(request.uri), _ctx, kind="resource")
     result = await get_service().resources.update_resource_config(
-        uri, _ctx, ttl_relative=request.ttl_relative, ttl_absolute=request.ttl_absolute
+        uri, _ctx, ttl_relative=request.ttl_relative
     )
     return response_from_result(result)
 

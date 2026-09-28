@@ -783,7 +783,7 @@ class AsyncHTTPClient:
         return self._handle_response_data(response).get("result", {})
 
     async def update_resource_config(
-        self, uri: str, *, ttl_relative: Optional[int] = None, ttl_absolute: Optional[int] = None
+        self, uri: str, *, ttl_relative: Optional[int] = None
     ) -> Dict[str, Any]:
         response = await self._request(
             "PATCH",
@@ -791,7 +791,6 @@ class AsyncHTTPClient:
             json={
                 "uri": VikingURI.normalize(uri),
                 "ttl_relative": ttl_relative,
-                "ttl_absolute": ttl_absolute,
             },
         )
         return self._handle_response_data(response).get("result", {})
@@ -803,7 +802,7 @@ class AsyncHTTPClient:
         return self._handle_response_data(response).get("result", {})
 
     async def get_ttl(self, uri: str) -> Dict[str, Any]:
-        """Read a live event/resource document's frozen expiry."""
+        """Read a live event/resource file or session's frozen expiry."""
         response = await self._request(
             "GET", "/api/v1/content/ttl", params={"uri": VikingURI.normalize(uri)}
         )
@@ -812,7 +811,7 @@ class AsyncHTTPClient:
     async def update_ttl(
         self, uri: str, expires_at: Optional[str] = None, *, ttl_relative: Optional[int] = None
     ) -> Dict[str, Any]:
-        """Change a live document's expiry; policy changes remain incremental."""
+        """Change a live file or session's expiry; sessions accept relative days only."""
         response = await self._request(
             "PATCH",
             "/api/v1/content/ttl",
@@ -2153,24 +2152,16 @@ class AsyncHTTPClient:
         )
         return self._handle_response(response)
 
-    def queue_status(
-        self, format: Optional[Literal["table", "json"]] = None
-    ) -> Dict[str, Any]:
+    def queue_status(self, format: Optional[Literal["table", "json"]] = None) -> Dict[str, Any]:
         return run_async(self._get_queue_status(format=format))
 
-    def vikingdb_status(
-        self, format: Optional[Literal["table", "json"]] = None
-    ) -> Dict[str, Any]:
+    def vikingdb_status(self, format: Optional[Literal["table", "json"]] = None) -> Dict[str, Any]:
         return run_async(self._get_vikingdb_status(format=format))
 
-    def models_status(
-        self, format: Optional[Literal["table", "json"]] = None
-    ) -> Dict[str, Any]:
+    def models_status(self, format: Optional[Literal["table", "json"]] = None) -> Dict[str, Any]:
         return run_async(self._get_models_status(format=format))
 
-    def get_status(
-        self, format: Optional[Literal["table", "json"]] = None
-    ) -> Dict[str, Any]:
+    def get_status(self, format: Optional[Literal["table", "json"]] = None) -> Dict[str, Any]:
         return run_async(self._get_system_status(format=format))
 
     def is_healthy(self) -> bool:
@@ -2367,13 +2358,9 @@ class SyncHTTPClient:
         )
 
     def update_resource_config(
-        self, uri: str, *, ttl_relative: Optional[int] = None, ttl_absolute: Optional[int] = None
+        self, uri: str, *, ttl_relative: Optional[int] = None
     ) -> Dict[str, Any]:
-        return run_async(
-            self._async_client.update_resource_config(
-                uri, ttl_relative=ttl_relative, ttl_absolute=ttl_absolute
-            )
-        )
+        return run_async(self._async_client.update_resource_config(uri, ttl_relative=ttl_relative))
 
     def get_resource_ttl(self, uri: str) -> Dict[str, Any]:
         return run_async(self._async_client.get_resource_ttl(uri))
@@ -3130,24 +3117,16 @@ class SyncHTTPClient:
     ) -> Dict[str, Any]:
         return run_async(self._async_client.preflight_openviking_asset(name, repo_url, options))
 
-    def queue_status(
-        self, format: Optional[Literal["table", "json"]] = None
-    ) -> Dict[str, Any]:
+    def queue_status(self, format: Optional[Literal["table", "json"]] = None) -> Dict[str, Any]:
         return self._async_client.queue_status(format=format)
 
-    def vikingdb_status(
-        self, format: Optional[Literal["table", "json"]] = None
-    ) -> Dict[str, Any]:
+    def vikingdb_status(self, format: Optional[Literal["table", "json"]] = None) -> Dict[str, Any]:
         return self._async_client.vikingdb_status(format=format)
 
-    def models_status(
-        self, format: Optional[Literal["table", "json"]] = None
-    ) -> Dict[str, Any]:
+    def models_status(self, format: Optional[Literal["table", "json"]] = None) -> Dict[str, Any]:
         return self._async_client.models_status(format=format)
 
-    def get_status(
-        self, format: Optional[Literal["table", "json"]] = None
-    ) -> Dict[str, Any]:
+    def get_status(self, format: Optional[Literal["table", "json"]] = None) -> Dict[str, Any]:
         return self._async_client.get_status(format=format)
 
     def is_healthy(self) -> bool:

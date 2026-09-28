@@ -112,9 +112,7 @@ async def test_partial_cleanup_blocks_recreation_and_retry_removes_only_file(
     # The hidden sidecar survives as a Watch tombstone. It is removed by an
     # explicit recreate/delete and never makes the expired source visible.
     assert await fs._async_agfs.stat(fs._uri_to_path(metadata, ctx=ctx))
-    assert (await resource_ttl_fields(fs, uri, ctx=ctx))["content_md5"] == content_md5(
-        b"delete"
-    )
+    assert (await resource_ttl_fields(fs, uri, ctx=ctx))["content_md5"] == content_md5(b"delete")
     assert not await fs.exists(uri, ctx=ctx)
 
 
@@ -142,9 +140,7 @@ async def test_legacy_directory_expiry_retires_only_metadata(binding_fs):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("delete_directory", [False, True])
-async def test_ordinary_delete_removes_exact_file_ttl_projections(
-    binding_fs, delete_directory
-):
+async def test_ordinary_delete_removes_exact_file_ttl_projections(binding_fs, delete_directory):
     fs, ctx = binding_fs, root_ctx()
     root = ROOT + "/delete"
     files = [root + "/one.txt", root + "/nested/two.txt"] if delete_directory else [root]
@@ -256,6 +252,7 @@ async def test_late_resource_embedding_validates_source_generation_and_content(
         "original",
         {
             "uri": uri,
+            "account_id": ctx.account_id,
             "ttl_generation": "old" if state == "recreated" else "g1",
             "md5": content_md5(b"original"),
         },

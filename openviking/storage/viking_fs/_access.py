@@ -109,9 +109,7 @@ class _AccessMixin:
     def _require_request_context(self, ctx: Optional[RequestContext]) -> RequestContext:
         """Resolve an account context without inventing the default account."""
         if ctx is None and self._bound_ctx.get() is None:
-            raise RuntimeError(
-                "Account request context is required for account-scoped operations"
-            )
+            raise RuntimeError("Account request context is required for account-scoped operations")
         return self._ctx_or_default(ctx)
 
     @contextmanager

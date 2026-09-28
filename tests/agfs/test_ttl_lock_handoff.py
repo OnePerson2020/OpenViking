@@ -97,7 +97,11 @@ async def test_event_embedding_waits_and_revalidates_source(source_fs, monkeypat
     handler = object.__new__(TextEmbeddingHandler)
     message = EmbeddingMsg(
         "body",
-        {"uri": "viking://user/default/memories/events/e.md", "ttl_generation": "g1"},
+        {
+            "uri": "viking://user/default/memories/events/e.md",
+            "ttl_generation": "g1",
+            "account_id": "default",
+        },
     )
     ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.ROOT)
     write = AsyncMock(return_value="vector-id")

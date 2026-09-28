@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,13 +13,62 @@ import pytest
 from openviking.core import ttl
 from openviking.service.ttl_cleanup import TTLCleanupService
 from openviking.storage.abstract_overview import render_abstract_overview
+from openviking.storage.document_ttl import get_document_ttl, update_document_expiry
 from openviking.storage.errors import StorageException
 from openviking.storage.vector_ids import vector_record_id
+from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 from openviking_cli.exceptions import NotFoundError
 from tests.storage.test_transfer_merge_binding import binding_fs as binding_fs
 from tests.storage.test_transfer_merge_binding import indexed_fs as indexed_fs
 from tests.storage.test_transfer_merge_binding import root_ctx
 from tests.unit.service.test_ttl_cleanup import _cleanup_once
+
+
+@pytest.mark.asyncio
+async def test_session_retention_edit_and_append_with_native_locks(indexed_fs, monkeypatch):
+    from openviking.message import TextPart
+    from openviking.session import session as session_module
+    from openviking.session.session import Session
+
+    fs, _ = indexed_fs
+    ctx = root_ctx()
+    uri = "viking://user/default/sessions/native-ttl"
+    session = Session(viking_fs=fs, session_id="native-ttl", ctx=ctx)
+    await session.ensure_exists()
+    initial = await asyncio.wait_for(
+        update_document_expiry(fs, uri, ctx=ctx, ttl_relative=7), timeout=5
+    )
+    changed_at = format_iso8601(parse_iso_datetime(initial["received_at"]) + timedelta(days=1))
+    monkeypatch.setattr(session_module, "get_current_timestamp", lambda: changed_at)
+    await asyncio.wait_for(
+        session.add_message_async("user", [TextPart("Real native append")]), timeout=5
+    )
+    renewed = await get_document_ttl(fs, uri, ctx=ctx)
+    assert renewed["received_at"] == changed_at
+    assert renewed["ttl_generation"] == initial["ttl_generation"]
+    assert parse_iso_datetime(renewed["expires_at"]) - parse_iso_datetime(changed_at) == timedelta(
+        days=7
+    )
+    # Both operations serialize on the session root and preserve the new duration.
+    later = format_iso8601(parse_iso_datetime(changed_at) + timedelta(hours=1))
+    monkeypatch.setattr(session_module, "get_current_timestamp", lambda: later)
+    producer = await fs._async_agfs.pathlock_acquire_exact(fs._uri_to_path(uri, ctx=ctx))
+    edit = asyncio.create_task(update_document_expiry(fs, uri, ctx=ctx, ttl_relative=30))
+    try:
+        await asyncio.sleep(0.05)
+        assert not edit.done()
+        append = asyncio.create_task(
+            session.add_message_async("user", [TextPart("Concurrent native append")])
+        )
+    finally:
+        await fs._async_agfs.pathlock_release(producer)
+    await asyncio.wait_for(asyncio.gather(edit, append), timeout=5)
+    final = await get_document_ttl(fs, uri, ctx=ctx)
+    assert final["ttl_days"] == 30
+    assert final["received_at"] == later
+    assert parse_iso_datetime(final["expires_at"]) - parse_iso_datetime(later) == timedelta(days=30)
+    assert (await fs.ttl_registry.get(ctx.account_id, uri)).expires_at == final["expires_at"]
+    assert len((await fs.read_file(uri + "/messages.jsonl", ctx=ctx)).splitlines()) == 2
 
 
 @pytest.mark.asyncio

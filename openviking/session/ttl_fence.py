@@ -53,9 +53,10 @@ async def reconcile_session_ttl(
     expiry = parse_iso_datetime(metadata["expires_at"])
     received = parse_iso_datetime(metadata["received_at"])
     renewed = expiry
+    latest_content = received
 
     async def read_completion(uri: str) -> None:
-        nonlocal renewed
+        nonlocal renewed, latest_content
         for name in (".meta.json", ".done"):
             try:
                 marker = json.loads(
@@ -76,6 +77,7 @@ async def reconcile_session_ttl(
             if completed < received or (not marker.get("ttl_generation") and completed >= expiry):
                 continue
             renewed = max(renewed, completed + timedelta(days=metadata["ttl_days"]))
+            latest_content = max(latest_content, completed)
 
     if archive_uri:
         await read_completion(archive_uri)
@@ -102,6 +104,7 @@ async def reconcile_session_ttl(
             offset += len(entries)
     if renewed > expiry:
         metadata["expires_at"] = format_iso8601(renewed)
+        metadata["received_at"] = format_iso8601(latest_content)
         await viking_fs.write_file(meta_uri, json.dumps(metadata), ctx=ctx, lease_ref=lease_ref)
     return metadata
 

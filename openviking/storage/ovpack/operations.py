@@ -361,8 +361,11 @@ async def import_ovpack(
             index_records = validate_manifest_content(zf, manifest, infolist, base_name)
             dense_vectors = read_dense_vectors(zf, manifest, base_name, index_records)
 
+            # A native path lock materializes its directory. Lock the parent
+            # so the target existence check is unchanged by acquiring the lease.
+            # The parent tree lease also excludes target cleanup and writes.
             lease = await viking_fs._async_agfs.pathlock_acquire_tree(
-                viking_fs._uri_to_path(root_uri, ctx=ctx)
+                viking_fs._uri_to_path(parent, ctx=ctx)
             )
             locks.push_async_callback(viking_fs._async_agfs.pathlock_release, lease)
             existing_roots = [root_uri] if await _root_exists(viking_fs, root_uri, ctx) else []

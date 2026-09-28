@@ -331,11 +331,11 @@ class SessionMeta:
     # session. Maps to config.memory_extraction_config.events.tags in the API.
     # None means no session default; a commit may still override per-call.
     event_search_tags: Optional[List[str]] = None
-    # Frozen TTL snapshot, computed once at session creation from the resolved
-    # sessions-scope policy. All None when TTL is off. received_at/expires_at are
-    # RFC 3339 UTC strings; expires_at is authoritative for the read barrier and
-    # cleanup scan. A successful commit renews expires_at from this frozen
-    # ttl_days snapshot, never from the (possibly changed) current config.
+    # Retention duration snapshotted at creation or explicitly edited later.
+    # received_at tracks successful content updates even when TTL is off;
+    # received_at/expires_at are RFC 3339 UTC strings. expires_at is authoritative
+    # for the read barrier and cleanup scan. Successful appends and commits renew
+    # it from the saved ttl_days, never from the current default configuration.
     ttl_days: Optional[int] = None
     received_at: str = ""
     expires_at: str = ""
@@ -680,19 +680,20 @@ class Session:
         self._meta.expires_at = snapshot["expires_at"]
         self._meta.ttl_generation = snapshot["ttl_generation"]
 
-    def _renew_ttl_on_commit(self, completed_at: str) -> None:
-        """Extend TTL from one durable Phase 2 completion timestamp.
+    def _renew_ttl_on_content_update(self, completed_at: str) -> None:
+        """Record successful content time and renew the saved relative duration.
 
-        Renewal uses the session's own frozen ``ttl_days`` and never the
-        possibly changed current config. ``received_at`` remains the immutable
-        creation timestamp; replaying an older completion is a no-op because
-        the candidate deadline cannot move ``expires_at`` backwards.
+        Older completion retries cannot move the content time or deadline back.
+        Track content time even before TTL is enabled for an existing session.
         """
+        completed = parse_iso_datetime(completed_at)
+        if self._meta.received_at and completed <= parse_iso_datetime(self._meta.received_at):
+            return
+        self._meta.received_at = format_iso8601(completed)
         if not self._meta.ttl_days:
             return
         from openviking.core.ttl import compute_expires_at
 
-        completed = parse_iso_datetime(completed_at)
         renewed_expiry = compute_expires_at(completed, self._meta.ttl_days)
         if self._meta.expires_at:
             try:
@@ -826,6 +827,7 @@ class Session:
                     batch_content,
                     ctx=self.ctx,
                 )
+            self._renew_ttl_on_content_update(get_current_timestamp())
             await self._save_meta()
         finally:
             await self._viking_fs._async_agfs.pathlock_release(lease)
@@ -3102,7 +3104,7 @@ class Session:
             latest_meta.last_commit_at = get_current_timestamp()
             latest_meta.message_count = await self._read_live_message_count()
             self._meta = latest_meta
-            self._renew_ttl_on_commit(phase2_completed_at)
+            self._renew_ttl_on_content_update(phase2_completed_at)
             if record_auto_commit_success:
                 # Mirror the Phase 1 success stamp so the persisted meta reflects
                 # a clean auto-commit even after Phase 2 reloads the latest meta.
@@ -3141,7 +3143,7 @@ class Session:
                 raise StaleSessionGenerationError(
                     f"stale TTL session generation: {self._session_uri}"
                 )
-            self._renew_ttl_on_commit(completed_at)
+            self._renew_ttl_on_content_update(completed_at)
             # Always rewrite through VikingFS so a crash after the root write
             # but before the TTL registry update is repaired as well.
             await self._save_meta(lease_ref=lease)
