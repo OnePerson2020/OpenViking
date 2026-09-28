@@ -65,8 +65,7 @@ from openviking.storage.abstract_overview import render_abstract_overview
 from openviking.telemetry import get_current_telemetry, tracer
 from openviking.telemetry.context import bind_telemetry_stage
 from openviking.telemetry.request_wait_tracker import get_request_wait_tracker
-from openviking.utils.model_call import is_model_call_error, model_workload
-from openviking.utils.model_retry import ERROR_CLASS_UNKNOWN, classify_api_error
+from openviking.utils.model_call import model_workload
 from openviking.utils.time_utils import get_current_timestamp
 from openviking.utils.token_estimation import estimate_text_tokens
 from openviking_cli.exceptions import (
@@ -98,18 +97,6 @@ def _load_render_prompt() -> Callable[..., str]:
     from openviking.prompts import render_prompt
 
     return render_prompt
-
-
-def _is_model_provider_error(error: Exception) -> bool:
-    """Return whether a caught VLM exception represents a model-call failure.
-
-    Decorated adapters attach a terminal marker once the retry owner stops.
-    Direct or legacy adapters can still expose a recognizable provider or
-    transport error without that marker, so preserve those errors for the
-    Phase 2 owner instead of silently replacing them with a summary fallback.
-    Response parsing and schema errors remain eligible for fallback.
-    """
-    return is_model_call_error(error) or classify_api_error(error) != ERROR_CLASS_UNKNOWN
 
 
 def _publish_telemetry_summary_best_effort(snapshot: Any) -> None:
@@ -2934,7 +2921,7 @@ class Session:
           ``update_working_memory`` tool forced on; parse per-section
           decisions and merge them against the previous WM. Invalid response
           content may fall back to the creation prompt. Model-call failures
-          propagate to the task owner; retries belong to the VLM provider.
+          propagate to the task owner; retries consume the offline task budget.
         """
         wm.wm_debug(
             f"_generate_archive_summary_async called "
@@ -2991,97 +2978,72 @@ class Session:
                 f"branch=CREATE (prior={'legacy' if latest_archive_overview else 'none'} "
                 f"{len(latest_archive_overview or '')}B)"
             )
-            try:
-                prompt = render_prompt(
-                    "compression.ov_wm_v2",
-                    {
-                        "messages": formatted,
-                        "latest_archive_overview": latest_archive_overview or "",
-                        "checkpoint_instructions": checkpoint_instructions,
-                        "output_language": output_language,
-                    },
-                )
-                if checkpoint_requests:
-                    response = await vlm.get_completion_async(
-                        prompt=prompt,
-                        tools=[WM_CREATE_WITH_CHECKPOINTS_TOOL],
-                        tool_choice={
-                            "type": "function",
-                            "function": {"name": "create_working_memory"},
-                        },
-                    )
-                    if not (
-                        getattr(response, "has_tool_calls", False)
-                        and getattr(response, "tool_calls", None)
-                    ):
-                        raise ValueError(
-                            "Working Memory creation returned no create_working_memory tool call"
-                        )
-                    args = response.tool_calls[0].arguments
-                    if isinstance(args, str):
-                        args = json.loads(args)
-                    if not isinstance(args, dict):
-                        raise ValueError("create_working_memory arguments must be an object")
-                    working_memory = args.get("working_memory")
-                    if not isinstance(working_memory, str) or not working_memory.strip():
-                        raise ValueError("create_working_memory.working_memory is empty")
-                    return _ArchiveSummaryResult(
-                        overview=working_memory,
-                        checkpoint_summaries=wm.parse_required_checkpoint_summaries(
-                            args,
-                            len(checkpoint_requests),
-                        ),
-                    )
-                return await vlm.get_completion_async(prompt)
-            except Exception as e:
-                if _is_model_provider_error(e):
-                    raise
-                wm.wm_debug(f"creation failed: {e}")
-                logger.warning(f"WM creation failed: {e}")
-                if checkpoint_requests:
-                    raise
-                turn_count = len([m for m in messages if is_user_query(m)])
-                return (
-                    f"# Session Summary\n\n"
-                    f"**Overview**: {turn_count} turns, {len(messages)} messages"
-                )
-
-        # -------- Branch 2: has prior WM v2 -> tool_call incremental update --------
-        wm.wm_debug(f"branch=UPDATE (prior WM={len(latest_archive_overview)}B)")
-        try:
-            reminders = wm.build_wm_section_reminders(latest_archive_overview)
-            if reminders:
-                wm.wm_debug(f"section_reminders injected ({len(reminders)}B)")
-            update_prompt = render_prompt(
-                "compression.ov_wm_v2_update",
+            prompt = render_prompt(
+                "compression.ov_wm_v2",
                 {
                     "messages": formatted,
-                    "latest_archive_overview": latest_archive_overview,
-                    "wm_section_reminders": reminders,
+                    "latest_archive_overview": latest_archive_overview or "",
                     "checkpoint_instructions": checkpoint_instructions,
                     "output_language": output_language,
                 },
             )
-            resp = await vlm.get_completion_async(
-                prompt=update_prompt,
-                tools=[WM_UPDATE_TOOL],
-                tool_choice={
-                    "type": "function",
-                    "function": {"name": "update_working_memory"},
-                },
-            )
-        except Exception as e:
-            if _is_model_provider_error(e):
-                raise
-            import traceback as _tb
-
-            wm.wm_debug(f"tool_call raised: {type(e).__name__}: {e} tb={_tb.format_exc()[-400:]}")
+            # Only successful response parsing may fall back. Every model-call
+            # failure, including an opaque legacy error, must reach task failure.
             if checkpoint_requests:
-                raise
-            logger.warning("WM update tool_call failed (%s); falling back to creation prompt", e)
-            return await self._fallback_generate_wm_creation(
-                formatted, messages, latest_archive_overview, output_language
+                response = await vlm.get_completion_async(
+                    prompt=prompt,
+                    tools=[WM_CREATE_WITH_CHECKPOINTS_TOOL],
+                    tool_choice={
+                        "type": "function",
+                        "function": {"name": "create_working_memory"},
+                    },
+                )
+            else:
+                return await vlm.get_completion_async(prompt)
+            if not (
+                getattr(response, "has_tool_calls", False) and getattr(response, "tool_calls", None)
+            ):
+                raise ValueError(
+                    "Working Memory creation returned no create_working_memory tool call"
+                )
+            args = response.tool_calls[0].arguments
+            if isinstance(args, str):
+                args = json.loads(args)
+            if not isinstance(args, dict):
+                raise ValueError("create_working_memory arguments must be an object")
+            working_memory = args.get("working_memory")
+            if not isinstance(working_memory, str) or not working_memory.strip():
+                raise ValueError("create_working_memory.working_memory is empty")
+            return _ArchiveSummaryResult(
+                overview=working_memory,
+                checkpoint_summaries=wm.parse_required_checkpoint_summaries(
+                    args, len(checkpoint_requests)
+                ),
             )
+
+        # -------- Branch 2: has prior WM v2 -> tool_call incremental update --------
+        wm.wm_debug(f"branch=UPDATE (prior WM={len(latest_archive_overview)}B)")
+        reminders = wm.build_wm_section_reminders(latest_archive_overview)
+        if reminders:
+            wm.wm_debug(f"section_reminders injected ({len(reminders)}B)")
+        update_prompt = render_prompt(
+            "compression.ov_wm_v2_update",
+            {
+                "messages": formatted,
+                "latest_archive_overview": latest_archive_overview,
+                "wm_section_reminders": reminders,
+                "checkpoint_instructions": checkpoint_instructions,
+                "output_language": output_language,
+            },
+        )
+        resp = await vlm.get_completion_async(
+            prompt=update_prompt,
+            tools=[WM_UPDATE_TOOL],
+            tool_choice={
+                "type": "function",
+                "function": {"name": "update_working_memory"},
+            },
+        )
 
         has_tc = bool(getattr(resp, "has_tool_calls", False) and getattr(resp, "tool_calls", None))
         _preview = (str(resp)[:200]).replace(chr(10), " ")
@@ -3231,26 +3193,17 @@ class Session:
         )
         from openviking.prompts import render_prompt
 
-        try:
-            prompt = render_prompt(
-                "compression.ov_wm_v2",
-                {
-                    "messages": formatted_messages,
-                    "latest_archive_overview": prior_overview,
-                    "checkpoint_instructions": "",
-                    "output_language": output_language,
-                },
-            )
-            vlm = await self._get_vlm_config()
-            return await vlm.get_completion_async(prompt)
-        except Exception as e:
-            if _is_model_provider_error(e):
-                raise
-            logger.warning(f"WM creation fallback failed: {e}")
-            turn_count = len([m for m in messages if is_user_query(m)])
-            return (
-                f"# Session Summary\n\n**Overview**: {turn_count} turns, {len(messages)} messages"
-            )
+        prompt = render_prompt(
+            "compression.ov_wm_v2",
+            {
+                "messages": formatted_messages,
+                "latest_archive_overview": prior_overview,
+                "checkpoint_instructions": "",
+                "output_language": output_language,
+            },
+        )
+        vlm = await self._get_vlm_config()
+        return await vlm.get_completion_async(prompt)
 
     async def _write_to_agfs_async(
         self,

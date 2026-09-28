@@ -3,8 +3,8 @@
 """The sole retry owner for non-streaming model requests.
 
 SDKs and callbacks must execute once. Credential wrappers explicitly delegate
-one attempt to their selected backend. Independent nested calls retain their
-own budgets. Workflows must not replay a terminal model outcome.
+one attempt to their selected backend. All calls in an offline task share one
+extra-attempt budget. Workflows must not replay a terminal model outcome.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from typing import Awaitable, Callable, Sequence, TypeVar
 from uuid import uuid4
 
 from openviking.utils.model_retry import classify_api_error
+from openviking.utils.retry_budget import RetryBudget, configured_model_retries
 
 T = TypeVar("T")
 _logger = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ class ModelWorkload:
     stage: str = "other"
     deadline_at: float | None = None
     root_task_id: str = ""
+    retry_budget: RetryBudget | None = field(default=None, compare=False, repr=False)
 
 
 _workload: ContextVar[ModelWorkload | None] = ContextVar("model_workload", default=None)
@@ -110,7 +112,8 @@ def delegate_model_call(adapter: object):
     """Let a credential wrapper invoke exactly one attempt of this backend.
 
     This permission is tied to the selected adapter and execution task. A child
-    task or an independent nested model call must obtain its own retry budget.
+    task or an independent nested model call keeps its own attempt state, while
+    still consuming the same offline task budget on retries.
     """
     token = _delegation.set(_Delegation(adapter, _execution_identity()))
     try:
@@ -154,6 +157,7 @@ def current_model_workload() -> ModelWorkload:
         stage=stage if stage in STAGES else "other",
         deadline_at=bound.deadline_at if bound else None,
         root_task_id=root_task_id,
+        retry_budget=bound.retry_budget if bound else None,
     )
 
 
@@ -164,7 +168,9 @@ def model_workload(
     workload: str = "offline",
     stage: str = "other",
     deadline_at: float | None = None,
-    root_task_id: str = "",
+    root_task_id: str | None = None,
+    max_retries: int | None = None,
+    retry_budget: RetryBudget | None = None,
 ):
     """Bind policy to this execution context, never to a shared model instance.
 
@@ -177,8 +183,35 @@ def model_workload(
         raise ValueError("workload must be online or offline")
     if deadline_at is not None and not math.isfinite(deadline_at):
         raise ValueError("deadline_at must be finite")
+    from openviking.service.task_work_index import get_task_context
+
+    parent = _workload.get()
+    task = get_task_context()
+    if root_task_id is None:
+        root_task_id = task.task_id if task else parent.root_task_id if parent else ""
+    root_task_id = str(root_task_id or (task.task_id if task else ""))
+    budget = None
+    if workload == "offline":
+        budget = retry_budget
+        if (
+            budget is None
+            and parent is not None
+            and parent.workload == "offline"
+            and parent.root_task_id == root_task_id
+        ):
+            budget = parent.retry_budget
+        if budget is None:
+            limit = configured_model_retries() if max_retries is None else max_retries
+            if task is not None and task.task_id == root_task_id and task.work_index is not None:
+                budget = task.work_index.retry_budget(root_task_id, limit)
+            elif root_task_id:
+                from openviking.service.task_tracker import get_task_tracker
+
+                budget = get_task_tracker().model_retry_budget(root_task_id, limit)
+            else:
+                budget = RetryBudget(limit)
     token = _workload.set(
-        ModelWorkload(operation, workload, stage, deadline_at, str(root_task_id or ""))
+        ModelWorkload(operation, workload, stage, deadline_at, root_task_id, budget)
     )
     try:
         yield
@@ -265,8 +298,8 @@ class RetryContext:
     """Mutable state shared by every attempt of one logical model call.
 
     The context is process-local. Credential failover and explicit adapter
-    delegation share it, while an independent nested model call creates a new
-    context and budget. It is not a durable, cross-worker attempt ledger.
+    delegation share it. Independent calls keep separate routing/metric state
+    but reference the same task budget. This is not a durable retry ledger.
     """
 
     model_type: str
@@ -275,18 +308,22 @@ class RetryContext:
     stage: str
     deadline_at: float | None
     root_task_id: str
-    max_attempts: int
+    budget: RetryBudget | None
     candidates: int
     logical_call_id: str = field(default_factory=lambda: uuid4().hex)
     attempts: int = 0
     route: int = 0
     disabled_routes: set[int] = field(default_factory=set, repr=False)
     _finished: bool = field(default=False, init=False, repr=False)
+    _last_error: Exception | None = field(default=None, init=False, repr=False)
+    _retry_kind: str = field(default="", init=False, repr=False)
+    _retry_decision: str = field(default="", init=False, repr=False)
 
     @classmethod
     def create(cls, model_type: str, max_retries: int, candidates: int) -> RetryContext:
         scope = current_model_workload()
-        max_attempts = max(0, int(max_retries)) + 1 if scope.workload == "offline" else 1
+        # Adapter max_retries remains accepted for compatibility. The offline
+        # task's allowance is fixed at workload entry, regardless of provider.
         return cls(
             model_type=model_type,
             operation=scope.operation,
@@ -294,7 +331,7 @@ class RetryContext:
             stage=scope.stage,
             deadline_at=scope.deadline_at,
             root_task_id=scope.root_task_id,
-            max_attempts=max_attempts,
+            budget=scope.retry_budget,
             candidates=candidates,
         )
 
@@ -328,7 +365,7 @@ class RetryContext:
             error_class,
         )
         self.emit("decision", decision="stop", reason=reason, owner="model")
-        if reason in {"max_attempts", "deadline", "backoff_limit"}:
+        if reason in {"retry_budget", "deadline", "backoff_limit"}:
             self.emit("exhausted", reason=reason)
         self.finish("error")
         terminal = ModelCallError(reason, error_class, self.attempts, self.logical_call_id)
@@ -351,8 +388,15 @@ class RetryContext:
     def before_attempt(self) -> None:
         remaining = self.remaining()
         if remaining is not None and remaining <= 0:
-            self.stop("deadline", "transient")
+            self.stop("deadline", "transient", self._last_error)
+        if self.attempts:
+            if self.budget is None or not self.budget.try_consume():
+                self.stop("retry_budget", self._retry_kind, self._last_error)
+            self.emit(
+                "decision", decision=self._retry_decision, reason=self._retry_kind, owner="model"
+            )
         self.attempts += 1
+        self._last_error = None
 
     def failed(self, error: Exception) -> float:
         kind = classify_api_error(error)
@@ -365,8 +409,8 @@ class RetryContext:
             self.disabled_routes.add(self.route)
             if len(self.disabled_routes) == self.candidates:
                 self.stop(kind, kind, error)
-        if self.attempts >= self.max_attempts:
-            self.stop("max_attempts", kind, error)
+        if self.budget is None or self.budget.retry_count >= self.budget.max_retries:
+            self.stop("retry_budget", kind, error)
         next_route = next(
             (self.route + offset) % self.candidates
             for offset in range(1, self.candidates + 1)
@@ -383,12 +427,9 @@ class RetryContext:
         remaining = self.remaining()
         if remaining is not None and delay >= remaining:
             self.stop("deadline", kind, error)
-        self.emit(
-            "decision",
-            decision="failover" if next_route != self.route else "retry",
-            reason=kind,
-            owner="model",
-        )
+        self._last_error = error
+        self._retry_kind = kind
+        self._retry_decision = "failover" if next_route != self.route else "retry"
         self.route = next_route
         return delay
 
@@ -473,11 +514,22 @@ async def run_model_async(
     with _activate_retry_context(context):
         try:
             while True:
-                context.before_attempt()
                 attempt: asyncio.Future | None = None
+                started = False
+
+                async def invoke():
+                    nonlocal started
+                    # Reserve only once the attempt task actually runs. A
+                    # cancellation while scheduled must not spend a retry.
+                    context.before_attempt()
+                    started = True
+                    return await callbacks[context.route]()
+
                 try:
                     remaining = context.remaining()
-                    attempt = asyncio.ensure_future(callbacks[context.route]())
+                    if remaining is not None and remaining <= 0:
+                        context.stop("deadline", "transient", context._last_error)
+                    attempt = asyncio.ensure_future(invoke())
                     if remaining is None:
                         result = await asyncio.shield(attempt)
                     else:
@@ -489,12 +541,16 @@ async def run_model_async(
                 except asyncio.CancelledError:
                     if attempt is not None:
                         _cancel_in_background(attempt)
-                    context.emit("attempt", result="cancelled", error_class="cancelled")
+                    if started:
+                        context.emit("attempt", result="cancelled", error_class="cancelled")
                     raise
                 except _ModelDeadlineExceeded:
-                    context.emit("attempt", result="error", error_class="transient")
+                    if started:
+                        context.emit("attempt", result="error", error_class="transient")
                     context.stop("deadline", "transient")
                 except Exception as error:
+                    if not started:
+                        raise
                     delay = context.failed(error)
                 else:
                     # Reject a result that crossed the deadline after the readiness

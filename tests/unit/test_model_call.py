@@ -1,13 +1,15 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
 import asyncio
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
 
 from openviking.metrics.datasources.model_retry import ModelRetryEventDataSource
-from openviking.service.task_work_index import bind_task_context
+from openviking.service.task_work_index import TaskWorkIndex, bind_task_context
 from openviking.storage.queuefs.embedding_msg import EmbeddingMsg
 from openviking.storage.queuefs.semantic_msg import SemanticMsg
 from openviking.telemetry.context import bind_telemetry_stage, get_current_telemetry_stage
@@ -24,6 +26,7 @@ from openviking.utils.model_call import (
     run_model_sync,
 )
 from openviking.utils.model_retry import is_retryable_api_error, retry_async
+from openviking.utils.retry_budget import RetryBudget
 
 
 @pytest.fixture
@@ -33,6 +36,12 @@ def events(monkeypatch):
         ModelRetryEventDataSource, "_emit", lambda name, payload: events.append((name, payload))
     )
     monkeypatch.setattr("openviking.utils.model_call.random.uniform", lambda *_: 0)
+    monkeypatch.setattr("openviking.utils.model_call.configured_model_retries", lambda: 3)
+    index = TaskWorkIndex()
+    monkeypatch.setattr(
+        "openviking.service.task_tracker.get_task_tracker",
+        lambda: SimpleNamespace(model_retry_budget=index.retry_budget),
+    )
     return events
 
 
@@ -79,11 +88,12 @@ async def test_retry_context_is_shared_by_failover_attempts_and_restored(events)
         context.stage,
         context.deadline_at,
         context.root_task_id,
-        context.max_attempts,
+        context.budget.max_retries,
         context.attempts,
         context.route,
         context.disabled_routes,
-    ) == ("add_resource", "offline", "parse", deadline, "task-123", 4, 2, 1, {0})
+    ) == ("add_resource", "offline", "parse", deadline, "task-123", 3, 2, 1, {0})
+    assert context.budget.retry_count == 1
     assert current_retry_context() is None
 
 
@@ -111,6 +121,7 @@ def test_nested_model_call_gets_an_independent_retry_context(events):
     assert outer_before is outer_after
     assert nested_context is not outer_before
     assert outer_before.attempts == nested_context.attempts == 1
+    assert outer_before.budget is nested_context.budget
     assert current_retry_context() is None
 
 
@@ -263,7 +274,7 @@ async def test_delegation_is_adapter_specific_and_does_not_transfer_to_child_tas
             await run_model_async(request, model_type="vlm", adapter=independent)
         with pytest.raises(TimeoutError):
             await asyncio.create_task(run_model_async(request, model_type="vlm", adapter=selected))
-    assert sent == 8
+    assert sent == 5  # Two first attempts plus three shared retries.
     assert len([e for e in events if e[0] == "model_retry.logical_call"]) == 2
 
 
@@ -359,7 +370,7 @@ async def test_auth_route_is_removed_and_transient_route_uses_remaining_budget(e
         with pytest.raises(RuntimeError) as exc:
             await run_model_async(auth, alternatives=[transient], model_type="embedding")
     assert sent == [1, 3]
-    assert exc.value.model_call_error.reason == "max_attempts"
+    assert exc.value.model_call_error.reason == "retry_budget"
 
 
 @pytest.mark.asyncio
@@ -513,6 +524,7 @@ async def test_cancellation_during_backoff_has_no_extra_attempt(events, monkeypa
         raise TimeoutError()
 
     with model_workload("session_commit"):
+        budget = current_model_workload().retry_budget
         task = asyncio.create_task(run_model_async(request, model_type="vlm"))
     await started.wait()
     task.cancel()
@@ -520,6 +532,7 @@ async def test_cancellation_during_backoff_has_no_extra_attempt(events, monkeypa
         await task
     assert len([e for e in events if e[0] == "model_retry.attempt"]) == 1
     assert [p["result"] for e, p in events if e == "model_retry.logical_call"] == ["cancelled"]
+    assert budget.retry_count == 0
 
 
 @pytest.mark.asyncio
@@ -541,7 +554,7 @@ async def test_parallel_online_offline_scopes_do_not_mutate_model_config(events)
     assert current_model_workload().workload == "online"
 
 
-def test_sync_recovery_and_normal_fanout_have_independent_budgets(events):
+def test_sync_recovery_and_normal_fanout_share_only_extra_attempts(events):
     sent = 0
 
     def request():
@@ -576,3 +589,139 @@ def test_message_roundtrip_preserves_operation_and_absolute_deadline(kind):
     del legacy["model_operation"], legacy["model_deadline_at"]
     assert cls.from_dict(legacy).model_operation == "other"
     assert cls.from_dict(legacy).model_deadline_at is None
+
+
+@pytest.mark.asyncio
+async def test_task_budget_survives_summary_embedding_queue_roundtrip_and_success(events):
+    sent = []
+
+    async def request(name, failures):
+        local_attempt = 0
+
+        async def io():
+            nonlocal local_attempt
+            local_attempt += 1
+            sent.append(name)
+            if local_attempt <= failures:
+                raise TimeoutError(name)
+            return name
+
+        return await run_model_async(
+            io, model_type="embedding" if name == "embed" else "vlm", max_retries=99
+        )
+
+    with model_workload("add_resource", root_task_id="task-a", max_retries=3):
+        budget = current_model_workload().retry_budget
+        assert await request("parse", 0) == "parse"
+        semantic_data = SemanticMsg(uri="viking://resources/a", context_type="resource").to_dict()
+
+    # Separate delivery contexts, as in the Semantic/Embedding consumers.
+    semantic = SemanticMsg.from_dict(semantic_data)
+    with model_workload(semantic.model_operation, root_task_id=semantic.root_task_id):
+        assert current_model_workload().retry_budget is budget
+        assert await request("summary", 2) == "summary"
+        assert await request("overview", 0) == "overview"
+        embed_data = EmbeddingMsg(message="a", context_data={"account_id": "account"}).to_dict()
+    embedding = EmbeddingMsg.from_dict(embed_data)
+    with model_workload(embedding.model_operation, root_task_id=embedding.root_task_id):
+        assert await request("embed", 1) == "embed"
+        assert budget.retry_count == 3
+        assert await request("next", 0) == "next"
+        with pytest.raises(TimeoutError) as raised:
+            await request("last", 1)
+        assert raised.value.model_call_error.reason == "retry_budget"
+    assert len(sent) == 6 + 3
+    assert sent.count("last") == 1
+    with model_workload("add_resource", root_task_id="task-b", max_retries=1):
+        assert await request("new-task", 1) == "new-task"
+        assert current_model_workload().retry_budget.retry_count == 1
+
+
+@pytest.mark.asyncio
+async def test_parallel_calls_contend_for_last_retry_without_multiplying_budget(events):
+    n = 12
+    ready = asyncio.Event()
+    first_attempts = 0
+    counts = [0] * n
+    errors = [TimeoutError(f"file-{i}") for i in range(n)]
+
+    async def call(i):
+        async def io():
+            nonlocal first_attempts
+            counts[i] += 1
+            if counts[i] == 1:
+                first_attempts += 1
+                if first_attempts == n:
+                    ready.set()
+                await ready.wait()
+            raise errors[i]
+
+        return await run_model_async(io, model_type="vlm")
+
+    with model_workload("add_resource", max_retries=1):
+        budget = current_model_workload().retry_budget
+        results = await asyncio.gather(*(call(i) for i in range(n)), return_exceptions=True)
+    assert results == errors  # Includes contenders losing after backoff.
+    assert sum(counts) == n + 1
+    assert budget.retry_count == 1
+    assert len([e for e, _ in events if e == "model_retry.attempt"]) == n + 1
+    assert len([e for e, _ in events if e == "model_retry.logical_call"]) == n
+    assert sum(p.get("decision") == "retry" for _, p in events) == 1
+
+
+def test_sync_and_async_workers_share_budget_across_threads(events):
+    n = 8
+    barrier = threading.Barrier(n)
+    budget = RetryBudget(3)
+
+    def worker(i):
+        count = 0
+
+        def io():
+            nonlocal count
+            count += 1
+            if count == 1:
+                barrier.wait(timeout=5)
+            raise TimeoutError()
+
+        async def aio():
+            return io()
+
+        with model_workload("add_resource", retry_budget=budget):
+            with pytest.raises(TimeoutError):
+                if i % 2:
+                    asyncio.run(run_model_async(aio, model_type="embedding"))
+                else:
+                    run_model_sync(io, model_type="vlm")
+        return count
+
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        counts = list(pool.map(worker, range(n)))
+    assert sum(counts) == n + 3
+    assert budget.retry_count == 3
+
+
+def test_nested_workload_inherits_budget_but_online_does_not_spend_it(events):
+    with model_workload("add_resource", max_retries=1):
+        budget = current_model_workload().retry_budget
+        with model_workload("search", workload="online"):
+            with pytest.raises(TimeoutError):
+                run_model_sync(lambda: (_ for _ in ()).throw(TimeoutError()), model_type="vlm")
+        assert budget.retry_count == 0
+        with model_workload("add_resource", stage="file_summary"):
+            assert current_model_workload().retry_budget is budget
+    with model_workload("add_resource", max_retries=0):
+        assert run_model_sync(lambda: "first-ok", model_type="embedding") == "first-ok"
+        with pytest.raises(TimeoutError):
+            run_model_sync(lambda: (_ for _ in ()).throw(TimeoutError()), model_type="embedding")
+        assert current_model_workload().retry_budget.retry_count == 0
+
+
+@pytest.mark.parametrize("value", [-1, True, 1.5])
+def test_task_retry_config_rejects_invalid_allowances(value):
+    from pydantic import ValidationError
+
+    from openviking_cli.utils.config.open_viking_config import ModelRetryConfig
+
+    with pytest.raises(ValidationError):
+        ModelRetryConfig(max_retries=value)

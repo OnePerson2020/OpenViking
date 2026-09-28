@@ -1,8 +1,10 @@
 # OpenViking 模型重试治理：add_resource 与 session_commit
 
-状态：首版实现与回归评审（开发分支，未发布共享服务）。代码基线：`origin/main@611f5c469b2bb8dc6d072b215251379e780d3f23`，2026-09-22。文中次数来自确定性故障注入，不代表线上实测放大率或已节省 Token。统一重试入口已接入主要非流式路径；实际覆盖与限制见第 8 至 10 节。
+状态：2026-09-29，#5301 已改为同一个离线任务共享 R 次额外模型尝试。`RetryBudget.retry_count` 从 0 增长到 R，每次调用的 `RetryContext` 只保存局部尝试、路由和终态，并引用同一个任务预算。第 2 至 5 节描述业务与当前实现；第 1、8 至 10 节保留早期方案与历史验证，其中“每个调用 4 次”和 native 的 20 次请求不是新版本的共享额度验收结果。本次验证记录见第 11 节。
 
 ## 1. 建议与收益证据
+
+本节次数来自改造前基线与早期原型，用于解释重试叠乘问题。
 
 模型调用层应成为唯一自动重试负责人。迁移的 Provider/SDK 每次只发送一个请求（Codex OAuth 401 续期重发等兼容例外见第 9 节）；workflow 和 queue 收到模型终止结果后记录失败或按现有规则降级，不再重新获得一份重试预算。在线调用最多一次，离线调用只对可恢复错误做有限重试；credential failover 同样消耗总次数。
 
@@ -21,55 +23,127 @@ Embedding 耗尽内部重试后，handler 仍把同一消息重新入队。除�
 
 这些证据足以证明结构性重复请求，支持先做收敛。文件摘要、目录 overview、分批与 merge、不同节点向量化属于正常业务扇出，不能以“模型调用数 / add_resource 任务数”衡量重试。历史截图中的 429、积压和累计 Token 也不足以估算重试成本或归因到特定操作。
 
-## 2. 哪一层负责什么
+## 2. 业务中什么时候需要调用模型
 
-| 层次 | 保留的职责 | 自动模型重试规则 |
+模型用于生成或理解内容、计算向量，以及配置启用后的模型重排。读取已有文件、归档消息、写入已生成的向量、等待锁和队列投递本身不需要再次调用模型。一次 OV 请求可能产生多次正常模型调用，不能把它们都算成 retry。以下函数按 #5301 的 `fa3e19439a0977a5ea122709e8d17fa43277b35c` 核对。
+
+### 2.1 资源导入：add_resource
+
+后台入口 `AddResourceProcessor._process()` 绑定 `model_workload("add_resource", root_task_id=msg.task_id)`，再调用 `ResourceService.execute_add_resource_job()`。模型调用发生在后续具体处理环节，而非收到 HTTP 请求时就固定调用一次。
+
+| 业务环节与触发条件 | 具体函数与模型出口 | 哪些是正常调用 |
 | --- | --- | --- |
-| 业务流程 | 划分文件摘要、目录概览、记忆抽取等 logical call，决定失败/降级 | 不因同一个模型失败重跑整个步骤 |
-| 模型调用层 | 分类错误、退避、credential 选择、总次数与 deadline、事件记录 | 唯一负责人，统一 VLM/Embedding 的策略契约 |
-| Provider adapter / SDK | 组装请求、单次 I/O、规范化错误及 usage | 一次调用对应一次 HTTP 请求；关闭 SDK/transport 隐式重试 |
-| QueueFS consumer | 投递、前置条件等待、终态写回、既有恢复 | 模型永久失败/耗尽后终止；不把模型异常当作重新发放预算的理由 |
+| 解析内容：选用需要视觉或语言理解的解析路径 | `VLMProcessor.understand_image()` / `understand_page()` / `batch_analyze_document()` → `get_vision_completion_async()` 或 `get_completion_async()` | 处理不同图片、页面或批次是新调用；纯文本读取、确定性解析不因此调用模型 |
+| 文件摘要：没有可复用的摘要，且需由模型生成 | `SemanticTreeExecutor._file_summary_task()` → `SemanticProcessor._generate_single_file_summary()` → `_generate_text_summary()` → `get_completion_async()` | 不同文件各自生成摘要；增量处理可复用已有摘要，部分代码文件可以直接提取结构而不请求模型 |
+| 目录概览：需根据文件摘要和子目录摘要生成或更新概览 | `SemanticProcessor._generate_overview()` → `_single_generate_overview()` / `_batched_generate_overview()` → `get_completion_async()` | 不同目录、分批生成及最终合并都是正常业务生成 |
+| 图片、音视频摘要：格式和模型能力允许且启用了对应理解能力 | `generate_image_summary()` → `get_vision_completion_async()`；`generate_audio_summary()` / `generate_video_summary()` → `get_media_completion_async()` | 理解不同媒体是新调用；媒体上传和状态轮询不能直接视为再次生成。音视频全流程尚未统一接入 RetryContext |
+| 向量化：创建或更新需要 embedding 的索引内容 | `TextEmbeddingHandler.on_dequeue()` → `embed_compat(..., is_query=False)` → `embed_async()` | 不同索引内容各自生成向量；只改元数据、删除索引或写入已有向量不需要重新 embedding |
 
-同一输入、模型目标和输出目的构成一个 logical call。换 credential 或网络重试仍属于同一 call；工具调用后的下一轮生成、格式修复、patch repair 属于新的 call，需要保留各自业务循环上限。不能把预算耗尽后的相同请求改名为“fallback”来绕过限制。
+这些环节可能扇出或并行，也可能因缓存、增量更新、解析器类型或配置被跳过，不是一条每步必调用一次的固定流水线。解析和媒体 helper 中还存在局部异常降级；调用已接入模型 owner，并不自动证明整条业务链路都已正确传播终态。
 
-建议延续现有 `max_retries=3` 的配置意图，迁移为离线单个 logical call 总计 `max_attempts=4`，跨所有 credential 共用。在线显式为 1，失败后也不再切备用请求；可在第一次请求前选择可用 route。策略按调用上下文传入，不在共享模型实例上临时修改 `max_retries`，避免在线与离线并发串扰。
+代码入口：[资源任务](https://github.com/volcengine/OpenViking/blob/fa3e19439a0977a5ea122709e8d17fa43277b35c/openviking/storage/queuefs/add_resource_processor.py#L230)、[文件摘要](https://github.com/volcengine/OpenViking/blob/fa3e19439a0977a5ea122709e8d17fa43277b35c/openviking/storage/queuefs/semantic_processor.py#L1277)、[目录概览](https://github.com/volcengine/OpenViking/blob/fa3e19439a0977a5ea122709e8d17fa43277b35c/openviking/storage/queuefs/semantic_processor.py#L1743)、[向量消费](https://github.com/volcengine/OpenViking/blob/fa3e19439a0977a5ea122709e8d17fa43277b35c/openviking/storage/collection_schemas.py#L661)、[解析理解](https://github.com/volcengine/OpenViking/blob/fa3e19439a0977a5ea122709e8d17fa43277b35c/openviking/parse/vlm.py#L65)。
 
-Operation 是归属与截止时间的上层边界，不能让整棵资源树的所有首次请求争抢“4 次”。若增加 operation quota，优先限制额外尝试，并保留业务生成循环的硬上限；跨 worker 的全局次数/Token 硬预算需要共享持久化，不能靠复制一个整数实现。一期不把这一分布式能力作为已有功能。
+### 2.2 会话提交：session_commit
 
-## 3. 两条链路如何接入
+Phase 1 负责归档、状态与投递，不直接调用模型。Phase 2 的 `Session._run_memory_extraction()` 绑定离线 workload；是否生成 Working Memory、抽取记忆或技能由配置、memory policy 和待处理内容决定。
 
-**add_resource。** 从入口保留 root task 与 operation 归属；parse、文件摘要和 overview 每次生成建立独立 call，Embedding 消息继承归属与绝对 deadline。收到模型永久错误或预算耗尽后，Embedding consumer 返回 FAILED、通知 request wait tracker 并走现有任务终态/ACK 链路，禁止再次 enqueue。Semantic consumer 同样必须识别该终止类型。熔断开启时在当前 delivery 内做可取消的有限等待，最多等待进入时剩余的一个冷却窗口，且不超过已有绝对 deadline；其它消息不能延长本条等待。等待不消耗模型 attempts、不重新入队，恢复后继续，仍未获准才终止；`queue_enqueued_at` 会在入队时刷新，不能把它当作任务原始 deadline。
+| 业务环节 | 具体函数与模型出口 | 正常调用边界 |
+| --- | --- | --- |
+| 归档摘要 / Working Memory 创建或更新 | `_run_archive_summary()` → `_generate_archive_summary_async()` → `get_completion_async()` | 为当前归档生成或更新工作记忆；长会话分批时可能多次调用 |
+| 长期记忆抽取 | `SessionCompressorV3.extract_long_term_memories()` → `_extract_user_memories()` → `ExtractLoop.run()` → `_call_llm()` → `get_completion_async()` | 模型选择工具、读取结果后进入下一轮是业务交互，不是上一次网络请求的重试 |
+| 可选技能抽取及经验更新 | `extract_session_skills()` / `train_from_extracted_cases()` 及其内部抽取、优化流程 | 仅符合配置和输入条件时执行；每个生成步骤可以有独立输入 |
+| 抽取结果的摘要和索引 | 后续 SemanticQueue / EmbeddingQueue 中的摘要、概览和 embedding 出口 | 生成不同记忆节点的摘要或向量是正常扇出 |
 
-文件摘要当前有捕获异常并降级为空摘要的行为。接入时可以保留既有局部降级，但必须记录该 logical call 的失败，避免被外围重新生成；operation 预算耗尽或取消则应停止后续模型调度。向量写入失败属于存储问题，不能为了重试写入再次调用 Embedding。Semantic 同样在开始执行后不因存储异常重放整条消息，避免重复已成功摘要；只保留执行前锁冲突的调度重入。后续恢复应复用已生成结果或明确标失败，具体存储重试只能包住已确认幂等的 I/O。
+成功响应的 JSON/工具参数修复、patch repair 由业务循环自己的上限约束，本轮模型故障 retry_count 不代替这些上限。模型调用已经报错或耗尽重试后，不能改称“格式修复”再发同一个请求。
 
-**session_commit。** Phase 1 负责归档、状态和投递，不直接调用模型。Phase 2 的 archive_summary、长期记忆和技能抽取接入同一个模型 owner，去掉对模型失败的整步骤重试。存储类重试只留在已确认幂等的具体 I/O 边界，不能继续包住整个抽取函数。最终失败沿用 `.failed.json` 与已完成步骤记录，已成功步骤不重复执行。等待前序 archive 的 requeue 仍是调度等待，不记为模型 attempt。
+代码入口：[Phase 2](https://github.com/volcengine/OpenViking/blob/fa3e19439a0977a5ea122709e8d17fa43277b35c/openviking/session/session.py#L1942)、[Working Memory](https://github.com/volcengine/OpenViking/blob/fa3e19439a0977a5ea122709e8d17fa43277b35c/openviking/session/session.py#L2921)、[长期记忆入口](https://github.com/volcengine/OpenViking/blob/fa3e19439a0977a5ea122709e8d17fa43277b35c/openviking/session/compressor_v3.py#L419)、[每轮 LLM 调用](https://github.com/volcengine/OpenViking/blob/fa3e19439a0977a5ea122709e8d17fa43277b35c/openviking/session/memory/extract_loop.py#L1090)。
 
-ExtractLoop 的工具轮次、格式/patch repair 仍由业务层控制，每次真正的新生成记作新 logical call。working-memory update 失败后的 creation fallback 必须区分业务不适用与模型终止：模型耗尽、auth、内容安全等不能再次触发生成。已确认安全拒绝也不能通过换 credential 或格式修复绕过。
+### 2.3 在线查询也可能用模型，但不使用离线重试额度
 
-**错误策略。** 429 限流、连接/超时和可恢复 5xx 可在离线策略下退避，使用 jitter、可用的 Retry-After，并将排队/退避/请求耗时纳入同一 deadline。401/403、额度耗尽不在同一 credential 上重试；为兼容已配置的多凭证容灾，可显式允许离线切换其他 credential，但消耗同一总次数，且不回到已失败凭证。400/过长输入/内容安全/unknown 直接终止。额度耗尽与短期限流同为 429 时，按结构化错误码区别处理。取消立即传播，流式响应已经输出内容后不自动重放。
+| 查询能力 | 模型触发点 | 当前范围 |
+| --- | --- | --- |
+| find / search 的查询向量 | `HierarchicalRetriever.retrieve()` → `embed_compat(..., is_query=True)` | 需要把查询编码为向量时调用 embedding；同请求缓存命中可复用结果。向量库相似度检索本身不再调用生成模型 |
+| search 的意图分析、查询展开 | `IntentAnalyzer.analyze()` → `get_completion_async()`；`expand_queries()` 在模式和会话上下文满足条件时使用它 | 可选能力，不是每次 find/search 都要调用 LLM |
+| recall 上下文摘要改写 | `rewrite_context()` → `planner.get_completion_async()` | 需要改写且输入非空时生成摘要；超时或失败走已有降级 |
+| 模型重排 | `HierarchicalRetriever._rerank_scores()` → `RerankClient.rerank_batch()` | 配置了 reranker 且相应检索模式启用时调用；分数归一化、规则排序不等于调用重排模型。Rerank 尚未接入 #5301 owner |
 
-同步请求在调用前和返回后检查 deadline，超期结果不能上报成功；阻塞 I/O 的中断仍依赖 adapter 的 transport timeout，因此不承诺线程在 operation deadline 时立即返回。异步请求由 owner 使用剩余时间限制等待。共享 Semantic worker 按每个 executor 恢复 operation、workload、stage 和绝对 deadline，不能继承上一条消息的上下文。
+在线/离线由发起业务的 workload 决定，不由函数名决定。用户直接 find/search 是在线；离线记忆处理内部若发起检索，其中接入统一入口的模型调用应继承该离线任务的共享额度。独立提交的新任务不与旧任务共享。pi/Codex 自己的推理模型不经过 OV，只有它们调用 OV 后触发的上述处理属于本方案。
 
-## 4. RetryContext 与恢复的真实边界
+代码入口：[查询向量](https://github.com/volcengine/OpenViking/blob/fa3e19439a0977a5ea122709e8d17fa43277b35c/openviking/retrieve/hierarchical_retriever.py#L149)、[意图分析](https://github.com/volcengine/OpenViking/blob/fa3e19439a0977a5ea122709e8d17fa43277b35c/openviking/retrieve/intent_analyzer.py#L58)、[上下文改写](https://github.com/volcengine/OpenViking/blob/fa3e19439a0977a5ea122709e8d17fa43277b35c/openviking/retrieve/context_assembler/rewrite.py#L77)、[模型重排](https://github.com/volcengine/OpenViking/blob/fa3e19439a0977a5ea122709e8d17fa43277b35c/openviking/retrieve/hierarchical_retriever.py#L371)。
 
-完整契约中的上下文只需携带执行所需的最小信息（当前实际接入范围见下文）：operation/stage/workload、root task/logical call 标识、已用次数/上限、绝对 deadline；reason/owner 随决策事件记录。每个并发 call 有独立预算，credential 切换共享同一个对象。正常交接或主动 requeue 时保持 identity、已用次数与 deadline，不重新初始化。
+## 3. 什么时候产生 retry，怎么共享计数
 
-**仅给 SessionCommitMsg 或 EmbeddingMsg 加字段不能保证崩溃安全。** QueueFS 在 dequeue 后、ACK 前崩溃会恢复旧消息；若新计数只在内存或下一条消息中，恢复仍可拿到旧预算。当前 TaskWorkIndex 也是从队列重建的运行时索引，不能当持久预算账本。
+### 3.1 只有失败后的额外模型请求才消耗额度
 
-一期原型证明单次执行内次数上限和正常序列化交接。首版实现已消除迁移路径中“模型失败 → 主动重新入队/整步骤重跑”；EmbeddingMsg / SemanticMsg 保留 operation 与可选绝对 deadline。默认未配置 operation deadline；SessionCommitMsg 的总 deadline 和持久 attempt 预占尚未接入。QueueFS 崩溃重投保留既有语义，不承诺跨重启恰好一次或总次数硬上限。
+同一次离线任务共享 `RetryBudget.retry_count`，由模型调用层统一扣减。文件摘要、目录概览、记忆抽取和 embedding 的首次正常请求都不扣；某次请求失败后需要重发或切 credential，再扣一次。成功不清零，换模型、换凭证或进入下游队列不重新获得额度。在线模型故障不自动重试。
 
-若验收要求“同一个工作跨任意重启也最多 N 次”，还必须在现有独占处理边界内，先持久化 attempt 预占再发送请求，恢复时对结果未知的预占不返还；持久化失败不发送。预算与任务代次要绑定，旧快照不能覆盖新值。这个窄持久化接入需要真实 QueueFS 故障测试，不能用新增字段或本原型替代证明；未完成时不得对外承诺该保证，也不扩展成通用 durable scheduler。
+| 上一次请求的结果 | 是否可以再请求 | retry_count 口径 |
+| --- | --- | --- |
+| 短期限流 429、可恢复 5xx、连接错误、超时 | 离线且有剩余额度、未取消或超期时，退避后重试 | 每次额外尝试消耗 1；Retry-After 和等待本身不消耗次数 |
+| 401/403、欠费、配额耗尽 | 不重试原凭证；若允许容灾且有其他有效候选，可在离线切换 | 切换后的额外尝试也消耗 1；没有候选则失败上抛 |
+| 参数错误、输入过大、内容安全拒绝、unknown | 不自动重试或遍历凭证 | 不产生额外模型请求，直接失败 |
+| 取消、deadline 到期或共享额度不足 | 不再重试当前失败调用 | 向上传播终止结果；不能由外层重跑步骤或消息来重置计数 |
+| 成功后处理下一个文件、下一批内容或下一轮工具结果 | 属于新的正常业务调用 | 首次请求不消耗 retry_count；它若失败，重试仍用同一任务的剩余额度 |
+| 锁冲突、breaker 准入等待、已生成向量的写入失败 | 由对应调度或存储逻辑处理 | 不是模型重试，不能因此重新调用模型 |
 
-## 5. Metrics：需要补，但先固定计数口径
+错误判断优先使用 provider 明确分类，再看结构化语义 code、HTTP status，最后才解析文本。例如 `400 + AccountOverdue` 是凭证问题，`429 + insufficient_quota` 是配额问题，不能统一按 400 永久失败或 429 短期限流处理。超时后的重试也不等于 provider 一定没有执行上一次请求；retry_count 约束尝试次数，不承诺恰好一次生成或准确计费。
 
-保留现有 VLM/Embedding/operation Token 指标，新增四个 family 即可。当前旧 calls 指标按 SDK 调用周围打点；SDK 内部再发请求可能不可见，因此旧 calls 不能直接当作统一的物理 HTTP 计数。
+### 3.2 一个具体计数例子
+
+以下说明当前计数规则，假设同一次离线导入共享 `model_retry.max_retries=3`；摘要、概览与 Embedding 跨消息恢复的对应回归见 `tests/unit/test_model_call.py`：
+
+| 顺序 | 业务动作 | 共享 retry_count |
+| --- | --- | ---: |
+| 1 | a.md 首次摘要成功 | 0 |
+| 2 | b.md 首次摘要遇到 429，使用一次额度重试 | 1 |
+| 3 | b.md 重试仍超时，再使用一次额度重试，随后成功 | 2 |
+| 4 | 目录概览首次生成成功 | 2 |
+| 5 | 一次 embedding 首次遇到 503，使用最后一次额度后成功 | 3 |
+| 6 | 后续另一个节点首次 embedding 成功 | 3 |
+| 7 | 再有模型调用首次失败 | 3，不再重试，按任务既有失败规则结束 |
+
+因此，额度耗尽不等于禁止剩余正常首次调用；若任务已经因某个不可恢复错误进入失败或取消状态，则由既有任务逻辑停止后续调度。若正常业务需要 M 次模型调用，共享额外额度为 R，则在每次尝试恰好发出一次模型请求的路径上，最多为 M + R 次，而非每个调用各自乘以 1 + R。首次模型调用数 M 仍受输入规模及业务循环上限影响，不能把共享 retry_count 宣传成整个任务的固定请求数上限。
+
+## 4. 当前结构：任务共享预算，每次调用独立状态
+
+`retry_count` 放在 [RetryBudget](../../openviking/utils/retry_budget.py)，`RetryContext.budget` 引用它。这里的“一次模型调用”指一次具体生成或向量计算，例如为 b.md 生成摘要；它可经历首次尝试、429 后重试和切 credential。它不是整个 HTTP 请求，也不是整个 add_resource 任务。
+
+| 层次 | 具体函数 | 保存和传递什么 |
+| --- | --- | --- |
+| 任务入口 | `AddResourceProcessor._process()`；`Session._run_memory_extraction()` | `model_workload(..., root_task_id=task_id)` 确定离线策略与任务预算 |
+| 同进程任务索引 | `TaskWorkIndex.retry_budget()`；`TaskTracker.model_retry_budget()` | 按任务 ID 获取同一个 `RetryBudget`，含 `max_retries` 和已用 `retry_count` |
+| 队列与 DAG | `TaskWorkQueueMiddleware.process()`；`SemanticTreeExecutor._run_work_with_context()` | 绑定相同任务索引，恢复各 executor 捕获的 workload/budget，避免共用 worker 串用其他任务的上下文 |
+| 模型尝试 | `run_model_sync/async()` → `RetryContext.before_attempt()` | 首次不扣；退避结束、额外 adapter 尝试开始前，以线程锁原子扣 1；竞争失败保留原异常，不记虚假 attempt |
+| 单次调用状态 | `RetryContext` | 自己的 attempts、route、disabled_routes、deadline、logical_call_id 与终态；并行调用不共用这些可变字段 |
+
+SemanticMsg / EmbeddingMsg 传递任务 ID、operation 和可选 deadline；同进程消费者按任务 ID 取回共享对象，不复制整数。成功、完成当前队列步骤、ACK 失败或同进程重投都不清零；预算随任务记录淘汰或删除而清理，有未完成队列/活跃工作时保留。正常首次调用仍可执行，所以投递重放产生的首次请求数不由 R 单独约束；本方案不提供恰好一次处理。
+
+配置在 `ov.conf` 顶层，默认整个任务共享 3 次额外尝试，`0` 禁止额外尝试：
+
+```json
+{ "model_retry": { "max_retries": 3 } }
+```
+
+预算首次绑定任务时固定。`embedding.max_retries` / `vlm.max_retries` 为兼容旧路径仍可读取，但不再为已迁移的 owner 路径发放独立额度；原来用它们禁用重试的部署应改设 `model_retry.max_retries=0`。无 task ID 的显式离线 workload 在本 scope 内共享预算，独立任务各有一份；在线调用仍最多一次。配置是进程级策略，没有新增按账号动态预算或集群共享服务。
+
+SDK/transport 隐式重试继续关闭。Session 不因模型错误重跑整个抽取步骤；Semantic/Embedding 模型终止沿用 FAILED/ACK 出口。breaker 准入等待、退避期间取消、锁等待不消耗 retry_count。同步 I/O 中断仍依赖 transport timeout；deadline 可选，没有新增默认整任务期限。
+
+浩杰的 [#5364](https://github.com/volcengine/OpenViking/pull/5364) 已随 main 进入 #5301；本次继续保留 Working Memory 直接传播模型异常的结构，删除通过错误文本猜测能否 fallback 的逻辑。create/update/fallback 中未带 marker 的 unknown 同样上抛，成功响应的格式解析仍按业务规则处理。#4661 的结构化分类与 unknown fail-fast 已定向吸收，保留 Qin Haojie 的 co-author。最新 main 的 Gemini client 生命周期和 extra_request_body 改动也已合入；Gemini 继续每次请求独立 client 且 SDK attempts=1。
+
+当前主要覆盖非流式 VLM text/vision 和 Embedding。完整音视频、流式、Rerank、第三方 adapter 仍需逐路径迁移验证。共享预算只在同进程、任务记录保留期间有效，不跨 Pod/重启持久化，不包含客户端重新提交的新任务；它也不是共享限流或熔断服务。
+
+代码依据：[模型 owner](../../openviking/utils/model_call.py)、[任务索引](../../openviking/service/task_work_index.py)、[队列绑定](../../openviking/service/task_queue_middleware.py)、[DAG 恢复](../../openviking/storage/queuefs/semantic_executor.py)。
+
+## 5. Metrics：现有实现的计数口径
+
+保留现有 VLM/Embedding/operation Token 指标及四个模型 family。任务共享额度由测试直接校验 RetryBudget 与请求数；Prometheus 仍按每次模型调用和尝试归因，不作为预算账本。旧 calls 指标按 SDK 调用周围打点，SDK 内部再发请求可能不可见，不能直接当作物理 HTTP 计数。
 
 | 指标 | labels | 何时计一次 |
 | --- | --- | --- |
 | `openviking_model_logical_calls_total` | model_type, operation, stage, result | 一个 logical call 最终结束；重试中间失败不计新 call |
 | `openviking_model_attempts_total` | model_type, operation, stage, result, error_class | 单次 adapter 请求结束；需先验证 adapter 与 transport 1:1 |
-| `openviking_model_retry_decisions_total` | model_type, operation, stage, decision, reason, owner | 决定 retry/failover/stop；决定不等于请求已发送 |
-| `openviking_model_retry_exhausted_total` | model_type, operation, stage, reason | call 因次数/deadline/quota 耗尽结束，仅一次 |
+| `openviking_model_retry_decisions_total` | model_type, operation, stage, decision, reason, owner | retry/failover 在扣减成功并开始额外尝试时记录；stop 在终止时记录 |
+| `openviking_model_retry_exhausted_total` | model_type, operation, stage, reason | call 因 retry_budget/deadline/backoff_limit 结束，仅一次；retry_budget 取代旧 max_attempts reason |
 
 operation 统一为 `add_resource` / `session_commit` / `find` / `search` 等固定枚举。当前源码已有 `resources.add_resource`、`add_resource_job`、`session_commit_phase2` 等名字，需要明确映射；队列不能只依赖进程内 telemetry 对象，恢复时从消息继承。stage 同样固定枚举。result、error_class、reason、owner 用受控值；task/session/logical_call/credential ID 以及原始异常内容只进日志或 trace，不进 label。
 
@@ -90,7 +164,7 @@ Dashboard 先展示 attempts / logical calls 与 exhausted / logical calls，按
 | C：真实流程验证 | 故障注入覆盖 429 后成功、持续失败、混合 credential、取消、breaker/deadline；核查失败终态、锁/等待释放、成功步骤和向量不重复生成 |
 | D：恢复保证与灰度 | 如需跨重启次数硬上限，完成预占持久化和各崩溃窗口测试后再承诺；自有环境比对成功率/产物、额外请求、延迟和已知 usage |
 
-先小范围按 provider 与操作灰度。回滚必须成组处理 SDK、模型 owner 与外围失败出口，不能只打开旧 SDK retry 又保留新 owner，也不能恢复无限模型失败 requeue。次数上限可沿用原配置意图；deadline 与可选 operation quota 的生产数值按自有环境完成率和延迟确定，原型的 60 秒仅为测试值。
+先小范围按 provider 与操作灰度。回滚必须成组处理 SDK、模型 owner 与外围失败出口，不能只打开旧 SDK retry 又保留新 owner，也不能恢复无限模型失败 requeue。共享额度使用 model_retry.max_retries；deadline 的生产数值按自有环境完成率和延迟确定，原型的 60 秒仅为测试值。
 
 ## 7. 代码依据
 
@@ -108,7 +182,7 @@ Dashboard 先展示 attempts / logical calls 与 exhausted / logical calls，按
 
 维护约定：以本方案作为策略评审依据；后续改变错误分类、次数、切换、失败出口或指标口径时，同一变更同步修改仓库文档和飞书方案，更新验证证据。
 
-### 已实现的边界
+### 首版历史边界（已由第 4 节的任务预算替代）
 
 开发分支为 `feat/model-retry-governance`。`openviking/utils/model_call.py` 提供 sync/async 唯一 owner；`RetryContext` 保存单次 logical call 的 identity、root task 归属、共享次数、route、deadline 和终态，工作上下文与单次调用状态分开保存，不修改共享模型实例。credential wrapper 只向选中的 adapter 显式委托一次请求；委托绑定 adapter 与当前执行线程/任务，消费后失效。独立子调用、并行任务和不同模型各自建立 logical call，不因处于同一调用栈而跳过预算。未绑定上下文时按在线处理，最多 1 次；两个后台入口明确绑定 offline，使用原配置 `max_retries + 1`，默认共 4 次。该 context 仍为进程内对象，root task 只用于日志与 trace 关联，不代表跨 worker 的持久次数账本。
 
@@ -122,7 +196,7 @@ Embedding 与 Semantic 共用有限的熔断准入等待；等待结束仍被拒
 
 MiniMax 同步 HTTP 使用 `HTTPAdapter(max_retries=0)`，不保留 urllib3 的状态重试规则，由 `response.raise_for_status()` 保留 `HTTPError.response` 和 `Retry-After`。否则即使 `total=0`，状态重试规则仍会把 429/503 包装为没有响应头的 `RetryError`，导致统一 owner 跳过服务端要求的等待。该 adapter 沿用统一的 30 秒等待上限，不新增 provider 专属策略。
 
-### 验证结果
+### 首版历史验证结果
 
 | 验证 | 结果 | 限制 |
 | --- | --- | --- |
@@ -137,7 +211,7 @@ MiniMax 同步 HTTP 使用 `HTTPAdapter(max_retries=0)`，不保留 urllib3 的�
 
 | 回归风险 | 原因与首版行为 | 合入前重点观察 |
 | --- | --- | --- |
-| 短暂故障下成功率下降 | 在线不再多试；离线全局 4 次比过去 12/16/32 次更少；超过 4 个坏 credential 不会继续遍历到末尾 | 同一批固定输入对比产物、成功率、额外请求和尾延迟；允许调整有上限的配置，不恢复叠乘 |
+| 短暂故障下成功率下降 | 在线不再多试；离线单次模型调用默认 4 次比过去 12/16/32 次更少；超过 4 个坏 credential 不会继续遍历到末尾 | 同一批固定输入对比产物、成功率、额外请求和尾延迟；允许调整有上限的配置，不恢复叠乘 |
 | 熔断等待与故障窗口完成率 | 本轮修正为当前 delivery 有限等待，取消可退出；等待期间会占用 consumer 槽位，到期仍失败 | 测试冷却后恢复、并发故障不延长本条等待、deadline 与取消；K8s 最后验证 worker 占用和尾延迟，不恢复无限重入 |
 | 工作流错误暴露更明确 | Session 模型终止不再静默变成占位摘要；Session 和 Semantic 开始执行后的存储临时错误也可能直接失败 | 确认失败状态和重新提交体验；只在具体幂等存储 I/O 处补重试，不能恢复整个抽取函数重跑 |
 | 错误类型/锁/正常链路兼容 | 回归中已修复 SDK 异常类型被覆盖、breaker 提前失败未释放移交锁两项；native 成功、错误终态、取消和锁释放已验证 | native 并发 add_resource、commit 前序等待、向量写入故障与进程崩溃仍需独立验证 |
@@ -201,6 +275,26 @@ K8s 按约定在本地与 adapter 回归之后执行。按部署文档新建独�
 native 验证发现文件/目录的新指标曾被内层 legacy `semantic_execute` 覆盖；已通过独立 `model_stage` 上下文修正。本次成功导入记录 1 个 `file_summary`、2 个 `directory_overview`，原 Token 指标仍为 `semantic_execute`；session 仍记为 `archive_summary`。修复不改变调用预算或原仪表盘标签，并通过 86 项 owner/executor/metrics/session 回归。
 
 以上是 native 服务入口和真实后台队列的集成验证，不是完整产品 E2E：未覆盖 HTTP server/Ingress、多 Pod、Redis、进程崩溃、真实模型互通、长期记忆 ExtractLoop 协议与质量。Session 场景仅开启 working-memory summary；有限重试对长故障窗口成功率的影响仍需灰度观察。测试 context 保留供后续使用，临时测试 Pod 已删除；共享 QA 服务未改动。
+
+## 11. 2026-09-29 任务共享额度验证
+
+本次在合并 main 的 `a2a5522a3` 基础上实现任务预算，并清理合并遗留的 Semantic 测试冲突标记。最终聚焦回归 **545 passed**，包含 owner、真实 SDK transport、任务索引与队列、DAG 隔离、配置、metrics 和 Session 恢复；Ruff、格式和 diff 检查通过。顶层配置另验证 0、3、7 均可解析。
+
+| 契约 | 验证 |
+| --- | --- |
+| 摘要 → 目录概览 → Embedding 共享 | SemanticMsg/EmbeddingMsg 序列化恢复后仍引用原 budget；成功不清零，不受 adapter 的 max_retries=99 影响 |
+| 并发不超支 | 12 个异步调用争最后 1 次额度，总 attempts=13，额外 metric=1；8 个混合 sync/async 线程共享 R=3，总 attempts=11 |
+| ACK 失败与队列切换 | NamedQueue 真实 middleware + mock AGFS；首次成功耗 1，ACK 失败重投再耗 1，下游队列只剩首次尝试，3 个调用共 5 次；pending work 保护预算，记录删除后可释放 |
+| 取消和隔离 | 退避取消不扣；在线不消费离线额度；独立任务不共享；共用 Semantic worker 恢复各 executor 的预算 |
+| WM 失败出口 | create/update/fallback 的 400、503 和 opaque unknown 均原样上抛，不再通过 fallback 发新请求 |
+
+扩展 Session 回归 **518 passed / 3 failed**（与上述聚焦套件部分重叠，不相加）。3 个失败在未修改的 `a2a5522a3` 使用相同 node ID 全部复现：schema mock 缺 identity_fields、文件系统 mock 缺 exists、初始化模板尾行空格断言；不是本次任务预算引入。复现 node ID：
+
+- `tests/unit/session/memory/test_extract_loop_match_text.py::TestFinalOperationsHydration::test_run_logs_final_operations_after_old_memory_file_is_hydrated`
+- `tests/unit/session/test_event_tag_concurrency.py::test_commit_uses_event_tags_from_lock_protected_meta_snapshot`
+- `tests/unit/session/test_memory_policy.py::test_initialize_memory_files_renders_fields_without_init_value_as_empty`
+
+本次未重跑 native/K8s 或真实模型服务。native_e2e.py 已把持续 429 的断言从 4×M 改为 M+3，并显式配置顶层额度，但第 10 节的旧 native 结果不能作为新预算的运行证据。
 
 2026-09-23 修复 PR 评审发现的 MiniMax 同步响应头丢失问题。新增 10 个真实 requests/urllib3 与 loopback HTTP 场景：429/503 携带 `Retry-After: 60` 时只发送 1 次并以 `backoff_limit` 终止；携带 2 秒或 30 秒时，校验 owner 先选择对应等待值再发送恢复请求；无响应头时离线仍最多 4 次、在线和 401 仍 1 次。测试替换 owner 的 sleep 记录等待值，不进行真实的 30 秒等待；传输层保持真实。修复前 6 项失败、4 项通过，修复后这 10 项及相关 owner/provider/config 回归共 85 项通过。此次未重跑 K8s/STG，前述 7 个 native 场景仍对应 `a13c3e6b2`，不能作为本次修复的 STG 验收结果。
 

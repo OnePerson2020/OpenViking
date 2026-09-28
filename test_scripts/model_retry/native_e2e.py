@@ -213,6 +213,7 @@ async def run_case(case, workspace, evidence):
 
     ModelRetryEventDataSource.record = classmethod(observe)
     config = {
+        "model_retry": {"max_retries": 3},
         "storage": {
             "workspace": str(workspace),
             "agfs": {
@@ -351,14 +352,14 @@ async def run_case(case, workspace, evidence):
                 for event in events
                 if event["event"] == "logical_call" and event.get("model_type") == model_type
             ]
-            factor = 4 if case.endswith("429") else 1
+            extra_attempts = config["model_retry"]["max_retries"] if case.endswith("429") else 0
             physical = sum(request["model_type"] == model_type for request in provider.requests)
             assert logical, "No terminal logical model call was observed"
-            assert physical == len(attempts) == factor * len(logical), (
+            assert physical == len(attempts) == len(logical) + extra_attempts, (
                 physical,
                 len(attempts),
                 len(logical),
-                factor,
+                extra_attempts,
             )
             await asyncio.sleep(0.5)
             assert physical == sum(

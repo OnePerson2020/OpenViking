@@ -492,11 +492,14 @@ async def test_semantic_executor_shares_node_scheduler_across_roots(monkeypatch)
     ctx = RequestContext(user=UserIdentifier("acc1", "user1"), role=Role.USER)
     telemetry_a = OperationTelemetry("semantic-a")
     telemetry_b = OperationTelemetry("semantic-b")
+    work_index = TaskWorkIndex()
     with (
-        bind_task_context("task-a", "acc1", "user1"),
+        bind_task_context("task-a", "acc1", "user1", work_index=work_index),
         bind_telemetry(telemetry_a),
         model_workload("add_resource", deadline_at=111),
     ):
+        budget_a = current_model_workload().retry_budget
+        assert budget_a.try_consume()
         executor_a = SemanticTreeExecutor(
             processor=processor,
             context_type="resource",
@@ -539,6 +542,8 @@ async def test_semantic_executor_shares_node_scheduler_across_roots(monkeypatch)
         assert {(s.operation, s.workload, s.stage, s.deadline_at) for s in scopes} == {
             (operation, workload, "other", deadline)
         }
+        assert all(s.retry_budget is (budget_a if root == root_a else None) for s in scopes)
+    assert budget_a.retry_count == 1
 
 
 @pytest.mark.asyncio

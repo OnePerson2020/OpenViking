@@ -72,6 +72,7 @@ async def test_embedding_terminal_failure_settles_wait_without_requeue(
         )
 
     config = SimpleNamespace(
+        model_retry=SimpleNamespace(max_retries=3),
         storage=SimpleNamespace(vectordb=SimpleNamespace(name="context")),
         embedding=SimpleNamespace(
             dimension=2,

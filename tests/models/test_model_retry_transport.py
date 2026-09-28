@@ -155,8 +155,8 @@ async def test_two_bad_routes_then_recovery_preserves_result_and_active_credenti
 @pytest.mark.parametrize(
     "status,retry_after,recover,expected,reason",
     [
-        (429, "0", False, 4, "max_attempts"),
-        (503, "0", False, 4, "max_attempts"),
+        (429, "0", False, 4, "retry_budget"),
+        (503, "0", False, 4, "retry_budget"),
         (401, "0", False, 1, "auth"),
         (429, "60", False, 1, "backoff_limit"),
         (429, "0", True, 2, None),

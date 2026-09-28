@@ -221,40 +221,18 @@ async def test_malformed_resources_do_not_pause_following_valid_work(semantic_en
 )
 async def test_post_execution_storage_errors_do_not_requeue_or_trip_breaker(semantic_env, error):
     env = semantic_env
-<<<<<<< HEAD
     breaker = CircuitBreaker(failure_threshold=1)
     msg = env.message()
-=======
-    sleep = AsyncMock()
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_processor.asyncio.sleep", sleep)
-    msg = env.message()
-    breaker = CircuitBreaker(failure_threshold=1)
->>>>>>> origin/main
     env.processor._circuit_breakers[msg.account_id] = breaker
     env.dag.run.side_effect = error
 
     result = await asyncio.wait_for(env.processor.on_dequeue(msg.to_dict()), timeout=1)
 
-<<<<<<< HEAD
     assert result.outcome is ProcessOutcome.FAILED
     assert result.error == str(error)
     env.retry_queue.enqueue.assert_not_awaited()
     await _assert_request_failed(env, msg, error)
     breaker.check()
-=======
-    assert result.outcome is ProcessOutcome.REQUEUED
-    env.retry_queue.enqueue.assert_awaited_once()
-    assert env.retry_queue.enqueue.call_args.args[0].id == msg.id
-    assert not env.tracker.is_complete(msg.telemetry_id)
-    assert env.tracker.build_queue_status(msg.telemetry_id)["Semantic"]["requeue_count"] == 1
-    if trips_breaker:
-        with pytest.raises(CircuitBreakerOpen):
-            breaker.check()
-        sleep.assert_awaited_once()
-    else:
-        breaker.check()
-        sleep.assert_not_awaited()
->>>>>>> origin/main
 
 
 @pytest.mark.asyncio
@@ -270,18 +248,12 @@ async def test_permanent_api_error_does_not_open_breaker(semantic_env):
     assert result.error == str(error)
     env.retry_queue.enqueue.assert_not_awaited()
     await _assert_request_failed(env, msg, error)
-<<<<<<< HEAD
     env.processor._account_breaker(msg.account_id).check()
-=======
-    with pytest.raises(CircuitBreakerOpen):
-        env.processor._account_breaker(msg.account_id).check()
->>>>>>> origin/main
 
 
 @pytest.mark.asyncio
 async def test_open_breaker_waits_then_recovers_in_same_delivery(semantic_env):
     env = semantic_env
-<<<<<<< HEAD
     msg = env.message()
     breaker = CircuitBreaker(failure_threshold=1, reset_timeout=0.01)
     env.processor._circuit_breakers[msg.account_id] = breaker
@@ -289,34 +261,9 @@ async def test_open_breaker_waits_then_recovers_in_same_delivery(semantic_env):
 
     result = await asyncio.wait_for(env.processor.on_dequeue(msg.to_dict()), timeout=1)
 
-=======
-    now = [100.0]
-    monkeypatch.setattr("openviking.utils.circuit_breaker.time.monotonic", lambda: now[0])
-    sleep = AsyncMock()
-    monkeypatch.setattr("openviking.storage.queuefs.semantic_processor.asyncio.sleep", sleep)
-    msg = env.message()
-    breaker = env.processor._account_breaker(msg.account_id)
-    breaker.record_failure(RuntimeError("400 invalid model parameter"))
-
-    result = await asyncio.wait_for(env.processor.on_dequeue(msg.to_dict()), timeout=1)
-
-    assert result.outcome is ProcessOutcome.REQUEUED
-    env.dag.run.assert_not_awaited()
-    env.retry_queue.enqueue.assert_awaited_once()
-    sleep.assert_awaited_once_with(30)
-    assert not env.tracker.is_complete(msg.telemetry_id)
-    with pytest.raises(CircuitBreakerOpen):
-        breaker.check()
-
-    now[0] += 301
-    result = await asyncio.wait_for(env.processor.on_dequeue(msg.to_dict()), timeout=1)
->>>>>>> origin/main
     assert result.outcome is ProcessOutcome.SUCCESS
     await asyncio.wait_for(env.tracker.wait_for_request(msg.telemetry_id), timeout=1)
     env.dag.run.assert_awaited_once_with(msg.uri)
-<<<<<<< HEAD
     env.retry_queue.enqueue.assert_not_awaited()
-=======
->>>>>>> origin/main
     assert breaker.retry_after == 0
     breaker.check()

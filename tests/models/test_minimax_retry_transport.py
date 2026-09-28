@@ -114,8 +114,8 @@ def test_minimax_owner_waits_before_recovery(minimax_transport, status, retry_af
 @pytest.mark.parametrize(
     "workload,status,expected,reason",
     [
-        ("offline", 429, 4, "max_attempts"),
-        ("offline", 503, 4, "max_attempts"),
+        ("offline", 429, 4, "retry_budget"),
+        ("offline", 503, 4, "retry_budget"),
         ("offline", 401, 1, "auth"),
         ("online", 429, 1, "online"),
     ],

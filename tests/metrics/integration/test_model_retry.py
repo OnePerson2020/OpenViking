@@ -32,7 +32,7 @@ async def test_owner_events_are_exported_once_with_bounded_labels(
         in text
     )
     assert (
-        'openviking_model_retry_exhausted_total{model_type="vlm",operation="session_commit",reason="max_attempts",stage="archive_summary"} 1'
+        'openviking_model_retry_exhausted_total{model_type="vlm",operation="session_commit",reason="retry_budget",stage="archive_summary"} 1'
         in text
     )
     assert 'decision="retry"' in text

@@ -500,6 +500,7 @@ class SemanticTreeExecutor:
                 self._task_context.task_id,
                 self._task_context.account_id,
                 self._task_context.user_id,
+                work_index=self._task_context.work_index,
             )
             if self._task_context is not None
             else detach_task_context()
@@ -524,6 +525,7 @@ class SemanticTreeExecutor:
                     stage=scope.stage,
                     deadline_at=scope.deadline_at,
                     root_task_id=scope.root_task_id,
+                    retry_budget=scope.retry_budget,
                 ),
                 model_stage(scope.stage),
             ):
