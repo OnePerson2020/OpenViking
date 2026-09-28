@@ -156,20 +156,17 @@ class GeminiDenseEmbedder(DenseEmbedderBase):
             )
         if dimension is not None and not (1 <= dimension <= 3072):
             raise ValueError(f"dimension must be between 1 and 3072, got {dimension}")
+        self._client_kwargs: Dict[str, Any] = {"api_key": api_key}
         if _HTTP_RETRY_AVAILABLE:
-            self.client = genai.Client(
-                api_key=api_key,
-                http_options=HttpOptions(
-                    retry_options=HttpRetryOptions(
-                        attempts=1,
-                        initial_delay=0.5,
-                        max_delay=8.0,
-                        exp_base=2.0,
-                    )
-                ),
+            self._client_kwargs["http_options"] = HttpOptions(
+                retry_options=HttpRetryOptions(
+                    attempts=1,
+                    initial_delay=0.5,
+                    max_delay=8.0,
+                    exp_base=2.0,
+                )
             )
-        else:
-            self.client = genai.Client(api_key=api_key)
+        self.client = genai.Client(**self._client_kwargs)
         self.task_type = task_type
         self.query_param = query_param
         self.document_param = document_param
@@ -275,11 +272,15 @@ class GeminiDenseEmbedder(DenseEmbedderBase):
 
         async def _call() -> EmbedResult:
             try:
-                result = await self.client.aio.models.embed_content(
-                    model=self.model_name,
-                    contents=text,
-                    config=self._build_config(task_type=task_type, title=title),
-                )
+                # Account embedders span HTTP and worker loops. Each attempt
+                # owns its transport; only the OV owner may retry the request.
+                with genai.Client(**self._client_kwargs) as client:
+                    async with client.aio as async_client:
+                        result = await async_client.models.embed_content(
+                            model=self.model_name,
+                            contents=text,
+                            config=self._build_config(task_type=task_type, title=title),
+                        )
             except (APIError, ClientError) as error:
                 normalized = _normalize_gemini_error(error)
                 if normalized is error:
@@ -309,8 +310,4 @@ class GeminiDenseEmbedder(DenseEmbedderBase):
         return self._dimension
 
     def close(self):
-        if hasattr(self.client, "_http_client"):
-            try:
-                self.client._http_client.close()
-            except Exception:
-                pass
+        self.client.close()
