@@ -21,6 +21,7 @@ from openviking.core.ttl import (
     OBJECT_TYPE_RESOURCE,
     OBJECT_TYPE_RESOURCE_FILE,
     OBJECT_TYPE_SESSION,
+    OBJECT_TYPE_SESSION_FILE,
     TTL_FIELD_NAMES,
     apply_ttl_fields,
     ttl_enabled,
@@ -218,6 +219,15 @@ class _OpsMixin:
         lease = await self._async_agfs.pathlock_acquire_exact(path)
         ttl_mutation = None
         try:
+            from openviking.storage.session_file_ttl import (
+                complete_session_file_update,
+                prepare_session_file_update,
+                rollback_session_file_update,
+            )
+
+            session_fields = await prepare_session_file_update(
+                self, uri, data, ctx=self._ctx_or_default(ctx), lease_ref=lease
+            )
             ttl_mutation = await self._prepare_ttl_write(uri, data, ctx=ctx)
             try:
                 # Encryption (when configured) happens inside the ragfs layer keyed by account_id.
@@ -226,8 +236,14 @@ class _OpsMixin:
                 )
             except Exception:
                 await self._rollback_ttl_write(ttl_mutation, ctx=ctx)
+                await rollback_session_file_update(
+                    self, uri, session_fields, ctx=self._ctx_or_default(ctx), lease_ref=lease
+                )
                 raise
             await self._complete_ttl_write(ttl_mutation, ctx=ctx)
+            await complete_session_file_update(
+                self, uri, session_fields, ctx=self._ctx_or_default(ctx), lease_ref=lease
+            )
             return result
         finally:
             await self._async_agfs.pathlock_release(lease)
@@ -322,7 +338,9 @@ class _OpsMixin:
             if not strict or lease_ref is None:
                 raise ValueError("verify_only requires strict deletion and an object lease")
             await confirm()
-            if not (preserve_summaries and ttl_scope_for_uri(target_uri) == "resources"):
+            if not (
+                preserve_summaries and ttl_scope_for_uri(target_uri) in {"resources", "sessions"}
+            ):
                 await self._remove_resource_file_metadata(target_uri, ctx=ctx, lease_ref=lease_ref)
             return {"estimated_deleted_count": 0}
 
@@ -364,7 +382,9 @@ class _OpsMixin:
             )
             if strict:
                 await confirm()
-            if not (preserve_summaries and ttl_scope_for_uri(target_uri) == "resources"):
+            if not (
+                preserve_summaries and ttl_scope_for_uri(target_uri) in {"resources", "sessions"}
+            ):
                 await self._remove_resource_file_metadata(target_uri, ctx=ctx, lease_ref=lease_ref)
             await self._remove_deleted_ttl_records(uris_to_delete, ctx=ctx)
             logger.info(f"[VikingFS] rm target not found, cleaned orphan index: {uri}")
@@ -450,7 +470,9 @@ class _OpsMixin:
                 result = {"estimated_deleted_count": estimated_count}
             if strict:
                 await confirm()
-            if not (preserve_summaries and ttl_scope_for_uri(target_uri) == "resources"):
+            if not (
+                preserve_summaries and ttl_scope_for_uri(target_uri) in {"resources", "sessions"}
+            ):
                 await self._remove_resource_file_metadata(target_uri, ctx=ctx, lease_ref=lease_ref)
             await self._remove_deleted_ttl_records(uris_to_delete, ctx=ctx)
             return result
@@ -459,9 +481,15 @@ class _OpsMixin:
                 await self._async_agfs.pathlock_release(lease)
 
     async def _remove_resource_file_metadata(self, uri: str, *, ctx, lease_ref=None) -> None:
-        if ttl_scope_for_uri(uri) != "resources" or ttl_object_for_uri(uri) is not None:
+        from openviking.storage.session_file_ttl import is_session_content
+
+        if is_session_content(uri):
+            kind = OBJECT_TYPE_SESSION_FILE
+        elif ttl_scope_for_uri(uri) == "resources" and ttl_object_for_uri(uri) is None:
+            kind = OBJECT_TYPE_RESOURCE_FILE
+        else:
             return
-        metadata_uri = ttl_metadata_uri(OBJECT_TYPE_RESOURCE_FILE, uri)
+        metadata_uri = ttl_metadata_uri(kind, uri)
         path = self._uri_to_path(metadata_uri, ctx=ctx)
         try:
             await self._async_agfs.stat(path, bypass_cache=True)
@@ -479,7 +507,9 @@ class _OpsMixin:
     async def _remove_deleted_ttl_records(self, uris: List[str], *, ctx) -> None:
         """Drop projections whose authoritative metadata was explicitly deleted."""
         real_ctx = self._ctx_or_default(ctx)
-        object_uris = {target[1] for uri in uris if (target := ttl_object_for_uri(uri)) is not None}
+        object_uris = {
+            target[1] for uri in uris if (target := self._ttl_metadata_target(uri)) is not None
+        }
         for object_uri in sorted(object_uris):
             record = await self.ttl_registry.get(real_ctx.account_id, object_uri)
             if record is not None:
@@ -718,8 +748,13 @@ class _OpsMixin:
                     )
 
         await visit(old_uri, new_uri, is_dir)
-        if not is_dir and ttl_scope_for_uri(old_uri) == "resources":
-            metadata_uri = ttl_metadata_uri(OBJECT_TYPE_RESOURCE_FILE, old_uri)
+        if not is_dir and ttl_scope_for_uri(old_uri) in {"resources", "sessions"}:
+            kind = (
+                OBJECT_TYPE_SESSION_FILE
+                if ttl_scope_for_uri(old_uri) == "sessions"
+                else OBJECT_TYPE_RESOURCE_FILE
+            )
+            metadata_uri = ttl_metadata_uri(kind, old_uri)
             try:
                 await self._async_agfs.stat(
                     self._uri_to_path(metadata_uri, ctx=ctx), bypass_cache=True
@@ -733,7 +768,7 @@ class _OpsMixin:
 
     async def _transfer_ttl_visible(self, uri: str, ctx: RequestContext) -> bool:
         owner = ttl_object_for_uri(uri)
-        if owner is not None and owner[0] == OBJECT_TYPE_RESOURCE_FILE:
+        if owner is not None and owner[0] in {OBJECT_TYPE_RESOURCE_FILE, OBJECT_TYPE_SESSION_FILE}:
             # A destination sidecar may be copied before its body exists.
             # Check its owner's expiry without requiring the body to exist yet.
             uri = owner[1]
@@ -747,6 +782,30 @@ class _OpsMixin:
             return
         source_owner = ttl_object_for_uri(source)
         target_owner = ttl_object_for_uri(target)
+        from openviking.storage.session_file_ttl import (
+            is_session_content,
+            read_session_metadata,
+            session_root,
+        )
+
+        root = session_root(source)
+        if (
+            root
+            and is_session_content(source)
+            and (await read_session_metadata(self, root, ctx=ctx)).get("ttl_per_file")
+        ):
+            destination_root = session_root(target)
+            if not destination_root or not is_session_content(target):
+                raise InvalidArgumentError("Session files must remain within a session")
+            # A whole-root transfer also copies the independent-lifecycle marker.
+            whole_root = root == old_scope or root.startswith(old_scope.rstrip("/") + "/")
+            if not whole_root and not (
+                await read_session_metadata(self, destination_root, ctx=ctx)
+            ).get("ttl_per_file"):
+                raise InvalidArgumentError(
+                    "Configure the destination session's file retention before copying children"
+                )
+            return
         if source_owner is None:
             if ttl_scope_for_uri(source) != "resources":
                 return
@@ -907,6 +966,29 @@ class _OpsMixin:
         ):
             return 1
         fields = {}
+        from openviking.storage.session_file_ttl import (
+            is_session_content,
+            read_session_metadata,
+            session_file_fields,
+            session_root,
+        )
+
+        if is_session_content(old_uri) and (
+            await read_session_metadata(self, session_root(old_uri), ctx=real_ctx)
+        ).get("ttl_per_file"):
+            fields = await session_file_fields(self, old_uri, ctx=real_ctx)
+            metadata = await self._async_agfs.stat(self._uri_to_path(old_uri, ctx=ctx))
+            if fields and not metadata.get("isDir"):
+                from openviking.storage.resource_ttl import write_resource_fields
+
+                await write_resource_fields(
+                    self,
+                    OBJECT_TYPE_SESSION_FILE,
+                    new_uri,
+                    fields,
+                    ctx=real_ctx,
+                    lease_ref=lease_ref,
+                )
         if ttl_scope_for_uri(old_uri) == "resources" and ttl_object_for_uri(old_uri) is None:
             from openviking.storage.resource_ttl import resource_ttl_fields, write_resource_fields
 
@@ -1252,18 +1334,23 @@ class _OpsMixin:
         source_uri_set = {uri.rstrip("/") for uri in source_uris}
         registrations: set[tuple[str, str]] = set()
         for source_uri in source_uris:
-            if source_uri == ttl_metadata_uri(OBJECT_TYPE_RESOURCE_FILE, old_scope):
-                target_uri = ttl_metadata_uri(OBJECT_TYPE_RESOURCE_FILE, new_scope)
+            source_kind = (
+                OBJECT_TYPE_SESSION_FILE
+                if ttl_scope_for_uri(old_scope) == "sessions"
+                else OBJECT_TYPE_RESOURCE_FILE
+            )
+            if source_uri == ttl_metadata_uri(source_kind, old_scope):
+                target_uri = ttl_metadata_uri(source_kind, new_scope)
             else:
                 target_uri = new_scope + source_uri.rstrip("/")[len(old_scope) :]
-            target = ttl_object_for_uri(target_uri)
+            target = self._ttl_metadata_target(target_uri)
             if target is None:
                 continue
             object_type, object_uri = target
             target_registration_uri = ttl_metadata_uri(object_type, object_uri)
             source_registration_uri = (
                 source_uri
-                if object_type == OBJECT_TYPE_RESOURCE_FILE
+                if object_type in {OBJECT_TYPE_RESOURCE_FILE, OBJECT_TYPE_SESSION_FILE}
                 else old_scope + target_registration_uri[len(new_scope) :]
             )
             if source_registration_uri not in source_uri_set:
@@ -1318,6 +1405,7 @@ class _OpsMixin:
             if desired is not None and desired.object_type in {
                 OBJECT_TYPE_RESOURCE,
                 OBJECT_TYPE_RESOURCE_FILE,
+                OBJECT_TYPE_SESSION_FILE,
             }:
                 from openviking.storage.resource_ttl import read_resource_fields
 
@@ -1343,7 +1431,9 @@ class _OpsMixin:
         """Remove source projections after the corresponding move is durable."""
         real_ctx = self._ctx_or_default(ctx)
         object_uris = {
-            target[1] for uri in source_uris if (target := ttl_object_for_uri(uri)) is not None
+            target[1]
+            for uri in source_uris
+            if (target := self._ttl_metadata_target(uri)) is not None
         }
         for object_uri in sorted(object_uris):
             record = await self.ttl_registry.get(real_ctx.account_id, object_uri)
@@ -2493,6 +2583,15 @@ class _OpsMixin:
             owned_lease = effective_lease
         ttl_mutation = None
         try:
+            from openviking.storage.session_file_ttl import (
+                complete_session_file_update,
+                prepare_session_file_update,
+                rollback_session_file_update,
+            )
+
+            session_fields = await prepare_session_file_update(
+                self, uri, content, ctx=self._ctx_or_default(ctx), lease_ref=effective_lease
+            )
             ttl_mutation = await self._prepare_ttl_write(uri, content, ctx=ctx)
             try:
                 await self._async_agfs.write(
@@ -2503,8 +2602,18 @@ class _OpsMixin:
                 )
             except Exception:
                 await self._rollback_ttl_write(ttl_mutation, ctx=ctx)
+                await rollback_session_file_update(
+                    self,
+                    uri,
+                    session_fields,
+                    ctx=self._ctx_or_default(ctx),
+                    lease_ref=effective_lease,
+                )
                 raise
             await self._complete_ttl_write(ttl_mutation, ctx=ctx)
+            await complete_session_file_update(
+                self, uri, session_fields, ctx=self._ctx_or_default(ctx), lease_ref=effective_lease
+            )
         finally:
             if owned_lease is not None:
                 await self._async_agfs.pathlock_release(owned_lease)
@@ -2644,6 +2753,15 @@ class _OpsMixin:
         ttl_mutation = None
         try:
             ttl_mutation = await self._prepare_ttl_write(uri, content, ctx=ctx)
+            from openviking.storage.session_file_ttl import (
+                complete_session_file_update,
+                prepare_session_file_update,
+                rollback_session_file_update,
+            )
+
+            session_fields = await prepare_session_file_update(
+                self, uri, content, ctx=self._ctx_or_default(ctx), lease_ref=effective_lease
+            )
             try:
                 await self._async_agfs.write(
                     path,
@@ -2653,8 +2771,18 @@ class _OpsMixin:
                 )
             except Exception:
                 await self._rollback_ttl_write(ttl_mutation, ctx=ctx)
+                await rollback_session_file_update(
+                    self,
+                    uri,
+                    session_fields,
+                    ctx=self._ctx_or_default(ctx),
+                    lease_ref=effective_lease,
+                )
                 raise
             await self._complete_ttl_write(ttl_mutation, ctx=ctx)
+            await complete_session_file_update(
+                self, uri, session_fields, ctx=self._ctx_or_default(ctx), lease_ref=effective_lease
+            )
         finally:
             if owned_lease is not None:
                 await self._async_agfs.pathlock_release(owned_lease)
@@ -2774,7 +2902,12 @@ class _OpsMixin:
             return None
         object_type, object_uri = target
         text = content.decode("utf-8")
-        if object_type in {OBJECT_TYPE_SESSION, OBJECT_TYPE_RESOURCE, OBJECT_TYPE_RESOURCE_FILE}:
+        if object_type in {
+            OBJECT_TYPE_SESSION,
+            OBJECT_TYPE_SESSION_FILE,
+            OBJECT_TYPE_RESOURCE,
+            OBJECT_TYPE_RESOURCE_FILE,
+        }:
             fields = json.loads(text)
         else:
             from openviking.session.memory.utils.messages import (
@@ -2872,10 +3005,24 @@ class _OpsMixin:
                 raise
 
             final_content = (existing + content).encode("utf-8")
-            await self._async_agfs.write(
-                path,
-                final_content,
-                fs_ctx=fs_ctx,
+            from openviking.storage.session_file_ttl import (
+                complete_session_file_update,
+                prepare_session_file_update,
+                rollback_session_file_update,
+            )
+
+            session_fields = await prepare_session_file_update(
+                self, uri, final_content, ctx=self._ctx_or_default(ctx), lease_ref=lease
+            )
+            try:
+                await self._async_agfs.write(path, final_content, fs_ctx=fs_ctx)
+            except Exception:
+                await rollback_session_file_update(
+                    self, uri, session_fields, ctx=self._ctx_or_default(ctx), lease_ref=lease
+                )
+                raise
+            await complete_session_file_update(
+                self, uri, session_fields, ctx=self._ctx_or_default(ctx), lease_ref=lease
             )
 
         except Exception as e:

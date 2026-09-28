@@ -43,7 +43,11 @@ async def reconcile_session_ttl(
         raise
     if not isinstance(metadata, dict):
         raise ValueError(f"Invalid session metadata: {session_uri}")
-    if metadata.get("ttl_generation") != generation or not metadata.get("ttl_days"):
+    if (
+        metadata.get("ttl_per_file")
+        or metadata.get("ttl_generation") != generation
+        or not metadata.get("ttl_days")
+    ):
         return metadata
     if not archive_uri and not hidden_by_ttl(metadata.get("expires_at")):
         return metadata

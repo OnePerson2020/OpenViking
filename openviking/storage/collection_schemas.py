@@ -983,7 +983,7 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                             return ProcessResult.success(inserted_data)
                     elif inserted_data.get("level", 2) == 2 and (
                         (ttl_object_for_uri(str(uri or "")) or (None,))[0] == OBJECT_TYPE_EVENT
-                        or ttl_scope_for_uri(str(uri or "")) == "resources"
+                        or ttl_scope_for_uri(str(uri or "")) in {"resources", "sessions"}
                     ):
                         result = await self._write_ttl_vector_if_current(
                             embedding_msg, ctx, _write_vector
@@ -1112,18 +1112,26 @@ class TextEmbeddingHandler(DequeueHandlerBase):
         uri = str(data.get("uri") or "")
         target = ttl_object_for_uri(uri)
         resource = ttl_scope_for_uri(uri) == "resources"
-        if not resource and (target is None or target[0] != OBJECT_TYPE_EVENT):
+        session = ttl_scope_for_uri(uri) == "sessions"
+        if not resource and not session and (target is None or target[0] != OBJECT_TYPE_EVENT):
             return await write_vector()
 
         viking_fs = get_viking_fs()
-        object_uri = uri if resource else target[1]
+        object_uri = uri if resource or session else target[1]
         path = viking_fs._uri_to_path(object_uri, ctx=ctx)
         # Producers enqueue before releasing their source write lease. Wait for
         # that lease, then validate the persisted generation under our own lock.
         lease = await viking_fs._async_agfs.pathlock_acquire_exact(path, timeout_secs=300.0)
         try:
             try:
-                if resource:
+                if session:
+                    from openviking.storage.session_file_ttl import session_file_fields
+
+                    if not await viking_fs._ttl_uri_visible(uri, ctx, require_source=True):
+                        return None
+                    await viking_fs._async_agfs.stat(path, bypass_cache=True)
+                    fields = await session_file_fields(viking_fs, uri, ctx=ctx)
+                elif resource:
                     from openviking.storage.resource_ttl import (
                         resource_ttl_fields,
                         resource_ttl_visible,

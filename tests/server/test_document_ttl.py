@@ -643,3 +643,59 @@ async def test_session_retention_requires_owner_access(client, ttl_admin_app, se
     finally:
         ttl_admin_app.dependency_overrides.pop(get_request_context)
     assert await service.viking_fs.ttl_registry.get("default", uri) is None
+
+
+@pytest.mark.asyncio
+async def test_session_children_have_independent_retention_and_directory_defaults(
+    client, service, monkeypatch
+):
+    await request(client, "post", "/api/v1/sessions", json={"session_id": "children-ttl"})
+    root = ROOT + "/sessions/children-ttl"
+    fs, ctx = service.viking_fs, root_ctx()
+    await request(client, "patch", "/api/v1/content/ttl", json={"uri": root, "ttl_relative": 7})
+    old_root_record = await fs.ttl_registry.get(ctx.account_id, root)
+    folder = root + "/attachments"
+    first, sibling = folder + "/first.txt", folder + "/sibling.txt"
+    await fs.write_file(first, "retain for 30 days", ctx=ctx)
+    await fs.write_file(sibling, "retain for 7 days", ctx=ctx)
+    retained = await request(
+        client, "patch", "/api/v1/content/ttl", json={"uri": first, "ttl_relative": 30}
+    )
+    assert retained["ttl_days"] == 30
+    assert await fs.ttl_registry.get(ctx.account_id, root) is None
+    sibling_fields = await request(client, "get", "/api/v1/content/ttl", params={"uri": sibling})
+    assert sibling_fields["ttl_days"] == 7
+    assert sibling_fields["expires_at"] == old_root_record.expires_at
+    configured = await request(
+        client, "patch", "/api/v1/content/ttl", json={"uri": folder, "ttl_relative": 14}
+    )
+    assert configured["ttl_days"] == 14
+    assert await request(client, "get", "/api/v1/content/ttl", params={"uri": folder}) == configured
+    assert (
+        await request(client, "get", "/api/v1/content/ttl", params={"uri": sibling})
+        == sibling_fields
+    )
+    fresh = folder + "/fresh.bin"
+    await fs.write_file_bytes(fresh, b"new attachment", ctx=ctx)
+    assert (await request(client, "get", "/api/v1/content/ttl", params={"uri": fresh}))[
+        "ttl_days"
+    ] == 14
+    response = await client.patch(
+        "/api/v1/content/ttl", json={"uri": folder, "expires_at": "2999-01-01T00:00:00Z"}
+    )
+    assert response.status_code == 400
+    summary = folder + "/.abstract.md"
+    await fs.write_file(summary, "Retain L0", ctx=ctx)
+    real_expired = ttl.is_expired
+    now = parse_iso_datetime(sibling_fields["expires_at"]) + timedelta(days=1)
+    monkeypatch.setattr(ttl, "is_expired", lambda value, **_: real_expired(value, now=now))
+    assert (await client.get("/api/v1/content/read", params={"uri": sibling})).status_code == 404
+    assert await fs.read_file(first, ctx=ctx) == "retain for 30 days"
+    cleanup = TTLCleanupService(service=service, service_loop=asyncio.get_running_loop())
+    assert (await _cleanup_once(cleanup, old_root_record))["skipped"] == "stale_registry_generation"
+    record = await fs.ttl_registry.get(ctx.account_id, sibling)
+    assert record.object_type == "session_file"
+    assert (await _cleanup_once(cleanup, record))["deleted"]
+    assert await fs.read_file(first, ctx=ctx) == "retain for 30 days"
+    assert await fs.read_file(summary, ctx=ctx) == "Retain L0"
+    assert await fs.exists(folder, ctx=ctx)

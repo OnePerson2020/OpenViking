@@ -10,6 +10,7 @@ from openviking.core.ttl import (
     OBJECT_TYPE_EVENT,
     OBJECT_TYPE_RESOURCE_FILE,
     OBJECT_TYPE_SESSION,
+    OBJECT_TYPE_SESSION_FILE,
     TTL_FIELD_NAMES,
     compute_expires_at,
     hidden_by_ttl,
@@ -49,6 +50,27 @@ async def _document_target(fs, uri, *, ctx):
     if ttl_object_for_uri(uri) == (OBJECT_TYPE_SESSION, uri):
         fields = json.loads(await fs.read_file(f"{uri}/.meta.json", ctx=ctx))
         return OBJECT_TYPE_SESSION, fields, stat
+    if ttl_scope_for_uri(uri) == "sessions":
+        from openviking.storage.session_file_ttl import (
+            is_session_content,
+            session_file_fields,
+            session_root,
+        )
+
+        if stat.get("isDir") and session_root(uri):
+            from openviking.server.error_mapping import is_storage_not_found
+
+            try:
+                raw = await fs._async_agfs.read(fs._uri_to_path(uri + "/.ttl.json", ctx=ctx))
+                fields = json.loads(fs._handle_agfs_read(raw))
+            except Exception as exc:
+                if not is_storage_not_found(exc):
+                    raise
+                fields = {}
+            return "session_directory", fields, stat
+        if is_session_content(uri):
+            fields = await session_file_fields(fs, uri, ctx=ctx)
+            return OBJECT_TYPE_SESSION_FILE, fields or {}, stat
     if ttl_object_for_uri(uri, is_dir=bool(stat.get("isDir"))) == (OBJECT_TYPE_EVENT, uri):
         memory = MemoryFileUtils.read(await fs.read_file(uri, ctx=ctx), uri=uri)
         return (
@@ -86,21 +108,51 @@ async def update_document_expiry(
     except (ValueError, TypeError) as exc:
         raise InvalidArgumentError(str(exc)) from exc
     kind, original, _ = await _document_target(fs, uri, ctx=ctx)
-    if kind == OBJECT_TYPE_SESSION and policy.expires_at is not None:
+    if kind in {OBJECT_TYPE_SESSION, "session_directory"} and policy.expires_at is not None:
         raise InvalidArgumentError("session directories support relative retention only")
     await fs._ensure_access(uri, ctx, action=AclAction.WRITE)
     acquire = (
         fs._async_agfs.pathlock_acquire_tree
-        if kind == OBJECT_TYPE_SESSION
+        if ttl_scope_for_uri(uri) == "sessions"
         else fs._async_agfs.pathlock_acquire_exact
     )
+    from openviking.storage.session_file_ttl import session_root
+
+    lock_uri = session_root(uri) or uri
     # A retention edit may race with an ordinary content update. Wait for the
     # current writer, then re-read its snapshot while holding the same lock.
-    lease = await acquire(fs._uri_to_path(uri, ctx=ctx), timeout_secs=30.0)
+    lease = await acquire(fs._uri_to_path(lock_uri, ctx=ctx), timeout_secs=30.0)
     try:
         live_kind, fields, stat = await _document_target(fs, uri, ctx=ctx)
         if (live_kind, fields.get("ttl_generation")) != (kind, original.get("ttl_generation")):
             raise ConflictError("document changed while updating its expiry; reload and retry")
+        if kind in {OBJECT_TYPE_SESSION_FILE, "session_directory"}:
+            from openviking.storage.session_file_ttl import (
+                migrate_session_files,
+                read_session_metadata,
+            )
+
+            metadata = await read_session_metadata(fs, lock_uri, ctx=ctx)
+            await migrate_session_files(fs, lock_uri, metadata, ctx=ctx, lease_ref=lease)
+            if kind == "session_directory":
+                fields = {"ttl_days": policy.ttl_relative}
+                await fs.write_file(
+                    uri + "/.ttl.json", json.dumps(fields), ctx=ctx, lease_ref=lease
+                )
+                return _public_fields(uri, fields)
+            from openviking.storage.session_file_ttl import session_file_fields
+
+            fields = await session_file_fields(fs, uri, ctx=ctx)
+        elif kind == OBJECT_TYPE_SESSION and fields.get("ttl_per_file"):
+            fields["ttl_days"] = policy.ttl_relative
+            await fs.write_file(uri + "/.meta.json", json.dumps(fields), ctx=ctx, lease_ref=lease)
+            await fs.write_file(
+                uri + "/.ttl.json",
+                json.dumps({"ttl_days": policy.ttl_relative}),
+                ctx=ctx,
+                lease_ref=lease,
+            )
+            return _public_fields(uri, fields)
         # Retention edits do not count as content updates. Preserve the saved
         # content timestamp; unmanaged files start from the storage modification time.
         if kind == OBJECT_TYPE_SESSION:

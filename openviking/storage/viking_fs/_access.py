@@ -842,6 +842,14 @@ class _AccessMixin:
             if len(parts) < 4:
                 return True
             object_uri = "viking://" + "/".join(parts[:4])
+            from openviking.storage.session_file_ttl import (
+                read_session_metadata,
+                session_file_visible,
+            )
+
+            metadata = await read_session_metadata(self, object_uri, ctx=ctx)
+            if metadata.get("ttl_per_file"):
+                return await session_file_visible(self, uri, ctx=ctx, metadata=metadata)
             suffix_depth = len(parts) - 4
             candidate_paths: List[str] = []
             if path is not None:

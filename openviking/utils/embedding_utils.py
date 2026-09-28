@@ -655,6 +655,11 @@ async def vectorize_file(
 
             source_ttl = await resource_ttl_fields(viking_fs, file_path, ctx=ctx)
 
+        elif ttl_scope_for_uri(file_path) == "sessions":
+            from openviking.storage.session_file_ttl import session_file_fields
+
+            source_ttl = await session_file_fields(viking_fs, file_path, ctx=ctx)
+
         file_name = summary_dict.get("name") or os.path.basename(file_path)
         summary = summary_dict.get("summary", "")
         # Cap below the bytes_row 65535-byte abstract-scalar limit (#2774 parity).

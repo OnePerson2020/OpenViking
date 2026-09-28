@@ -24,6 +24,7 @@ from openviking.core.ttl import (
     OBJECT_TYPE_RESOURCE,
     OBJECT_TYPE_RESOURCE_FILE,
     OBJECT_TYPE_SESSION,
+    OBJECT_TYPE_SESSION_FILE,
     hidden_by_ttl,
     ttl_metadata_uri,
 )
@@ -323,7 +324,12 @@ class TTLCleanupService:
                                 "kind": "exact",
                             }
                         ]
-                        if scheduled.object_type in {OBJECT_TYPE_RESOURCE, OBJECT_TYPE_RESOURCE_FILE}
+                        if scheduled.object_type
+                        in {
+                            OBJECT_TYPE_RESOURCE,
+                            OBJECT_TYPE_RESOURCE_FILE,
+                            OBJECT_TYPE_SESSION_FILE,
+                        }
                         else []
                     ),
                 ]
@@ -360,6 +366,14 @@ class TTLCleanupService:
         if registered is None or registered.generation != scheduled.generation:
             return {"deleted": False, "skipped": "stale_registry_generation"}
 
+        if scheduled.object_type == OBJECT_TYPE_SESSION_FILE:
+            from openviking.storage.session_file_ttl import read_session_metadata, session_root
+
+            metadata = await read_session_metadata(
+                viking_fs, session_root(scheduled.object_uri), ctx=ctx
+            )
+            if not metadata.get("ttl_per_file"):
+                return {"deleted": False, "skipped": "incomplete_session_migration"}
         if scheduled.object_type == OBJECT_TYPE_SESSION:
             await reconcile_session_ttl(
                 viking_fs,
@@ -475,6 +489,14 @@ class TTLCleanupService:
         self, scheduled: TTLRecord, ctx: RequestContext
     ) -> Optional[TTLRecord]:
         viking_fs = self._service.viking_fs
+        if scheduled.object_type == OBJECT_TYPE_SESSION_FILE:
+            from openviking.storage.session_file_ttl import session_file_fields
+            from openviking.storage.ttl_registry import record_from_fields
+
+            fields = await session_file_fields(viking_fs, scheduled.object_uri, ctx=ctx)
+            return record_from_fields(
+                uri=scheduled.object_uri, object_type=scheduled.object_type, fields=fields, ctx=ctx
+            )
         read_uri = ttl_metadata_uri(scheduled.object_type, scheduled.object_uri)
         try:
             raw = await viking_fs.read_file(read_uri, ctx=ctx, include_expired=True)
@@ -589,6 +611,7 @@ class _TTLCleanupProcessor(DequeueHandlerBase):
         if object_type not in (
             OBJECT_TYPE_EVENT,
             OBJECT_TYPE_SESSION,
+            OBJECT_TYPE_SESSION_FILE,
             OBJECT_TYPE_RESOURCE,
             OBJECT_TYPE_RESOURCE_FILE,
         ):

@@ -829,7 +829,7 @@ GET /api/v1/tasks?task_type=admin_reindex&resource_id=viking://resources
 
 ## 文档到期时间
 
-`GET /api/v1/content/ttl?uri=...` 返回精确 event/resource 文件或单个 session 根目录实际生效的期限。未纳管文件仅返回 `uri`；session 也可能返回最近内容更新时间，但不含到期时间。resource 目录不是带期限对象，传入目录会被拒绝。`PATCH /api/v1/content/ttl` 为存活文件或 session 设置或调整有效期，全局 TTL 关闭或对象此前未纳管时也可使用：
+`GET /api/v1/content/ttl?uri=...` 返回event/resource 文件、session 子文件或 session 根目录实际生效的保留策略。未纳管文件仅返回 `uri`；session 也可能返回最近内容更新时间，但不含到期时间。resource 目录不是带期限对象，传入目录会被拒绝。`PATCH /api/v1/content/ttl` 为存活文件或 session 设置或调整有效期，全局 TTL 关闭或对象此前未纳管时也可使用：
 
 ```json
 {"uri": "viking://user/alice/memories/events/example.txt", "expires_at": "2027-01-01T00:00:00Z"}
@@ -849,4 +849,4 @@ Python HTTP SDK 对应 `get_ttl(uri)`、`update_ttl(uri, expires_at)`；MCP 使�
 
 SDK 相对时长示例：`await client.update_ttl(uri, ttl_relative=30)`.
 
-也支持对单个 session 根 URI 设置相对保留时长，例如 `{"uri": "viking://user/alice/sessions/chat-1", "ttl_relative": 30}`。此操作修改现有 session 的整体生命周期，覆盖 L2 消息和附件，全局 TTL 关闭时也可使用。成功追加消息和成功 commit 会按已保存的时长续期；单纯修改 session 配置不会续期。过期后保留 session 目录和 L0/L1 摘要。session 根目录不接受绝对期限，此接口暂不独立配置 session 内部子文件。
+也支持对单个 session 根 URI 设置相对保留时长，例如 `{"uri": "viking://user/alice/sessions/chat-1", "ttl_relative": 30}`。此操作修改现有 session 的整体生命周期，覆盖 L2 消息和附件，全局 TTL 关闭时也可使用。成功追加消息和成功 commit 会按已保存的时长续期；单纯修改 session 配置不会续期。过期后保留 session 目录和 L0/L1 摘要。session 根目录不接受绝对期限，session 内容子文件也可设置相对或绝对期限。子目录接受相对默认值，仅作用于以后创建的文件。首次编辑子对象时，旧 session 整体期限迁移为各文件独立期限，已有文件保持原到期时间；之后内容写入只续期被修改的文件。迁移后，根目录修改也仅配置新文件默认值，根或子目录返回 ttl_days，不带 expires_at。已有兄弟文件、目录、L0/L1 摘要和 session 控制元数据保留。过期文件不能通过延迟写入续期或重建。独立期限的 session 间复制/移动文件保留原期限；旧版目标 session 应先设置子目录默认值完成迁移，再传输单文件。

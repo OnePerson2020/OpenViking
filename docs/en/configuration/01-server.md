@@ -513,3 +513,5 @@ Omitting `--account-id` selects the cluster layer. Python HTTP SDK methods are `
 Expiry filtering and cleanup apply only to L2. Logical visibility changes exactly at `expires_at`; `cleanup_jitter_seconds` delays only physical deletion. All L0/L1 files and vectors remain readable and searchable, including those inside directories after every L2 content file has been removed.
 
 These are native OV routes. A hosted console or gateway must forward the matching configuration and requests; adding OV routes does not automatically expose them through an existing cloud proxy. This PR does not change public-cloud services or billing.
+
+Session child files can have independent deadlines and child directories can provide relative defaults through the document-retention endpoint. The first child edit migrates a legacy session without moving existing deadlines; later content writes renew only that file. Root edits on a migrated session change defaults for future files.

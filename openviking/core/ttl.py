@@ -37,6 +37,7 @@ from openviking_cli.utils.config import TTLConfig, TTLScope, get_openviking_conf
 # rules so callers do not re-derive them.
 OBJECT_TYPE_EVENT = "event"
 OBJECT_TYPE_SESSION = "session"
+OBJECT_TYPE_SESSION_FILE = "session_file"
 OBJECT_TYPE_RESOURCE = "resource"
 OBJECT_TYPE_RESOURCE_FILE = "resource_file"
 RESOURCE_TTL_FILENAME = ".ttl.json"
@@ -109,6 +110,14 @@ def ttl_object_for_uri(uri: str, *, is_dir: bool = False) -> Optional[tuple[str,
     if scope == "sessions":
         if len(parts) < 4:
             return None
+        if (
+            len(parts) > 4
+            and parts[-1].startswith(".")
+            and parts[-1].endswith(RESOURCE_TTL_FILENAME)
+        ):
+            name = parts[-1][1 : -len(RESOURCE_TTL_FILENAME)]
+            if name:
+                return OBJECT_TYPE_SESSION_FILE, "viking://" + "/".join([*parts[:-1], name])
         return OBJECT_TYPE_SESSION, "viking://" + "/".join(parts[:4])
     event_root_depth = 6 if scope == "peer_events" else 4
     if (
@@ -305,7 +314,7 @@ def ttl_metadata_uri(object_type: str, uri: str) -> str:
         return f"{uri}/.meta.json"
     if object_type == OBJECT_TYPE_RESOURCE:
         return f"{uri}/{RESOURCE_TTL_FILENAME}"
-    if object_type == OBJECT_TYPE_RESOURCE_FILE:
+    if object_type in {OBJECT_TYPE_RESOURCE_FILE, OBJECT_TYPE_SESSION_FILE}:
         parent, name = uri.rsplit("/", 1)
         return f"{parent}/.{name}{RESOURCE_TTL_FILENAME}"
     return uri

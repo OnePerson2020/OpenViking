@@ -340,6 +340,7 @@ class SessionMeta:
     received_at: str = ""
     expires_at: str = ""
     ttl_generation: str = ""
+    ttl_per_file: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         data = {
@@ -379,6 +380,8 @@ class SessionMeta:
             data["expires_at"] = self.expires_at
         if self.ttl_generation:
             data["ttl_generation"] = self.ttl_generation
+        if self.ttl_per_file:
+            data["ttl_per_file"] = True
         return data
 
     @classmethod
@@ -433,6 +436,7 @@ class SessionMeta:
             received_at=data.get("received_at", ""),
             expires_at=data.get("expires_at", ""),
             ttl_generation=data.get("ttl_generation", ""),
+            ttl_per_file=data.get("ttl_per_file", False),
         )
 
 
@@ -690,7 +694,7 @@ class Session:
         if self._meta.received_at and completed <= parse_iso_datetime(self._meta.received_at):
             return
         self._meta.received_at = format_iso8601(completed)
-        if not self._meta.ttl_days:
+        if not self._meta.ttl_days or self._meta.ttl_per_file:
             return
         from openviking.core.ttl import compute_expires_at
 
