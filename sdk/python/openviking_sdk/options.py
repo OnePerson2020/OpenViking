@@ -119,6 +119,7 @@ class ReindexOptions(_ExtraOptions, total=False):
 
 
 class CreateSessionOptions(_ExtraOptions, total=False):
+    ttl_relative: Optional[int]
     memory_policy: Dict[str, Any]
     auto_commit_policy: Optional[Dict[str, Any]]
     memory_extraction_config: Dict[str, Any]
@@ -126,6 +127,7 @@ class CreateSessionOptions(_ExtraOptions, total=False):
 
 
 class UpdateSessionConfigOptions(_ExtraOptions, total=False):
+    ttl_relative: Optional[int]
     auto_commit_policy: Optional[Dict[str, Any]]
     memory_extraction_config: Dict[str, Any]
     telemetry: Any

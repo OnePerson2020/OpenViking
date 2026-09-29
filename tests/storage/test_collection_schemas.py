@@ -7,7 +7,7 @@ import json
 import logging
 import threading
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import requests
@@ -3591,3 +3591,16 @@ async def test_single_account_backend_query_runs_adapter_in_threadpool(monkeypat
     assert isinstance(query_filter, Eq)
     assert query_filter.field == "account_id"
     assert query_filter.value == "acc1"
+
+
+@pytest.mark.asyncio
+async def test_non_ttl_embedding_bypasses_lifecycle_storage(monkeypatch):
+    handler = _ttl_embedding_handler(monkeypatch)
+    fs_lookup = Mock(side_effect=AssertionError("non-TTL content must not access lifecycle storage"))
+    monkeypatch.setattr("openviking.storage.viking_fs.get_viking_fs", fs_lookup)
+    write_vector = AsyncMock(return_value="record-1")
+    msg = EmbeddingMsg("text", {"uri": "viking://user/default/memories/preferences/p.md", "account_id": "default"})
+    ctx = RequestContext(user=UserIdentifier("default", "default"), role=Role.ROOT)
+    assert await handler._write_ttl_vector_if_current(msg, ctx, write_vector) == "record-1"
+    write_vector.assert_awaited_once_with()
+    fs_lookup.assert_not_called()

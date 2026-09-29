@@ -1705,3 +1705,32 @@ results = await client.search(query=query, session_id=session_id)
 - [检索](06-retrieval.md) - 结合会话进行搜索
 - [资源管理](02-resources.md) - 资源管理
 - [后台任务](17-tasks.md) - 跟踪 commit 任务
+
+
+## Session TTL
+
+[TTL 到期与续期设计](../concepts/17-ttl.md)
+
+`POST /api/v1/sessions` 支持 `ttl_relative`，单位为天，范围为 1–365000 的整数。
+省略或传 null 时继承适用的目录、session 范围或库默认配置。
+`PATCH /api/v1/sessions/{session_id}/config` 中，省略该字段表示保持原配置，
+整数表示显式设置，null 表示恢复继承。Session 不接受 `ttl_absolute`。
+
+修改配置不算内容更新，也不能恢复已过期的 session。逐文件 TTL 模式下，
+修改 session 根默认值保留已有子文件的期限。修改库或目录默认配置，
+不会把历史未配置 TTL 的数据自动纳入清理范围。
+
+```python
+await client.create_session("demo", options={"ttl_relative": 30})
+await client.update_session_config("demo", {"ttl_relative": 60})
+await client.update_session_config("demo", {"ttl_relative": None})
+```
+
+```bash
+ov session new --session-id demo --ttl-relative 30
+ov session config set demo --ttl-relative 60
+ov session config set demo --inherit-ttl
+```
+
+MCP 提供 `create_session(session_id, ttl_relative)` 和
+`update_session_config(session_id, config)`，参数语义与 HTTP 相同。

@@ -3,7 +3,7 @@
 """Explicit retention edits for live files and sessions."""
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from openviking.core.ttl import (
@@ -14,6 +14,7 @@ from openviking.core.ttl import (
     TTL_FIELD_NAMES,
     compute_expires_at,
     hidden_by_ttl,
+    session_content_updated_at,
     ttl_object_for_uri,
     ttl_scope_for_uri,
 )
@@ -27,7 +28,7 @@ from openviking.storage.internal_names import (
 from openviking.storage.resource_ttl import read_resource_fields, write_resource_fields
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 from openviking_cli.exceptions import ConflictError, InvalidArgumentError
-from openviking_cli.utils.config.ttl_config import DocumentTTL
+from openviking_cli.utils.config.ttl_config import ContentTTL, TTLPolicy
 
 
 async def _document_target(fs, uri, *, ctx):
@@ -39,7 +40,8 @@ async def _document_target(fs, uri, *, ctx):
     ):
         raise InvalidArgumentError("TTL can only be set on event or resource content files")
     stat = await fs.stat(uri, ctx=ctx)
-    if ttl_scope_for_uri(uri) == "resources":
+    scope = ttl_scope_for_uri(uri)
+    if scope == "resources":
         if stat.get("isDir"):
             raise InvalidArgumentError(
                 "resource directories define defaults via resources/config; "
@@ -50,7 +52,7 @@ async def _document_target(fs, uri, *, ctx):
     if ttl_object_for_uri(uri) == (OBJECT_TYPE_SESSION, uri):
         fields = json.loads(await fs.read_file(f"{uri}/.meta.json", ctx=ctx))
         return OBJECT_TYPE_SESSION, fields, stat
-    if ttl_scope_for_uri(uri) == "sessions":
+    if scope == "sessions":
         from openviking.storage.session_file_ttl import (
             is_session_content,
             session_file_fields,
@@ -88,16 +90,36 @@ def _public_fields(uri, fields):
 
 async def get_document_ttl(fs, uri: str, *, ctx) -> dict:
     """Read a live file or session's retention snapshot."""
-    _, fields, _ = await _document_target(fs, uri, ctx=ctx)
+    kind, fields, _ = await _document_target(fs, uri, ctx=ctx)
+    if kind == "session_directory":
+        return _directory_fields(uri, fields)
     return _public_fields(uri, fields)
 
 
+def _directory_fields(uri, fields):
+    policy = (
+        fields
+        if "mode" in fields
+        else ({"mode": "days", **fields} if fields else {"mode": "inherit"})
+    )
+    return {**_public_fields(uri, fields), "policy": policy}
+
+
 async def update_document_expiry(
-    fs, uri: str, expires_at: str | None = None, *, ctx, ttl_relative: int | None = None
+    fs,
+    uri: str,
+    expires_at: str | None = None,
+    *,
+    ctx,
+    ttl_relative: int | None = None,
+    policy: dict | TTLPolicy | None = None,
 ) -> dict:
     """Set retention under the object's source lock, even when global TTL is off."""
     try:
-        policy = DocumentTTL(expires_at=expires_at, ttl_relative=ttl_relative)
+        values = {"expires_at": expires_at, "policy": policy}
+        if ttl_relative is not None:
+            values["ttl_relative"] = ttl_relative
+        policy = ContentTTL(**values)
         expiry = (
             format_iso8601(parse_iso_datetime(policy.expires_at))
             if policy.expires_at is not None
@@ -108,6 +130,10 @@ async def update_document_expiry(
     except (ValueError, TypeError) as exc:
         raise InvalidArgumentError(str(exc)) from exc
     kind, original, _ = await _document_target(fs, uri, ctx=ctx)
+    if policy.policy is not None and kind != "session_directory":
+        raise InvalidArgumentError(
+            "inherit/disabled directory policies require a session subdirectory"
+        )
     if kind in {OBJECT_TYPE_SESSION, "session_directory"} and policy.expires_at is not None:
         raise InvalidArgumentError("session directories support relative retention only")
     await fs._ensure_access(uri, ctx, action=AclAction.WRITE)
@@ -135,40 +161,30 @@ async def update_document_expiry(
             metadata = await read_session_metadata(fs, lock_uri, ctx=ctx)
             await migrate_session_files(fs, lock_uri, metadata, ctx=ctx, lease_ref=lease)
             if kind == "session_directory":
-                fields = {"ttl_days": policy.ttl_relative}
+                fields = (
+                    policy.policy.model_dump(exclude_none=True)
+                    if policy.policy is not None
+                    else {"mode": "days", "ttl_days": policy.ttl_relative}
+                )
                 await fs.write_file(
                     uri + "/.ttl.json", json.dumps(fields), ctx=ctx, lease_ref=lease
                 )
-                return _public_fields(uri, fields)
+                return _directory_fields(uri, fields)
             from openviking.storage.session_file_ttl import session_file_fields
 
             fields = await session_file_fields(fs, uri, ctx=ctx)
         elif kind == OBJECT_TYPE_SESSION and fields.get("ttl_per_file"):
             fields["ttl_days"] = policy.ttl_relative
+            fields["ttl_relative"] = policy.ttl_relative
             await fs.write_file(uri + "/.meta.json", json.dumps(fields), ctx=ctx, lease_ref=lease)
-            await fs.write_file(
-                uri + "/.ttl.json",
-                json.dumps({"ttl_days": policy.ttl_relative}),
-                ctx=ctx,
-                lease_ref=lease,
-            )
             return _public_fields(uri, fields)
         # Retention edits do not count as content updates. Preserve the saved
         # content timestamp; unmanaged files start from the storage modification time.
         if kind == OBJECT_TYPE_SESSION:
-            timestamps = [
-                parse_iso_datetime(fields[key])
-                for key in ("received_at", "last_message_at", "created_at")
-                if fields.get(key)
-            ]
-            # Older sessions renewed expires_at without updating received_at.
-            if fields.get("ttl_days") and fields.get("expires_at"):
-                timestamps.append(
-                    parse_iso_datetime(fields["expires_at"]) - timedelta(days=fields["ttl_days"])
-                )
-            if not timestamps:
-                raise InvalidArgumentError("session content update time is unavailable")
-            updated = max(timestamps)
+            try:
+                updated = session_content_updated_at(fields)
+            except ValueError as exc:
+                raise InvalidArgumentError(str(exc)) from exc
         elif fields.get("received_at"):
             updated = parse_iso_datetime(fields["received_at"])
         else:
@@ -189,6 +205,7 @@ async def update_document_expiry(
             memory.extra_fields.update(fields)
             await fs.write_file(uri, MemoryFileUtils.write(memory), ctx=ctx, lease_ref=lease)
         elif kind == OBJECT_TYPE_SESSION:
+            fields["ttl_relative"] = policy.ttl_relative
             await fs.write_file(f"{uri}/.meta.json", json.dumps(fields), ctx=ctx, lease_ref=lease)
         else:
             await write_resource_fields(fs, kind, uri, fields, ctx=ctx, lease_ref=lease)

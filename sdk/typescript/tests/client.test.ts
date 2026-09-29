@@ -752,6 +752,29 @@ describe("OpenVikingClient", () => {
     ).toThrow("each message requires content or parts");
   });
 
+  it("preserves session TTL omission, override and null inheritance", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => ok({}));
+    const client = new OpenVikingClient({
+      baseUrl: "https://example.com",
+      fetch: fetcher,
+    });
+    await client.createSession({ ttlRelative: 7 });
+    await client.updateSessionConfig("ttl", { ttlRelative: 14 });
+    await client.updateSessionConfig("ttl", {});
+    await client.updateSessionConfig("ttl", { ttlRelative: null });
+    const bodies = fetcher.mock.calls.map((call) =>
+      JSON.parse(call[1]?.body as string),
+    );
+    expect(bodies).toEqual([
+      { ttl_relative: 7 },
+      { ttl_relative: 14 },
+      {},
+      { ttl_relative: null },
+    ]);
+  });
+
   it("sends event memory tag configuration for session APIs", async () => {
     const fetcher = vi
       .fn<typeof fetch>()

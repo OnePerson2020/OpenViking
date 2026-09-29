@@ -258,6 +258,8 @@ export interface Message {
 }
 /** Session creation options. */
 export interface CreateSessionOptions {
+  /** Retention in whole days; null/omitted inherits the session default. */
+  ttlRelative?: number | null;
   sessionId?: string;
   memoryPolicy?: JsonObject;
   autoCommitPolicy?: JsonObject | null;
@@ -273,6 +275,8 @@ export interface MemoryExtractionConfig {
 }
 /** Mutable session configuration. */
 export interface UpdateSessionConfigOptions {
+  /** Omit to preserve retention; null restores inheritance. */
+  ttlRelative?: number | null;
   memoryExtractionConfig?: MemoryExtractionConfig;
   autoCommitPolicy?: JsonObject | null;
   telemetry?: unknown;

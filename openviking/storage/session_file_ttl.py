@@ -139,6 +139,8 @@ async def session_directory_days(fs, uri, metadata, *, ctx):
     directory = uri.rsplit("/", 1)[0]
     root = session_root(uri)
     while root and (directory == root or directory.startswith(root + "/")):
+        if directory == root and "ttl_relative" in metadata:
+            break  # Formal session config supersedes legacy root .ttl.json.
         try:
             raw = fs._handle_agfs_read(
                 await fs._async_agfs.read(fs._uri_to_path(directory + "/.ttl.json", ctx=ctx))
@@ -147,12 +149,21 @@ async def session_directory_days(fs, uri, metadata, *, ctx):
             if not is_storage_not_found(exc):
                 raise
         else:
-            return json.loads(raw)["ttl_days"]
+            from openviking_cli.utils.config.ttl_config import TTLPolicy
+
+            fields = json.loads(raw)
+            policy = TTLPolicy.model_validate(
+                fields if "mode" in fields else {"mode": "days", **fields}
+            )
+            if policy.mode == "days":
+                return policy.ttl_days
+            if policy.mode == "disabled":
+                return None
         if directory == root:
             break
         directory = directory.rsplit("/", 1)[0]
-    if metadata.get("ttl_days"):
-        return metadata["ttl_days"]
+    if "ttl_relative" in metadata or "ttl_days" in metadata:
+        return metadata.get("ttl_days")
     return resolve_ttl_days(uri, await resolve_ttl_config(fs, ctx.account_id))
 
 

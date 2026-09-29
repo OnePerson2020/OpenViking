@@ -1091,7 +1091,8 @@ async def test_grep_stops_scheduling_later_batches_after_node_limit(monkeypatch)
 
     assert result["count"] == 2
     assert result["files_scanned"] == 1
-    assert read_paths == ["/resources/file0.md", "/resources/file1.md"]
+    # Reads in one batch run concurrently; only batch membership is guaranteed.
+    assert sorted(read_paths) == ["/resources/file0.md", "/resources/file1.md"]
 
 
 @pytest.mark.asyncio

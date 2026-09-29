@@ -731,6 +731,8 @@ export class OpenVikingClient {
     });
     if ("autoCommitPolicy" in options)
       body.auto_commit_policy = options.autoCommitPolicy ?? null;
+    if (options.ttlRelative !== undefined)
+      body.ttl_relative = options.ttlRelative;
     return this.request("POST", "/api/v1/sessions", {
       body: mergeExtra(body, options.extra),
     });
@@ -756,6 +758,8 @@ export class OpenVikingClient {
     });
     if ("autoCommitPolicy" in options)
       body.auto_commit_policy = options.autoCommitPolicy ?? null;
+    if (options.ttlRelative !== undefined)
+      body.ttl_relative = options.ttlRelative;
     return this.request(
       "PATCH",
       `/api/v1/sessions/${pathPart(sessionId)}/config`,

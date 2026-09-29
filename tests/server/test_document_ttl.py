@@ -409,6 +409,13 @@ async def test_cli_sdk_configuration_and_document_expiry_chain(ttl_admin_app, se
         assert parse_iso_datetime(session_fields["expires_at"]) - parse_iso_datetime(
             session_fields["received_at"]
         ) == timedelta(days=30)
+        if binary:
+            await cli("session", "new", "--session-id", "formal-cli", "--ttl-relative", "7")
+            assert (await sdk.get_session("formal-cli"))["ttl_days"] == 7
+            await cli("session", "config", "set", "formal-cli", "--ttl-relative", "14")
+            assert (await sdk.get_session("formal-cli"))["ttl_days"] == 14
+            await cli("session", "config", "set", "formal-cli", "--inherit-ttl")
+            assert (await sdk.get_session("formal-cli"))["ttl_relative"] is None
         session_record = await service.viking_fs.ttl_registry.get(account, session_uri)
         assert session_record.expires_at == session_fields["expires_at"]
     finally:
@@ -699,3 +706,184 @@ async def test_session_children_have_independent_retention_and_directory_default
     assert await fs.read_file(first, ctx=ctx) == "retain for 30 days"
     assert await fs.read_file(summary, ctx=ctx) == "Retain L0"
     assert await fs.exists(folder, ctx=ctx)
+
+
+@pytest.mark.asyncio
+async def test_session_ttl_formal_api_create_patch_omit_and_inherit(client, service, monkeypatch):
+    from openviking_sdk.client import AsyncHTTPClient
+
+    from openviking.session import session as session_module
+
+    await request(
+        client,
+        "patch",
+        CONFIG,
+        json={"settings": {"ttl": {"sessions": {"mode": "days", "ttl_days": 30}}}},
+    )
+    sdk = AsyncHTTPClient(url="http://testserver", account="default", user="default")
+    sdk._http = client
+    await sdk.create_session("formal-ttl", options={"ttl_relative": 7})
+    created = await sdk.get_session("formal-ttl")
+    assert created["ttl_relative"] == created["ttl_days"] == 7
+    received = created["received_at"]
+    assert parse_iso_datetime(created["expires_at"]) - parse_iso_datetime(received) == timedelta(
+        days=7
+    )
+    await sdk.update_session_config("formal-ttl", {})
+    assert (await sdk.get_session("formal-ttl"))["expires_at"] == created["expires_at"]
+    await sdk.update_session_config("formal-ttl", {"ttl_relative": 14})
+    changed = await sdk.get_session("formal-ttl")
+    assert changed["ttl_relative"] == changed["ttl_days"] == 14
+    assert changed["received_at"] == received
+    await sdk.update_session_config("formal-ttl", {"ttl_relative": None})
+    inherited = await sdk.get_session("formal-ttl")
+    assert inherited["ttl_relative"] is None and inherited["ttl_days"] == 30
+    assert inherited["received_at"] == received
+    fs, ctx = service.viking_fs, root_ctx()
+    body = inherited["uri"] + "/attachments/old.txt"
+    await fs.write_file(body, "old attachment", ctx=ctx)
+    day29 = parse_iso_datetime(received) + timedelta(days=29)
+    monkeypatch.setattr(session_module, "get_current_timestamp", lambda: format_iso8601(day29))
+    await request(
+        client,
+        "post",
+        "/api/v1/sessions/formal-ttl/messages",
+        json={"role": "user", "content": "unrelated"},
+    )
+    renewed = await sdk.get_session("formal-ttl")
+    assert parse_iso_datetime(renewed["expires_at"]) == day29 + timedelta(days=30)
+    assert (await request(client, "get", "/api/v1/content/ttl", params={"uri": body}))[
+        "expires_at"
+    ] == renewed["expires_at"]
+    # Inherit a disabled default: remove root expiry/registry without reviving expired data.
+    await request(
+        client, "patch", CONFIG, json={"settings": {"ttl": {"sessions": {"mode": "disabled"}}}}
+    )
+    await sdk.update_session_config("formal-ttl", {"ttl_relative": None})
+    disabled = await sdk.get_session("formal-ttl")
+    assert not disabled.get("expires_at") and not disabled.get("ttl_days")
+    assert await fs.ttl_registry.get(ctx.account_id, inherited["uri"]) is None
+    for name, options in [("implicit", {}), ("null", {"ttl_relative": None})]:
+        await sdk.create_session(name, options=options)
+        assert not (await sdk.get_session(name)).get("expires_at")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"ttl_relative": True},
+        {"ttl_relative": "7"},
+        {"ttl_relative": 0},
+        {"ttl_relative": -1},
+        {"ttl_relative": 365001},
+        {"ttl_absolute": 2000000000},
+    ],
+)
+async def test_session_ttl_invalid_formal_fields_return_400(client, payload):
+    created = await client.post("/api/v1/sessions", json=payload)
+    assert created.status_code == 400, created.text
+    changed = await client.patch("/api/v1/sessions/invalid/config", json=payload)
+    assert changed.status_code == 400, changed.text
+
+
+@pytest.mark.asyncio
+async def test_session_directory_policy_can_inherit_or_disable_without_rewriting_files(
+    client, service
+):
+    from openviking_sdk.client import AsyncHTTPClient
+
+    sdk = AsyncHTTPClient(url="http://testserver", account="default", user="default")
+    sdk._http = client
+    await sdk.create_session("directory-reset", options={"ttl_relative": 30})
+    fs, ctx = service.viking_fs, root_ctx()
+    root = ROOT + "/sessions/directory-reset"
+    parent, child = root + "/attachments", root + "/attachments/nested"
+    old = child + "/old.txt"
+    await fs.write_file(old, "keep snapshot", ctx=ctx)
+    await sdk.update_ttl(parent, ttl_relative=14)
+    await sdk.update_ttl(child, ttl_relative=7)
+    old_fields = await sdk.get_ttl(old)
+    await fs.write_file(child + "/seven.txt", "seven", ctx=ctx)
+    assert (await sdk.get_ttl(child + "/seven.txt"))["ttl_days"] == 7
+    # Explicit null at the public HTTP entrance restores the nearest ancestor.
+    inherited = await request(
+        client, "patch", "/api/v1/content/ttl", json={"uri": child, "ttl_relative": None}
+    )
+    assert inherited["policy"] == {"mode": "inherit"}
+    await fs.write_file(child + "/fourteen.txt", "fourteen", ctx=ctx)
+    assert (await sdk.get_ttl(child + "/fourteen.txt"))["ttl_days"] == 14
+    await sdk.update_ttl(child, policy={"mode": "disabled"})
+    await fs.write_file(child + "/off.txt", "off", ctx=ctx)
+    assert not (await sdk.get_ttl(child + "/off.txt")).get("expires_at")
+    # Descendants can override disabled; inheritance can then be restored.
+    await sdk.update_ttl(parent, policy={"mode": "inherit"})
+    await sdk.update_ttl(child, policy={"mode": "inherit"})
+    await sdk.update_session_config("directory-reset", {"ttl_relative": 60})
+    await fs.write_file(child + "/sixty.txt", "sixty", ctx=ctx)
+    assert (await sdk.get_ttl(child + "/sixty.txt"))["ttl_days"] == 60
+    assert await sdk.get_ttl(old) == old_fields
+    assert not (await sdk.get_session("directory-reset")).get("expires_at")
+    bad = await client.patch(
+        "/api/v1/content/ttl", json={"uri": old, "policy": {"mode": "disabled"}}
+    )
+    assert bad.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_session_ttl_expired_cannot_be_reset_or_extended(client, service, monkeypatch):
+    await request(
+        client, "post", "/api/v1/sessions", json={"session_id": "expired-config", "ttl_relative": 1}
+    )
+    before = await request(client, "get", "/api/v1/sessions/expired-config")
+    now = parse_iso_datetime(before["expires_at"]) + timedelta(seconds=1)
+    actual = ttl.is_expired
+    monkeypatch.setattr(ttl, "is_expired", lambda value, **_: actual(value, now=now))
+    for value in [30, None]:
+        response = await client.patch(
+            "/api/v1/sessions/expired-config/config", json={"ttl_relative": value}
+        )
+        assert response.status_code == 404
+    raw = service.viking_fs._handle_agfs_read(
+        await service.viking_fs._async_agfs.read(
+            service.viking_fs._uri_to_path(before["uri"] + "/.meta.json", ctx=root_ctx())
+        )
+    )
+    assert json.loads(raw)["expires_at"] == before["expires_at"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_session_ttl_uses_formal_creation_and_config(client, monkeypatch):
+    from openviking.server import mcp_endpoint as endpoint
+
+    monkeypatch.setattr(endpoint, "_get_ctx", root_ctx)
+    await endpoint.create_session("mcp-ttl-config", ttl_relative=7)
+    created = await request(client, "get", "/api/v1/sessions/mcp-ttl-config")
+    assert created["ttl_days"] == 7
+    await endpoint.update_session_config("mcp-ttl-config", {"ttl_relative": 14})
+    assert (await request(client, "get", "/api/v1/sessions/mcp-ttl-config"))["ttl_days"] == 14
+    await endpoint.update_session_config("mcp-ttl-config", {})
+    assert (await request(client, "get", "/api/v1/sessions/mcp-ttl-config"))["ttl_days"] == 14
+    await endpoint.update_session_config("mcp-ttl-config", {"ttl_relative": None})
+    result = await request(client, "get", "/api/v1/sessions/mcp-ttl-config")
+    assert result["ttl_relative"] is None and not result.get("expires_at")
+
+
+@pytest.mark.asyncio
+async def test_session_default_does_not_adopt_unmanaged_but_explicit_override_does(client):
+    await request(client, "post", "/api/v1/sessions", json={"session_id": "unmanaged"})
+    await request(
+        client,
+        "patch",
+        CONFIG,
+        json={"settings": {"ttl": {"sessions": {"mode": "days", "ttl_days": 30}}}},
+    )
+    await request(
+        client,
+        "post",
+        "/api/v1/sessions/unmanaged/messages",
+        json={"role": "user", "content": "still unmanaged"},
+    )
+    assert not (await request(client, "get", "/api/v1/sessions/unmanaged")).get("expires_at")
+    await request(client, "patch", "/api/v1/sessions/unmanaged/config", json={"ttl_relative": 7})
+    assert (await request(client, "get", "/api/v1/sessions/unmanaged"))["ttl_days"] == 7

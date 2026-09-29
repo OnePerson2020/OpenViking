@@ -148,6 +148,23 @@ def compute_expires_at(received_at: datetime, ttl_days: int) -> datetime:
     return received_at + timedelta(days=ttl_days)
 
 
+def session_content_updated_at(fields: Mapping[str, Any]) -> datetime:
+    """Recover the latest content time without treating a TTL edit as a write."""
+    timestamps = [
+        parse_iso_datetime(fields[key])
+        for key in ("received_at", "last_message_at", "created_at")
+        if fields.get(key)
+    ]
+    # Older sessions renewed the deadline without updating received_at.
+    if fields.get("ttl_days") and fields.get("expires_at"):
+        timestamps.append(
+            parse_iso_datetime(fields["expires_at"]) - timedelta(days=fields["ttl_days"])
+        )
+    if not timestamps:
+        raise ValueError("session content update time is unavailable")
+    return max(timestamps)
+
+
 def freeze_ttl_fields(
     uri: str,
     *,

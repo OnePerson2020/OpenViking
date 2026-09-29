@@ -1556,6 +1556,9 @@ enum ObserverCommands {
 enum SessionCommands {
     /// Create a new session
     New {
+        /// Session retention in whole days; omit to inherit
+        #[arg(long, value_parser = clap::value_parser!(i64).range(1..=365000))]
+        ttl_relative: Option<i64>,
         /// Optional session ID
         #[arg(long = "session-id", value_name = "session-id")]
         session_id: Option<String>,
@@ -1657,6 +1660,12 @@ enum SessionCommands {
 enum SessionConfigCommands {
     /// Set mutable session configuration
     Set {
+        /// Set the session retention override in whole days
+        #[arg(long, conflicts_with = "inherit_ttl", value_parser = clap::value_parser!(i64).range(1..=365000))]
+        ttl_relative: Option<i64>,
+        /// Clear the session override and inherit the current default
+        #[arg(long, conflicts_with = "ttl_relative")]
+        inherit_ttl: bool,
         /// Session ID
         #[arg(value_name = "session-id")]
         session_id: String,
@@ -1666,6 +1675,7 @@ enum SessionConfigCommands {
             value_name = "key=value",
             value_delimiter = ',',
             required_unless_present_any = [
+                "ttl_relative", "inherit_ttl",
                 "no_event_tags",
                 "auto_commit_policy_json",
                 "no_auto_commit"
@@ -1677,6 +1687,7 @@ enum SessionConfigCommands {
         #[arg(
             long = "no-event-tags",
             required_unless_present_any = [
+                "ttl_relative", "inherit_ttl",
                 "event_tags",
                 "auto_commit_policy_json",
                 "no_auto_commit"
@@ -1688,7 +1699,7 @@ enum SessionConfigCommands {
         #[arg(
             long = "auto-commit-policy-json",
             value_name = "json",
-            required_unless_present_any = ["event_tags", "no_event_tags", "no_auto_commit"],
+            required_unless_present_any = ["ttl_relative", "inherit_ttl", "event_tags", "no_event_tags", "no_auto_commit"],
             conflicts_with = "no_auto_commit"
         )]
         auto_commit_policy_json: Option<String>,
@@ -1696,6 +1707,7 @@ enum SessionConfigCommands {
         #[arg(
             long = "no-auto-commit",
             required_unless_present_any = [
+                "ttl_relative", "inherit_ttl",
                 "event_tags",
                 "no_event_tags",
                 "auto_commit_policy_json"
@@ -1997,6 +2009,10 @@ enum PrivacyCommands {
 enum TtlCommands {
     /// Read a live document's content update time and retention policy
     Get { uri: String },
+    /// Restore a session subdirectory to its inherited default
+    Inherit { uri: String },
+    /// Disable retention for future files in a session subdirectory
+    Disable { uri: String },
     /// Set a live document's retention, independently of global TTL
     Set {
         uri: String,
@@ -3421,6 +3437,16 @@ async fn main() {
                     client
                         .get("/api/v1/content/ttl", &[("uri".into(), uri)])
                         .await
+                }
+                TtlCommands::Inherit { uri } => {
+                    client.patch("/api/v1/content/ttl", &serde_json::json!({
+                        "uri": uri, "policy": {"mode": "inherit"}
+                    }), &[]).await
+                }
+                TtlCommands::Disable { uri } => {
+                    client.patch("/api/v1/content/ttl", &serde_json::json!({
+                        "uri": uri, "policy": {"mode": "disabled"}
+                    }), &[]).await
                 }
                 TtlCommands::Set { uri, expires_at, ttl_relative } => {
                     client

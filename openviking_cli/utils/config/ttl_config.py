@@ -254,6 +254,12 @@ class ResourceTTL(BaseModel):
         return TTLPolicy(mode="disabled")
 
 
+class SessionTTL(BaseModel):
+    """Session override: null inherits the current sessions policy."""
+
+    ttl_relative: Optional[StrictInt] = Field(default=None, ge=1, le=365000)
+
+
 class DocumentTTL(BaseModel):
     """Set one live file's relative retention or fixed ISO 8601 deadline."""
 
@@ -264,4 +270,28 @@ class DocumentTTL(BaseModel):
     def _one_policy(self) -> "DocumentTTL":
         if (self.expires_at is None) == (self.ttl_relative is None):
             raise ValueError("provide exactly one of expires_at or ttl_relative")
+        return self
+
+
+class ContentTTL(DocumentTTL):
+    """File deadline or a session directory's relative/default policy."""
+
+    policy: Optional[TTLPolicy] = None
+
+    @model_validator(mode="after")
+    def _one_policy(self) -> "ContentTTL":
+        if self.policy is not None:
+            if self.policy.mode == "absolute":
+                raise ValueError("session directories support relative retention only")
+            if self.expires_at is not None or self.ttl_relative is not None:
+                raise ValueError("policy cannot be combined with expires_at or ttl_relative")
+            return self
+        if (
+            "ttl_relative" in self.model_fields_set
+            and self.ttl_relative is None
+            and self.expires_at is None
+        ):
+            self.policy = TTLPolicy(mode="inherit")
+            return self
+        super()._one_policy()
         return self

@@ -43,6 +43,37 @@ async def set_expiry(fs, uri, *, is_dir=False, expiry=FUTURE, generation="g1"):
 
 
 @pytest.mark.asyncio
+async def test_expired_file_hidden_before_cleanup_and_physically_removed(binding_fs):
+    fs, ctx = binding_fs, root_ctx()
+    expired, live = ROOT + "/expired.txt", ROOT + "/live.txt"
+    for uri in (expired, live):
+        await fs.write_file_bytes(uri, b"acceptance needle", ctx=ctx)
+    await set_expiry(fs, expired, expiry=PAST)
+    await set_expiry(fs, live, expiry=FUTURE)
+    record = await fs.ttl_registry.get(ctx.account_id, expired)
+    # Confirm hiding is independent of physical deletion.
+    assert await fs._async_agfs.stat(fs._uri_to_path(expired, ctx=ctx))
+    for result in (
+        await fs.ls(ROOT, ctx=ctx),
+        await fs.glob("*.txt", uri=ROOT, ctx=ctx),
+        await fs.grep(ROOT, "acceptance needle", ctx=ctx),
+    ):
+        assert "live.txt" in str(result)
+        assert "expired.txt" not in str(result)
+    cleanup = TTLCleanupService(
+        service=SimpleNamespace(viking_fs=fs, fs=SimpleNamespace(rm=fs.rm)),
+        service_loop=asyncio.get_running_loop(),
+    )
+    assert (await _cleanup_once(cleanup, record))["deleted"]
+    from openviking.server.error_mapping import is_storage_not_found
+
+    with pytest.raises(Exception) as missing:
+        await fs._async_agfs.stat(fs._uri_to_path(expired, ctx=ctx), bypass_cache=True)
+    assert is_storage_not_found(missing.value)
+    assert await fs.read_file_bytes(live, ctx=ctx) == b"acceptance needle"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["cp", "mv"])
 @pytest.mark.parametrize("is_dir", [False, True])
 async def test_transfer_keeps_each_file_deadline(binding_fs, operation, is_dir):

@@ -119,7 +119,6 @@ async def test_parent_summary_deletion_preserves_live_descendant_vectors(trailin
     target = parent + "/" if trailing_slash else parent
 
     await fs._delete_from_vector_store([target], ctx=ctx)
-    await fs._confirm_vector_uris_cleared([target], ctx=ctx)
 
     assert {row["id"] for row in rows} == {"live", "nested", "prefix", "foreign"}
 

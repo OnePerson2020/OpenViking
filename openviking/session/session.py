@@ -337,6 +337,7 @@ class SessionMeta:
     # for the read barrier and cleanup scan. Successful appends and commits renew
     # it from the saved ttl_days, never from the current default configuration.
     ttl_days: Optional[int] = None
+    ttl_relative: Optional[int] = None
     received_at: str = ""
     expires_at: str = ""
     ttl_generation: str = ""
@@ -367,6 +368,7 @@ class SessionMeta:
             ),
             "last_message_at": self.last_message_at,
             "last_auto_commit_at": self.last_auto_commit_at,
+            "ttl_relative": self.ttl_relative,
         }
         if self.total_message_count is not None:
             data["total_message_count"] = self.total_message_count
@@ -433,6 +435,7 @@ class SessionMeta:
             last_auto_commit_at=data.get("last_auto_commit_at", ""),
             event_search_tags=data.get("event_search_tags"),
             ttl_days=data.get("ttl_days"),
+            ttl_relative=data.get("ttl_relative"),
             received_at=data.get("received_at", ""),
             expires_at=data.get("expires_at", ""),
             ttl_generation=data.get("ttl_generation", ""),
@@ -674,9 +677,17 @@ class Session:
 
     def _freeze_ttl_snapshot(self, *, config=None) -> None:
         """Populate the session's frozen TTL fields from the current policy."""
-        from openviking.core.ttl import freeze_ttl_fields
+        from openviking.core.ttl import compute_expires_at, freeze_ttl_fields
 
         snapshot = freeze_ttl_fields(self._session_uri, config=config)
+        if self._meta.ttl_relative is not None:
+            received = datetime.now(timezone.utc)
+            snapshot = {
+                "ttl_days": self._meta.ttl_relative,
+                "received_at": format_iso8601(received),
+                "expires_at": format_iso8601(compute_expires_at(received, self._meta.ttl_relative)),
+                "ttl_generation": str(uuid4()),
+            }
         if not snapshot:
             return
         self._meta.ttl_days = snapshot["ttl_days"]
@@ -725,13 +736,22 @@ class Session:
         event_search_tags: Optional[List[str]] = None,
         auto_commit_policy: Optional[Dict[str, Any]] = None,
         update_auto_commit_policy: bool = False,
+        ttl_relative: Optional[int] = None,
+        update_ttl: bool = False,
     ) -> None:
         """Update mutable session config without overwriting concurrent meta changes."""
         update_auto_commit_policy = update_auto_commit_policy or auto_commit_policy is not None
+        if update_ttl:
+            from openviking_cli.utils.config.ttl_config import SessionTTL
+
+            ttl_relative = SessionTTL(ttl_relative=ttl_relative).ttl_relative
         session_path = self._viking_fs._uri_to_path(self._session_uri, ctx=self.ctx)
-        lease = await self._viking_fs._async_agfs.pathlock_acquire_exact(
-            session_path, timeout_secs=_SESSION_PHASE1_LOCK_TIMEOUT_SECONDS
+        acquire = (
+            self._viking_fs._async_agfs.pathlock_acquire_tree
+            if update_ttl
+            else self._viking_fs._async_agfs.pathlock_acquire_exact
         )
+        lease = await acquire(session_path, timeout_secs=_SESSION_PHASE1_LOCK_TIMEOUT_SECONDS)
         try:
             try:
                 meta_content = await self._viking_fs.read_file(
@@ -742,6 +762,10 @@ class Session:
             except Exception as exc:
                 if not _is_storage_not_found(exc):
                     raise
+                if update_ttl:
+                    raise NotFoundError(self._session_uri, "session") from exc
+            if update_ttl:
+                await self._update_ttl_config(ttl_relative)
             if event_search_tags is not None:
                 self._meta.event_search_tags = list(event_search_tags)
             if update_auto_commit_policy:
@@ -751,9 +775,34 @@ class Session:
                     existing = dict(self._meta.auto_commit_policy or {})
                     existing.update(auto_commit_policy)
                     self._meta.auto_commit_policy = AutoCommitPolicy.from_dict(existing).to_dict()
-            await self._save_meta()
+            await self._save_meta(lease_ref=lease if update_ttl else None)
         finally:
             await self._viking_fs._async_agfs.pathlock_release(lease)
+
+    async def _update_ttl_config(self, ttl_relative: Optional[int]) -> None:
+        from openviking.config.ttl import resolve_ttl_config
+        from openviking.core.ttl import (
+            compute_expires_at,
+            hidden_by_ttl,
+            resolve_ttl_days,
+            session_content_updated_at,
+        )
+
+        if hidden_by_ttl(self._meta.expires_at):
+            raise NotFoundError(self._session_uri, "session")
+        config = await resolve_ttl_config(self._viking_fs, self.ctx.account_id)
+        days = ttl_relative if ttl_relative is not None else resolve_ttl_days(self.uri, config)
+        self._meta.ttl_relative = ttl_relative
+        if self._meta.ttl_per_file:
+            # The root metadata owns the default; existing child snapshots stay intact.
+            self._meta.ttl_days = days
+            return
+        updated = session_content_updated_at(self._meta.to_dict())
+        self._meta.ttl_days = days
+        self._meta.received_at = format_iso8601(updated)
+        self._meta.expires_at = format_iso8601(compute_expires_at(updated, days)) if days else ""
+        if days and not self._meta.ttl_generation:
+            self._meta.ttl_generation = str(uuid4())
 
     async def update_event_search_tags(self, event_search_tags: List[str]) -> None:
         """Update event-memory default tags."""

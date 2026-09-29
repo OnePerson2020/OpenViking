@@ -20,6 +20,7 @@ from openviking.server.telemetry import run_operation
 from openviking.telemetry import TelemetryRequest
 from openviking.utils.image_search import is_viking_uri
 from openviking_cli.utils import get_logger
+from openviking_cli.utils.config.ttl_config import SessionTTL
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 logger = get_logger(__name__)
@@ -166,7 +167,7 @@ class BatchAddMessageRequest(BaseModel):
     telemetry: TelemetryRequest = False
 
 
-class CreateSessionRequest(BaseModel):
+class CreateSessionRequest(SessionTTL):
     """Request model for creating a session."""
 
     session_id: Optional[str] = None
@@ -174,6 +175,13 @@ class CreateSessionRequest(BaseModel):
     auto_commit_policy: Optional[AutoCommitPolicyRequest] = None
     memory_extraction_config: Optional[MemoryExtractionConfigRequest] = None
     telemetry: TelemetryRequest = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_absolute_ttl(cls, value):
+        if isinstance(value, dict) and "ttl_absolute" in value:
+            raise ValueError("sessions support ttl_relative only")
+        return value
 
 
 def _event_tags_from_extraction_config(
@@ -317,6 +325,7 @@ async def create_session(
             auto_commit_policy=auto_commit_policy_payload,
             update_auto_commit_policy=update_auto_commit_policy,
             event_tags=event_tags,
+            ttl_relative=request.ttl_relative,
         )
         return {
             "session_id": session.session_id,
@@ -366,17 +375,17 @@ async def get_session(
     result["pending_tokens"] = int(session.meta.pending_tokens or 0)
     result["auto_commit_policy"] = service.sessions.effective_auto_commit_policy(session)
     result.pop("event_search_tags", None)
-    result["memory_extraction_config"] = (
-        service.sessions.effective_memory_extraction_config(session)
+    result["memory_extraction_config"] = service.sessions.effective_memory_extraction_config(
+        session
     )
     return Response(status="ok", result=result)
 
 
-class UpdateSessionConfigRequest(BaseModel):
+class UpdateSessionConfigRequest(SessionTTL):
     """Request body for PATCH /sessions/{id}/config.
 
-    Only the mutable extraction config is editable. Fields left unset are not
-    changed; setting ``events.tags`` to an empty list clears the default.
+    Fields left unset are not changed. ``ttl_relative=null`` restores TTL
+    inheritance; setting ``events.tags`` to an empty list clears the tags.
     """
 
     memory_extraction_config: Optional[MemoryExtractionConfigRequest] = None
@@ -400,9 +409,7 @@ async def update_session_config(
     from openviking_cli.exceptions import NotFoundError
 
     service = get_service()
-    event_tags = _event_tags_from_extraction_config(
-        request.memory_extraction_config
-    )
+    event_tags = _event_tags_from_extraction_config(request.memory_extraction_config)
     update_auto_commit_policy = "auto_commit_policy" in request.model_fields_set
     auto_commit_policy = (
         request.auto_commit_policy.model_dump(exclude_none=True)
@@ -417,6 +424,8 @@ async def update_session_config(
             event_tags=event_tags,
             auto_commit_policy=auto_commit_policy,
             update_auto_commit_policy=update_auto_commit_policy,
+            ttl_relative=request.ttl_relative,
+            update_ttl="ttl_relative" in request.model_fields_set,
         )
         return {
             "session_id": session.session_id,
@@ -434,9 +443,9 @@ async def update_session_config(
         )
     except NotFoundError:
         return error_response("NOT_FOUND", f"Session {session_id} not found")
-    return Response(
-        status="ok", result=execution.result, telemetry=execution.telemetry
-    ).model_dump(exclude_none=True)
+    return Response(status="ok", result=execution.result, telemetry=execution.telemetry).model_dump(
+        exclude_none=True
+    )
 
 
 @router.get("/{session_id}/tool-results")
@@ -535,9 +544,7 @@ async def get_session_archive(
     try:
         result = await session.get_session_archive(archive_id)
     except NotFoundError:
-        return error_response(
-            code="NOT_FOUND", message=f"Archive {archive_id} not found"
-        )
+        return error_response(code="NOT_FOUND", message=f"Archive {archive_id} not found")
     return Response(status="ok", result=_to_jsonable(result))
 
 

@@ -2106,3 +2106,41 @@ func TestSessionAPIsSendEventMemoryTags(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionTTLOverrideOmitAndInherit(t *testing.T) {
+	var bodies []map[string]any
+	client, closeServer := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodies = append(bodies, readJSONBody(t, r))
+		writeOK(t, w, map[string]any{})
+	}))
+	defer closeServer()
+	days := 7
+	if _, err := client.CreateSession(context.Background(), &CreateSessionOptions{TTLRelative: &days}); err != nil {
+		t.Fatal(err)
+	}
+	days = 14
+	if _, err := client.UpdateSessionConfig(context.Background(), "ttl", &UpdateSessionConfigOptions{TTLRelative: &days}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.UpdateSessionConfig(context.Background(), "ttl", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.UpdateSessionConfig(context.Background(), "ttl", &UpdateSessionConfigOptions{InheritTTL: true}); err != nil {
+		t.Fatal(err)
+	}
+	if bodies[0]["ttl_relative"] != float64(7) || bodies[1]["ttl_relative"] != float64(14) {
+		t.Fatalf("wrong retention: %#v", bodies)
+	}
+	if _, ok := bodies[2]["ttl_relative"]; ok {
+		t.Fatal("omitted TTL must remain absent")
+	}
+	if value, ok := bodies[3]["ttl_relative"]; !ok || value != nil {
+		t.Fatal("inherit must send null")
+	}
+	if _, err := client.UpdateSessionConfig(context.Background(), "ttl", &UpdateSessionConfigOptions{TTLRelative: &days, InheritTTL: true}); err == nil {
+		t.Fatal("conflicting TTL options accepted")
+	}
+	if len(bodies) != 4 {
+		t.Fatal("conflicting options sent a request")
+	}
+}

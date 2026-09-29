@@ -32,7 +32,7 @@ from openviking.storage.vector_ids import is_vector_record_id
 from openviking.telemetry import TelemetryRequest
 from openviking_cli.exceptions import InvalidArgumentError, NotFoundError, PermissionDeniedError
 from openviking_cli.utils import get_logger
-from openviking_cli.utils.config.ttl_config import DocumentTTL
+from openviking_cli.utils.config.ttl_config import ContentTTL
 
 logger = get_logger(__name__)
 
@@ -106,7 +106,7 @@ class ReindexRequest(BaseModel):
 router = APIRouter(prefix="/api/v1/content", tags=["content"])
 
 
-class UpdateTTLRequest(DocumentTTL):
+class UpdateTTLRequest(ContentTTL):
     model_config = ConfigDict(extra="forbid")
     uri: str
 
@@ -127,7 +127,8 @@ async def update_ttl(
     return Response(
         status="ok",
         result=await get_service().fs.update_ttl(
-            uri, request.expires_at, _ctx, ttl_relative=request.ttl_relative
+            uri, request.expires_at, _ctx, ttl_relative=request.ttl_relative,
+            policy=request.policy,
         ),
     )
 

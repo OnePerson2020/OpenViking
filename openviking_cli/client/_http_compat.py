@@ -146,6 +146,7 @@ class AsyncHTTPClient(import_openviking_sdk().AsyncHTTPClient):
         *,
         memory_extraction_config: Dict[str, Any] | None = None,
         auto_commit_policy: Any = _SESSION_CONFIG_UNSET,
+        ttl_relative: Any = _SESSION_CONFIG_UNSET,
         telemetry: Any = False,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
@@ -153,6 +154,8 @@ class AsyncHTTPClient(import_openviking_sdk().AsyncHTTPClient):
             payload["memory_extraction_config"] = memory_extraction_config
         if auto_commit_policy is not _SESSION_CONFIG_UNSET:
             payload["auto_commit_policy"] = auto_commit_policy
+        if ttl_relative is not _SESSION_CONFIG_UNSET:
+            payload["ttl_relative"] = ttl_relative
         if telemetry is not False:
             payload["telemetry"] = telemetry
         session_path = self._path_segment(session_id)
@@ -209,6 +212,7 @@ class SyncHTTPClient(import_openviking_sdk().SyncHTTPClient):
         *,
         memory_extraction_config: Dict[str, Any] | None = None,
         auto_commit_policy: Any = _SESSION_CONFIG_UNSET,
+        ttl_relative: Any = _SESSION_CONFIG_UNSET,
         telemetry: Any = False,
     ) -> Dict[str, Any]:
         kwargs: Dict[str, Any] = {
@@ -217,6 +221,8 @@ class SyncHTTPClient(import_openviking_sdk().SyncHTTPClient):
         }
         if auto_commit_policy is not _SESSION_CONFIG_UNSET:
             kwargs["auto_commit_policy"] = auto_commit_policy
+        if ttl_relative is not _SESSION_CONFIG_UNSET:
+            kwargs["ttl_relative"] = ttl_relative
         return run_async(self._async_client.update_session_config(session_id, **kwargs))
 
     def commit_session(

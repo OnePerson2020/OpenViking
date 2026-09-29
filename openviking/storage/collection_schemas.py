@@ -981,10 +981,7 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                             self._merge_request_stats(embedding_msg.telemetry_id, processed=1)
                             self._record_request_success(embedding_msg)
                             return ProcessResult.success(inserted_data)
-                    elif inserted_data.get("level", 2) == 2 and (
-                        (ttl_object_for_uri(str(uri or "")) or (None,))[0] == OBJECT_TYPE_EVENT
-                        or ttl_scope_for_uri(str(uri or "")) in {"resources", "sessions"}
-                    ):
+                    elif inserted_data.get("level", 2) == 2:
                         result = await self._write_ttl_vector_if_current(
                             embedding_msg, ctx, _write_vector
                         )
@@ -1104,15 +1101,16 @@ class TextEmbeddingHandler(DequeueHandlerBase):
         mutually exclusive with generation-fenced cleanup. A delayed message
         from a deleted/recreated URI therefore becomes a harmless no-op.
         """
-        from openviking.core.ttl import OBJECT_TYPE_EVENT, hidden_by_ttl, ttl_object_for_uri
+        from openviking.core.ttl import hidden_by_ttl
         from openviking.session.memory.utils.messages import parse_memory_file_with_fields
         from openviking.storage.viking_fs import get_viking_fs
 
         data = embedding_msg.context_data
         uri = str(data.get("uri") or "")
         target = ttl_object_for_uri(uri)
-        resource = ttl_scope_for_uri(uri) == "resources"
-        session = ttl_scope_for_uri(uri) == "sessions"
+        scope = ttl_scope_for_uri(uri)
+        resource = scope == "resources"
+        session = scope == "sessions"
         if not resource and not session and (target is None or target[0] != OBJECT_TYPE_EVENT):
             return await write_vector()
 

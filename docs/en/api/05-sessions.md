@@ -1735,3 +1735,33 @@ results = await client.search(query=query, session_id=session_id)
 - [Retrieval](06-retrieval.md) - Search with session
 - [Resources](02-resources.md) - Resource management
 - [Background Tasks](17-tasks.md) - track commit tasks
+
+
+## Session TTL
+
+[TTL lifetime and renewal](../concepts/17-ttl.md)
+
+`POST /api/v1/sessions` accepts `ttl_relative` as a positive integer in days
+(1–365000). Omitted or null uses the applicable directory/session/library default.
+`PATCH /api/v1/sessions/{session_id}/config` preserves TTL when the field is
+omitted, sets an override when it is an integer, and restores inheritance when
+it is null. Sessions do not accept `ttl_absolute`.
+
+Changing configuration does not count as a content update or revive an expired
+session. In per-file sessions, changing the root default preserves existing child
+snapshots. Updating library/directory defaults does not adopt existing unmanaged data.
+
+```python
+await client.create_session("demo", options={"ttl_relative": 30})
+await client.update_session_config("demo", {"ttl_relative": 60})
+await client.update_session_config("demo", {"ttl_relative": None})
+```
+
+```bash
+ov session new --session-id demo --ttl-relative 30
+ov session config set demo --ttl-relative 60
+ov session config set demo --inherit-ttl
+```
+
+MCP provides `create_session(session_id, ttl_relative)` and
+`update_session_config(session_id, config)` with the same field semantics.

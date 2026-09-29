@@ -18,6 +18,9 @@ func (c *Client) CreateSession(ctx context.Context, opts *CreateSessionOptions) 
 	}
 	payload := map[string]any{}
 	setString(payload, "session_id", opts.SessionID)
+	if opts.TTLRelative != nil {
+		payload["ttl_relative"] = *opts.TTLRelative
+	}
 	setAny(payload, "memory_policy", opts.MemoryPolicy)
 	if opts.DisableAutoCommit {
 		payload["auto_commit_policy"] = nil
@@ -57,7 +60,15 @@ func (c *Client) UpdateSessionConfig(ctx context.Context, sessionID string, opts
 	if opts == nil {
 		opts = &UpdateSessionConfigOptions{}
 	}
+	if opts.InheritTTL && opts.TTLRelative != nil {
+		return nil, errors.New("TTLRelative and InheritTTL are mutually exclusive")
+	}
 	payload := map[string]any{}
+	if opts.InheritTTL {
+		payload["ttl_relative"] = nil
+	} else if opts.TTLRelative != nil {
+		payload["ttl_relative"] = *opts.TTLRelative
+	}
 	setAny(payload, "memory_extraction_config", opts.MemoryExtractionConfig)
 	if opts.AutoCommitPolicy != nil {
 		payload["auto_commit_policy"] = *opts.AutoCommitPolicy

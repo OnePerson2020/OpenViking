@@ -277,3 +277,24 @@ def test_enabled_config_hides_expired_only(monkeypatch):
     assert ttl.hidden_by_ttl("2999-01-01T00:00:00.000Z", now=now) is False
     # Absent expiry stays visible even with TTL on.
     assert ttl.hidden_by_ttl("", now=now) is False
+
+
+def test_session_content_time_recovers_legacy_renewal_before_policy_edit():
+    fields = {
+        "created_at": "2026-01-01T00:00:00Z",
+        "received_at": "2026-01-01T00:00:00Z",
+        "last_message_at": "2026-01-02T00:00:00Z",
+        "ttl_days": 7,
+        "expires_at": "2026-01-10T00:00:00Z",
+    }
+    assert ttl.session_content_updated_at(fields) == datetime(2026, 1, 3, tzinfo=timezone.utc)
+    assert fields["ttl_days"] == 7
+
+
+def test_session_content_time_uses_last_message_without_ttl():
+    assert ttl.session_content_updated_at(
+        {
+            "created_at": "2026-01-01T00:00:00Z",
+            "last_message_at": "2026-01-04T00:00:00Z",
+        }
+    ) == datetime(2026, 1, 4, tzinfo=timezone.utc)

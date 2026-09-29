@@ -236,6 +236,7 @@ class SessionService:
         auto_commit_policy: Optional[Dict[str, Any]] = None,
         update_auto_commit_policy: bool = False,
         event_tags: Optional[List[str]] = None,
+        ttl_relative: Optional[int] = None,
     ) -> Session:
         """Create a session and persist its root path.
 
@@ -260,6 +261,9 @@ class SessionService:
                 if await existing.exists(include_expired=True):
                     raise AlreadyExistsError(f"Session '{session_id}' already exists")
             session = self.session(ctx, session_id)
+            from openviking_cli.utils.config.ttl_config import SessionTTL
+
+            session.meta.ttl_relative = SessionTTL(ttl_relative=ttl_relative).ttl_relative
             if memory_policy is not None:
                 policy = MemoryPolicy.from_dict(memory_policy)
                 policy.validate_memory_types(
@@ -526,6 +530,8 @@ class SessionService:
         event_tags: Optional[List[str]] = None,
         auto_commit_policy: Optional[Dict[str, Any]] = None,
         update_auto_commit_policy: bool = False,
+        ttl_relative: Optional[int] = None,
+        update_ttl: bool = False,
     ) -> Session:
         """Update the mutable parts of a session's config.
 
@@ -541,11 +547,13 @@ class SessionService:
             if event_tags is not None
             else None
         )
-        if normalized_event_tags is not None or update_auto_commit_policy:
+        if normalized_event_tags is not None or update_auto_commit_policy or update_ttl:
             await session.update_config(
                 event_search_tags=normalized_event_tags,
                 auto_commit_policy=auto_commit_policy,
                 update_auto_commit_policy=update_auto_commit_policy,
+                ttl_relative=ttl_relative,
+                update_ttl=update_ttl,
             )
         return session
 

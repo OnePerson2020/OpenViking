@@ -6,7 +6,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, List, Optional
 
 from openviking.server.identity import RequestContext
-from openviking.storage.expr import And, Eq, In, Or, PathScope
+from openviking.storage.expr import And, Eq, Or, PathScope
 from openviking.storage.viking_fs._base import logger
 
 if TYPE_CHECKING:
@@ -73,24 +73,6 @@ class _VectorMixin:
         if residue:
             raise RuntimeError(
                 f"Vector records still present after delete: {target_uri} (residue={residue})"
-            )
-
-    async def _confirm_vector_uris_cleared(
-        self, uris: List[str], ctx: Optional[RequestContext] = None
-    ) -> None:
-        """Strictly confirm exact URI rows are gone without touching children."""
-        vector_store = self._get_vector_store()
-        targets = list(dict.fromkeys(uri.rstrip("/") for uri in uris if uri))
-        if not vector_store or not targets:
-            return
-        residue = await vector_store.count(
-            filter=In("uri", targets),
-            ctx=self._ctx_or_default(ctx),
-        )
-        if residue:
-            raise RuntimeError(
-                "Vector records still present after delete: "
-                f"{', '.join(targets)} (residue={residue})"
             )
 
     async def _copy_vector_store_uris(

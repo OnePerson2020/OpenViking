@@ -112,7 +112,6 @@ def _make_service(
         remove_files=AsyncMock(),
         rm=AsyncMock(side_effect=rm_error),
         _delete_from_vector_store=AsyncMock(),
-        _confirm_vector_uris_cleared=AsyncMock(),
         _count_cache={"stale": (1, 0)},
     )
     queue = SimpleNamespace(snapshot=AsyncMock(return_value=[]), enqueue=AsyncMock())
@@ -191,7 +190,6 @@ async def test_expired_object_is_deleted_strictly_and_registry_removed(
     )
     assert viking_fs.rm.await_count == 1
     viking_fs._delete_from_vector_store.assert_not_awaited()
-    viking_fs._confirm_vector_uris_cleared.assert_not_awaited()
     registry.remove_if_generation.assert_awaited_once_with(
         record.account_id, record.object_uri, record.generation
     )
