@@ -17,13 +17,6 @@ from openviking.storage.context_update_plan import (
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 
-@pytest.fixture(autouse=True)
-def unmanaged_resources(monkeypatch):
-    monkeypatch.setattr(
-        "openviking.storage.resource_ttl.prepare_resource_ttl", AsyncMock(return_value={})
-    )
-
-
 class _DummyVikingDB:
     def get_embedder(self):
         return None

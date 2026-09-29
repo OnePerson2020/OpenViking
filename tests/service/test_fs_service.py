@@ -19,14 +19,6 @@ from openviking_cli.exceptions import InvalidArgumentError
 from openviking_cli.session.user_id import UserIdentifier
 
 
-@pytest.fixture
-def unmanaged_resource_ttl(monkeypatch):
-    """Listing coordination fakes contain no resource TTL sidecars."""
-    monkeypatch.setattr(
-        "openviking.storage.ttl_view.resource_ttl_fields", AsyncMock(return_value={})
-    )
-
-
 class _FakeVikingFS:
     def __init__(self, *, rm_error=None, events=None, parent_exists=True):
         self.rm_calls = []
@@ -493,9 +485,7 @@ async def test_grep_projects_tags_when_include_tags_is_requested(request_context
 
 
 @pytest.mark.asyncio
-async def test_ls_and_tree_skip_tag_projection_without_tags_or_include_tags(
-    request_context, unmanaged_resource_ttl
-):
+async def test_ls_and_tree_skip_tag_projection_without_tags_or_include_tags(request_context):
     entries = [{"uri": "viking://resources/a.md", "isDir": False}]
     viking_fs = SimpleNamespace(
         ls=AsyncMock(return_value=entries),
@@ -524,7 +514,7 @@ async def test_ls_and_tree_skip_tag_projection_without_tags_or_include_tags(
     [(1, False), (2, False), (3, True)],
 )
 async def test_ls_and_tree_detect_more_entries_with_n_plus_one(
-    request_context, method_name, entry_count, expected_has_more, unmanaged_resource_ttl
+    request_context, method_name, entry_count, expected_has_more
 ):
     entries = [
         {"uri": f"viking://resources/{index}.md", "isDir": False} for index in range(entry_count)
@@ -703,9 +693,7 @@ async def test_tagged_grep_reuses_tags_returned_by_viking_fs(request_context):
 
 
 @pytest.mark.asyncio
-async def test_ls_applies_offset_and_node_limit_after_tag_filtering(
-    request_context, unmanaged_resource_ttl
-):
+async def test_ls_applies_offset_and_node_limit_after_tag_filtering(request_context):
     entries = [
         {
             "uri": f"viking://resources/unmatched-{index:03d}.md",
@@ -774,7 +762,6 @@ async def test_ls_applies_offset_and_node_limit_after_tag_filtering(
 @pytest.mark.asyncio
 async def test_ls_tag_filter_keeps_zero_node_limit_unbounded_for_entry_and_simple_output(
     request_context,
-    unmanaged_resource_ttl,
 ):
     entries = [
         {"uri": "viking://resources/a.md", "isDir": False},
@@ -1573,11 +1560,9 @@ async def test_resource_rm_refreshes_memory_overview_for_cleaned_memories(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("removal", ["interactive", "ttl", "ttl_confirmation"])
-async def test_resource_ttl_removal_preserves_related_memories_and_watch(
-    request_context, monkeypatch, removal
-):
-    uri = "viking://resources/watched.txt"
+@pytest.mark.parametrize("removal", ["ttl", "ttl_confirmation"])
+async def test_cleanup_preserves_related_memories_and_watch(request_context, monkeypatch, removal):
+    uri = "viking://user/default/memories/events/2026/09/28"
     memory = {"content": "Long-term preference referring to watched.txt"}
     original = dict(memory)
 

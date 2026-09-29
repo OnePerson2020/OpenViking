@@ -12,14 +12,6 @@ from openviking.storage import resource_diff
 from openviking.storage.index_action import FieldPatch
 
 
-@pytest.fixture(autouse=True)
-def unmanaged_resources(monkeypatch):
-    # These plan-only filesystem doubles contain no lifecycle metadata.
-    monkeypatch.setattr(
-        "openviking.storage.resource_ttl.prepare_resource_ttl", AsyncMock(return_value={})
-    )
-
-
 def test_context_plan_has_explicit_actions_and_compact_semantic_roundtrip():
     from openviking.storage.context_update_plan import (
         ContextUpdatePlan,
@@ -1145,12 +1137,8 @@ def test_healthy_directory_rnfv_clear_updates_all_vector_levels():
         ingest_options=IngestOptions.from_search_tags(None, mode="clear"),
     )
     records = {
-        "root-l0": VectorRecordSnapshot(
-            "root-l0", root, "", 0, {"search_tags": ["scope=old"]}
-        ),
-        "root-l1": VectorRecordSnapshot(
-            "root-l1", root, "", 1, {"search_tags": ["scope=old"]}
-        ),
+        "root-l0": VectorRecordSnapshot("root-l0", root, "", 0, {"search_tags": ["scope=old"]}),
+        "root-l1": VectorRecordSnapshot("root-l1", root, "", 1, {"search_tags": ["scope=old"]}),
         "a-l2": VectorRecordSnapshot(
             "a-l2",
             root + "/a.py",
@@ -1245,11 +1233,7 @@ def test_healthy_rnfv_clear_is_noop_when_vector_has_no_tags(existing_tags):
         ),
         new_kinds={"a.py": "file"},
         artifact_paths={"a.py": "repository/a.py"},
-        records={
-            "a-l2": VectorRecordSnapshot(
-                "a-l2", root + "/a.py", "a.py", 2, fields
-            )
-        },
+        records={"a-l2": VectorRecordSnapshot("a-l2", root + "/a.py", "a.py", 2, fields)},
         is_code_repo=False,
         account_id="acc",
     )
@@ -1305,11 +1289,7 @@ def test_healthy_rnfv_non_empty_replace_compares_against_vector_tags(
         ),
         new_kinds={"a.py": "file"},
         artifact_paths={"a.py": "repository/a.py"},
-        records={
-            "a-l2": VectorRecordSnapshot(
-                "a-l2", root + "/a.py", "a.py", 2, fields
-            )
-        },
+        records={"a-l2": VectorRecordSnapshot("a-l2", root + "/a.py", "a.py", 2, fields)},
         is_code_repo=False,
         account_id="acc",
     )

@@ -782,27 +782,8 @@ class AsyncHTTPClient:
         response = await self._request("POST", "/api/v1/resources", json=request_data)
         return self._handle_response_data(response).get("result", {})
 
-    async def update_resource_config(
-        self, uri: str, *, ttl_relative: Optional[int] = None
-    ) -> Dict[str, Any]:
-        response = await self._request(
-            "PATCH",
-            "/api/v1/resources/config",
-            json={
-                "uri": VikingURI.normalize(uri),
-                "ttl_relative": ttl_relative,
-            },
-        )
-        return self._handle_response_data(response).get("result", {})
-
-    async def get_resource_ttl(self, uri: str) -> Dict[str, Any]:
-        response = await self._request(
-            "GET", "/api/v1/resources/ttl", params={"uri": VikingURI.normalize(uri)}
-        )
-        return self._handle_response_data(response).get("result", {})
-
     async def get_ttl(self, uri: str) -> Dict[str, Any]:
-        """Read a live event/resource file or session's frozen expiry."""
+        """Read an event or session path's effective directory expiry."""
         response = await self._request(
             "GET", "/api/v1/content/ttl", params={"uri": VikingURI.normalize(uri)}
         )
@@ -814,9 +795,8 @@ class AsyncHTTPClient:
         expires_at: Optional[str] = None,
         *,
         ttl_relative: Optional[int] = None,
-        policy: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Change retention; session subdirectories accept days/inherit/disabled policy."""
+        """Change retention for an event date directory or a session."""
         response = await self._request(
             "PATCH",
             "/api/v1/content/ttl",
@@ -825,7 +805,6 @@ class AsyncHTTPClient:
                     "uri": VikingURI.normalize(uri),
                     "expires_at": expires_at,
                     "ttl_relative": ttl_relative,
-                    "policy": policy,
                 }
             ),
         )
@@ -844,22 +823,6 @@ class AsyncHTTPClient:
         prefix = f"accounts/{self._path_segment(account_id)}/" if account_id else ""
         response = await self._request(
             "PATCH", f"/api/v1/admin/{prefix}configuration", json={"settings": settings}
-        )
-        return self._handle_response_data(response).get("result", {})
-
-    async def update_resource_ttl(
-        self, uri: str, expires_at: Optional[str] = None, *, ttl_relative: Optional[int] = None
-    ) -> Dict[str, Any]:
-        response = await self._request(
-            "PATCH",
-            "/api/v1/resources/ttl",
-            json=self._compact_request_body(
-                {
-                    "uri": VikingURI.normalize(uri),
-                    "expires_at": expires_at,
-                    "ttl_relative": ttl_relative,
-                }
-            ),
         )
         return self._handle_response_data(response).get("result", {})
 
@@ -2367,14 +2330,6 @@ class SyncHTTPClient:
             )
         )
 
-    def update_resource_config(
-        self, uri: str, *, ttl_relative: Optional[int] = None
-    ) -> Dict[str, Any]:
-        return run_async(self._async_client.update_resource_config(uri, ttl_relative=ttl_relative))
-
-    def get_resource_ttl(self, uri: str) -> Dict[str, Any]:
-        return run_async(self._async_client.get_resource_ttl(uri))
-
     def get_ttl(self, uri: str) -> Dict[str, Any]:
         return run_async(self._async_client.get_ttl(uri))
 
@@ -2384,11 +2339,8 @@ class SyncHTTPClient:
         expires_at: Optional[str] = None,
         *,
         ttl_relative: Optional[int] = None,
-        policy: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        return run_async(
-            self._async_client.update_ttl(uri, expires_at, ttl_relative=ttl_relative, policy=policy)
-        )
+        return run_async(self._async_client.update_ttl(uri, expires_at, ttl_relative=ttl_relative))
 
     def admin_get_configuration(self, account_id: Optional[str] = None) -> Dict[str, Any]:
         return run_async(self._async_client.admin_get_configuration(account_id))
@@ -2397,13 +2349,6 @@ class SyncHTTPClient:
         self, settings: Dict[str, Any], account_id: Optional[str] = None
     ) -> Dict[str, Any]:
         return run_async(self._async_client.admin_patch_configuration(settings, account_id))
-
-    def update_resource_ttl(
-        self, uri: str, expires_at: Optional[str] = None, *, ttl_relative: Optional[int] = None
-    ) -> Dict[str, Any]:
-        return run_async(
-            self._async_client.update_resource_ttl(uri, expires_at, ttl_relative=ttl_relative)
-        )
 
     def batch_add_messages(
         self,

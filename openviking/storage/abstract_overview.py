@@ -41,7 +41,6 @@ EMBEDDING_METADATA_FIELDS = ("directory",)
 _METADATA_ORDER = ("directory", "source", "generated_by", "freshness", "expires_at")
 # A checked dependency set without expiring members has an explicit deadline;
 # absence remains distinguishable from a legacy summary with unknown provenance.
-SUMMARY_NO_EXPIRY = "9999-12-31T23:59:59.999Z"
 _MARKDOWN_URI_SAFE_ASCII = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/:"
 )

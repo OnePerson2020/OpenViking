@@ -44,7 +44,6 @@ def merge_ttl_config(current: dict, patch: dict) -> dict:
             "user_events",
             "peer_events",
             "sessions",
-            "resources",
         }:
             merged[key] = policy(current.get(key), changes)
     return merged

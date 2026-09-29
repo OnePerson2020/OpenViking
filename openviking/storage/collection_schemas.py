@@ -19,10 +19,8 @@ from typing import Any, Dict, List, Optional
 
 from openviking.core.context import ContextType, ResourceContentType
 from openviking.core.ttl import (
-    OBJECT_TYPE_EVENT,
     TTL_FIELD_NAMES,
     ttl_object_for_uri,
-    ttl_scope_for_uri,
 )
 from openviking.models.embedder.base import embed_compat
 from openviking.server.error_mapping import is_storage_not_found
@@ -1102,51 +1100,22 @@ class TextEmbeddingHandler(DequeueHandlerBase):
         from a deleted/recreated URI therefore becomes a harmless no-op.
         """
         from openviking.core.ttl import hidden_by_ttl
-        from openviking.session.memory.utils.messages import parse_memory_file_with_fields
+        from openviking.storage.directory_ttl import read_directory_fields
         from openviking.storage.viking_fs import get_viking_fs
 
         data = embedding_msg.context_data
         uri = str(data.get("uri") or "")
         target = ttl_object_for_uri(uri)
-        scope = ttl_scope_for_uri(uri)
-        resource = scope == "resources"
-        session = scope == "sessions"
-        if not resource and not session and (target is None or target[0] != OBJECT_TYPE_EVENT):
+        if target is None:
             return await write_vector()
-
         viking_fs = get_viking_fs()
-        object_uri = uri if resource or session else target[1]
-        path = viking_fs._uri_to_path(object_uri, ctx=ctx)
-        # Producers enqueue before releasing their source write lease. Wait for
-        # that lease, then validate the persisted generation under our own lock.
-        lease = await viking_fs._async_agfs.pathlock_acquire_exact(path, timeout_secs=300.0)
+        path = viking_fs._uri_to_path(target[1], ctx=ctx)
+        lease = await viking_fs._async_agfs.pathlock_acquire_tree(path, timeout_secs=300.0)
         try:
             try:
-                if session:
-                    from openviking.storage.session_file_ttl import session_file_fields
-
-                    if not await viking_fs._ttl_uri_visible(uri, ctx, require_source=True):
-                        return None
-                    await viking_fs._async_agfs.stat(path, bypass_cache=True)
-                    fields = await session_file_fields(viking_fs, uri, ctx=ctx)
-                elif resource:
-                    from openviking.storage.resource_ttl import (
-                        resource_ttl_fields,
-                        resource_ttl_visible,
-                    )
-
-                    if not await resource_ttl_visible(viking_fs, uri, ctx=ctx, require_source=True):
-                        return None
-                    fields = await resource_ttl_fields(viking_fs, uri, ctx=ctx)
-                    if data.get("md5"):
-                        from openviking.utils.content_hash import content_md5
-
-                        raw = await viking_fs.read_file_bytes(uri, ctx=ctx)
-                        if content_md5(raw) != data["md5"]:
-                            return None
-                else:
-                    content = await viking_fs.read_file(object_uri, ctx=ctx, include_expired=True)
-                    fields = parse_memory_file_with_fields(content)
+                if not await viking_fs._ttl_uri_visible(uri, ctx, require_source=True):
+                    return None
+                fields = await read_directory_fields(viking_fs, uri, ctx=ctx)
             except Exception as exc:
                 if is_storage_not_found(exc):
                     return None

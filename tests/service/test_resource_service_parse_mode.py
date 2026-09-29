@@ -56,12 +56,6 @@ def ctx() -> RequestContext:
 
 @pytest.fixture
 def service(monkeypatch: pytest.MonkeyPatch) -> ResourceService:
-    monkeypatch.setattr(
-        "openviking.storage.resource_ttl.resource_ttl_visible", AsyncMock(return_value=True)
-    )
-    monkeypatch.setattr(
-        "openviking.storage.resource_ttl.resource_ttl_fields", AsyncMock(return_value={})
-    )
     tracker = SimpleNamespace(
         create=AsyncMock(return_value=SimpleNamespace(task_id="task-1")),
         fail=AsyncMock(),
@@ -207,23 +201,16 @@ async def test_no_split_defers_initial_root_when_parent_targeted(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ttl", [{"ttl_relative": 7}, {"ttl_absolute": 2000000000}])
-async def test_source_queue_preserves_ttl_and_generation(service, ctx, ttl):
-    await service.add_resource(
-        path="https://example.com/guide.md",
-        ctx=ctx,
-        parent="viking://resources/docs",
-        args={"parse_mode": "no_split"},
-        **ttl,
-    )
-    queued = service._enqueue_add_resource_job.await_args.args[0]
-    queued.ttl_generation = "original-generation"
-    message = AddResourceMsg.from_dict(queued.to_dict())
-    await service.execute_add_resource_job(
-        message, ctx=ctx, resource_lock=None, stage_callback=AsyncMock(), task_auth={}
-    )
-    call = service._resource_processor.calls[-1]
-    assert call["expected_ttl_generation"] == "original-generation"
-    assert all(call[key] == value for key, value in ttl.items())
+async def test_source_queue_rejects_resource_ttl(service, ctx, ttl):
+    from openviking_cli.exceptions import InvalidArgumentError
+
+    with pytest.raises(InvalidArgumentError, match="outside the TTL scope"):
+        await service.add_resource(
+            path="https://example.com/guide.md",
+            ctx=ctx,
+            **ttl,
+        )
+    service._enqueue_add_resource_job.assert_not_awaited()
 
 
 @pytest.mark.asyncio

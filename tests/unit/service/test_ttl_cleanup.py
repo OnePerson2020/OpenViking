@@ -42,7 +42,7 @@ class _TaskStore:
 
 
 SESSION_URI = "viking://user/u1/sessions/s1"
-EVENT_URI = "viking://user/u1/memories/events/2026/e.md"
+EVENT_URI = "viking://user/u1/memories/events/2026/09/28"
 PAST = "2020-01-01T00:00:00.000Z"
 FUTURE = "2999-01-01T00:00:00.000Z"
 GENERATION = "generation-1"
@@ -75,7 +75,7 @@ def _session_meta(expires_at: str = PAST, generation: str = GENERATION) -> str:
 
 def _event_body(expires_at: str = PAST, generation: str = GENERATION) -> str:
     fields = {"expires_at": expires_at, "ttl_generation": generation}
-    return f"<!-- MEMORY_FIELDS {json.dumps(fields)} -->\nbody text"
+    return json.dumps(fields)
 
 
 def _make_service(
@@ -114,6 +114,15 @@ def _make_service(
         _delete_from_vector_store=AsyncMock(),
         _count_cache={"stale": (1, 0)},
     )
+
+    async def raw_read(path):
+        return await viking_fs.read_file(
+            "viking://" + path.removeprefix("/local/acct/"), include_expired=True
+        )
+
+    agfs.read = raw_read
+    agfs.stat = AsyncMock(return_value={"isDir": False})
+    viking_fs._handle_agfs_read = lambda raw: raw
     queue = SimpleNamespace(snapshot=AsyncMock(return_value=[]), enqueue=AsyncMock())
     queue_manager = SimpleNamespace(
         TTL_CLEANUP="ttl_cleanup",
@@ -145,30 +154,9 @@ def tracker():
         (
             _record(OBJECT_TYPE_EVENT, object_uri=EVENT_URI),
             _event_body(),
-            False,
-            "pathlock_acquire_batch",
+            True,
+            "pathlock_acquire_tree",
         ),
-        *[
-            (
-                _record(OBJECT_TYPE_EVENT, object_uri=EVENT_URI.removesuffix(".md") + extension),
-                _event_body(),
-                False,
-                "pathlock_acquire_batch",
-            )
-            for extension in (".MD", ".txt", ".TXT")
-        ],
-        *[
-            (
-                _record(
-                    OBJECT_TYPE_EVENT,
-                    object_uri=EVENT_URI.rsplit("/", 1)[0] + "/" + filename,
-                ),
-                _event_body(),
-                False,
-                "pathlock_acquire_batch",
-            )
-            for filename in (".note.md", ".note.txt")
-        ],
     ],
 )
 async def test_expired_object_is_deleted_strictly_and_registry_removed(

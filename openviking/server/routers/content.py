@@ -32,7 +32,7 @@ from openviking.storage.vector_ids import is_vector_record_id
 from openviking.telemetry import TelemetryRequest
 from openviking_cli.exceptions import InvalidArgumentError, NotFoundError, PermissionDeniedError
 from openviking_cli.utils import get_logger
-from openviking_cli.utils.config.ttl_config import ContentTTL
+from openviking_cli.utils.config.ttl_config import DocumentTTL
 
 logger = get_logger(__name__)
 
@@ -106,14 +106,14 @@ class ReindexRequest(BaseModel):
 router = APIRouter(prefix="/api/v1/content", tags=["content"])
 
 
-class UpdateTTLRequest(ContentTTL):
+class UpdateTTLRequest(DocumentTTL):
     model_config = ConfigDict(extra="forbid")
     uri: str
 
 
 @router.get("/ttl")
 async def get_ttl(uri: str = Query(...), _ctx: RequestContext = Depends(get_request_context)):
-    """Read a live event/resource file or session's expiry and owning URI."""
+    """Read an event or session path's effective directory expiry."""
     uri = validate_request_viking_uri(resolve_path_variables(uri), _ctx)
     return Response(status="ok", result=await get_service().fs.get_ttl(uri, _ctx))
 
@@ -122,13 +122,15 @@ async def get_ttl(uri: str = Query(...), _ctx: RequestContext = Depends(get_requ
 async def update_ttl(
     request: UpdateTTLRequest, _ctx: RequestContext = Depends(get_request_context)
 ):
-    """Change a live event/resource file or session's retention without reviving expired data."""
+    """Change a live event date directory or session's retention."""
     uri = validate_request_viking_uri(resolve_path_variables(request.uri), _ctx)
     return Response(
         status="ok",
         result=await get_service().fs.update_ttl(
-            uri, request.expires_at, _ctx, ttl_relative=request.ttl_relative,
-            policy=request.policy,
+            uri,
+            request.expires_at,
+            _ctx,
+            ttl_relative=request.ttl_relative,
         ),
     )
 

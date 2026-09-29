@@ -24,7 +24,7 @@ def test_default_config_is_off():
     config = TTLConfig()
     assert config.enabled is False
     for scope in TTL_SCOPES:
-        assert config.resolve_scope(scope) is None
+        assert config.resolve_uri("", scope) is None
 
 
 def test_scope_days_overrides_global():
@@ -32,24 +32,11 @@ def test_scope_days_overrides_global():
         **{"global": {"mode": "days", "ttl_days": 7}},
         user_events={"mode": "days", "ttl_days": 30},
     )
-    assert config.resolve_scope("user_events") == 30
+    assert config.resolve_uri("", "user_events") == 30
     # sessions/peer_events inherit -> global default of 7
-    assert config.resolve_scope("sessions") == 7
-    assert config.resolve_scope("peer_events") == 7
+    assert config.resolve_uri("", "sessions") == 7
+    assert config.resolve_uri("", "peer_events") == 7
     assert config.enabled is True
-
-
-def test_library_global_never_applies_to_resources_but_resource_directory_can_opt_in():
-    root = "viking://user/u1/resources/project"
-    config = TTLConfig(
-        **{"global": {"mode": "days", "ttl_days": 30}},
-        directories={root: {"mode": "days", "ttl_days": 7}},
-    )
-
-    assert config.resolve_scope("resources") is None
-    assert config.resolve_uri("viking://resources/public/doc.md", "resources") is None
-    assert config.resolve_uri("viking://user/u1/resources/private.md", "resources") is None
-    assert config.resolve_uri(root + "/doc.md", "resources") == 7
 
 
 def test_cleanup_defaults_to_ready_with_day_level_physical_jitter():
@@ -64,15 +51,15 @@ def test_scope_disabled_blocks_global_inheritance():
         **{"global": {"mode": "days", "ttl_days": 7}},
         sessions={"mode": "disabled"},
     )
-    assert config.resolve_scope("sessions") is None
-    assert config.resolve_scope("user_events") == 7
+    assert config.resolve_uri("", "sessions") is None
+    assert config.resolve_uri("", "user_events") == 7
 
 
 def test_inherit_falls_through_to_global_off():
     # global disabled + all scopes inherit -> nothing enabled
     config = TTLConfig(**{"global": {"mode": "disabled"}})
     assert config.enabled is False
-    assert config.resolve_scope("user_events") is None
+    assert config.resolve_uri("", "user_events") is None
 
 
 def test_global_inherit_is_rejected():
@@ -110,25 +97,24 @@ def test_nearest_directory_override_inherits_explicit_parent():
         user_events={"mode": "days", "ttl_days": 30},
         directories={
             "viking://user/u1/memories/events": {"mode": "days", "ttl_days": 14},
-            "viking://user/u1/memories/events/private/": {"mode": "disabled"},
-            "viking://user/u1/memories/events/private/shared": {"mode": "inherit"},
+            "viking://user/u1/memories/events/2026/": {"mode": "disabled"},
+            "viking://user/u1/memories/events/2026/09": {"mode": "inherit"},
         },
     )
     assert config.resolve_uri("viking://user/u1/memories/events/e.md", "user_events") == 14
+    assert config.resolve_uri("viking://user/u1/memories/events/2026/e.md", "user_events") is None
     assert (
-        config.resolve_uri("viking://user/u1/memories/events/private/e.md", "user_events") is None
-    )
-    assert (
-        config.resolve_uri("viking://user/u1/memories/events/private/shared/e.md", "user_events")
-        is None
+        config.resolve_uri("viking://user/u1/memories/events/2026/09/e.md", "user_events") is None
     )
 
 
 def test_directory_matching_respects_path_boundaries():
     config = TTLConfig(
-        directories={"viking://user/u1/memories/events/a": {"mode": "days", "ttl_days": 9}}
+        directories={"viking://user/u1/memories/events/2026/01": {"mode": "days", "ttl_days": 9}}
     )
-    assert config.resolve_uri("viking://user/u1/memories/events/abc/e.md", "user_events") is None
+    assert (
+        config.resolve_uri("viking://user/u1/memories/events/2026/010/e.md", "user_events") is None
+    )
 
 
 def test_directory_only_policy_enables_ttl_and_normalizes_slash():
@@ -151,8 +137,31 @@ def test_directory_key_must_be_concrete_user_uri():
             TTLConfig(directories={uri: {"mode": "disabled"}})
 
 
-def test_directory_names_do_not_determine_object_type():
-    directory = "viking://user/u1/memories/events/notes.md"
-    config = TTLConfig(directories={directory: {"mode": "days", "ttl_days": 3}})
-    assert config.resolve_uri(directory + "/child.txt", "user_events") == 3
-    assert config.resolve_uri(directory, "user_events") is None
+def test_resources_are_rejected():
+    with pytest.raises(ValidationError):
+        TTLConfig(resources={"mode": "days", "ttl_days": 7})
+    with pytest.raises(ValidationError):
+        TTLConfig(directories={"viking://resources/docs": {"mode": "days", "ttl_days": 7}})
+
+
+@pytest.mark.parametrize("suffix", ["notes.md", "2026/09/28/event.md", "2026/02/30"])
+def test_only_date_directories_accept_event_policy(suffix):
+    with pytest.raises(ValidationError):
+        TTLConfig(
+            directories={
+                "viking://user/u1/memories/events/" + suffix: {"mode": "days", "ttl_days": 7}
+            }
+        )
+
+
+def test_session_defaults_reject_absolute_retention():
+    for value in (
+        {"sessions": {"mode": "absolute", "ttl_absolute": 2000000000}},
+        {
+            "directories": {
+                "viking://user/u1/sessions": {"mode": "absolute", "ttl_absolute": 2000000000}
+            }
+        },
+    ):
+        with pytest.raises(ValueError, match="relative retention only"):
+            TTLConfig.model_validate(value)

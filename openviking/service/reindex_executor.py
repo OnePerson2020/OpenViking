@@ -157,9 +157,7 @@ class ReindexExecutor:
 
     async def _semantic_processor_for(self, ctx: RequestContext) -> SemanticProcessor:
         if self.vlm_resolver is None:
-            raise RuntimeError(
-                "ReindexExecutor requires a VLM resolver for semantic reindexing"
-            )
+            raise RuntimeError("ReindexExecutor requires a VLM resolver for semantic reindexing")
         vlm = await self.vlm_resolver.get_vlm(ctx.account_id)
         return SemanticProcessor(
             max_concurrent_llm=vlm.max_concurrent,
@@ -1696,12 +1694,12 @@ class ReindexExecutor:
             body = body_source.text if body_source.exists else ""
             memory_file = MemoryFileUtils.read(body) if body else None
             memory_content = memory_file.content if memory_file else ""
-            # The memory file body is the authoritative source of the frozen TTL
-            # expiry. Re-derive it here (never from the current scope policy) so a
-            # reindex keeps the object's original deadline and read-barrier
-            # invisibility, even if the directory policy changed afterwards.
-            expires_at = memory_file.extra_fields.get("expires_at") if memory_file else None
-            ttl_generation = memory_file.extra_fields.get("ttl_generation") if memory_file else None
+            # Reindex carries the frozen directory generation, never a new policy.
+            from openviking.storage.directory_ttl import read_directory_fields
+
+            lifetime = await read_directory_fields(viking_fs, file_uri, ctx=ctx)
+            expires_at = lifetime.get("expires_at")
+            ttl_generation = lifetime.get("ttl_generation")
             existing = await self._fetch_existing_record(
                 uri=file_uri,
                 level=2,
@@ -1891,9 +1889,7 @@ class ReindexExecutor:
         if content_type == ResourceContentType.TEXT:
             if self.vector_config_resolver is None:
                 raise RuntimeError("ReindexExecutor requires a vector config resolver")
-            embedding_config = (
-                await self.vector_config_resolver.resolve(ctx.account_id)
-            ).embedding
+            embedding_config = (await self.vector_config_resolver.resolve(ctx.account_id)).embedding
             text_source = embedding_config.text_source
             if text_source in SUMMARY_TEXT_SOURCES and summary:
                 return summary

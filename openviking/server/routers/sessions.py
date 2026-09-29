@@ -373,10 +373,6 @@ async def get_session(
 
     result = session.meta.to_dict()
     result.update(lifetime_fields(result))
-    if result.get("ttl_per_file"):
-        from openviking.storage.ttl_view import TTLView
-
-        result.update(await TTLView(service.viking_fs, _ctx).fields(session.uri, is_dir=True))
     result["uri"] = session.uri
     result["user"] = session.user.to_dict()
     result["pending_tokens"] = int(session.meta.pending_tokens or 0)

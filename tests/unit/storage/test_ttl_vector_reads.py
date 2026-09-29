@@ -48,7 +48,7 @@ def test_vector_writes_strip_lifecycle_fields_even_without_schema_metadata():
     backend._filter_known_fields = lambda data: data
     backend._adapter = SimpleNamespace(USE_CONTENT_FIELD=False)
     record = {
-        "uri": ROOT + "/event.md",
+        "uri": ROOT + "/2026/09/02/event.md",
         "level": 2,
         "expires_at": FUTURE,
         "ttl_generation": "incarnation-1",
@@ -79,8 +79,9 @@ def setup(monkeypatch):
 
     def source(uri, expiry=None):
         fields = {"expires_at": expiry} if expiry else {}
-        files[fs._uri_to_path(uri, ctx=ctx)] = (
-            "<!-- MEMORY_FIELDS " + json.dumps(fields) + " -->\nbody"
+        files[fs._uri_to_path(uri, ctx=ctx)] = b"body"
+        files[fs._uri_to_path(uri.rsplit("/", 1)[0] + "/.ttl.json", ctx=ctx)] = json.dumps(
+            fields
         ).encode()
 
     rows, calls = [], []
@@ -125,7 +126,6 @@ def setup(monkeypatch):
     [
         "search_in_tenant",
         "filter_in_tenant",
-        "search_children_in_tenant",
         "search_by_keywords",
         "search_by_random",
     ],
@@ -133,18 +133,16 @@ def setup(monkeypatch):
 async def test_expired_candidates_are_replaced_before_limit(setup, method):
     s = setup
     for i in range(7):
-        uri = f"{ROOT}/{i}.md"
+        uri = f"{ROOT}/2026/09/{i + 1:02}/{i}.md"
         s.source(uri, PAST if i < 5 else FUTURE)
         s.rows.append({"uri": uri, "level": 2, "account_id": "acct", "_score": 1 - i / 10})
     kwargs = {"ctx": s.ctx, "limit": 2}
-    if method in {"search_in_tenant", "search_children_in_tenant"}:
+    if method == "search_in_tenant":
         kwargs["query_vector"] = [0.1, 0.2]
-    if method == "search_children_in_tenant":
-        kwargs["parent_uri"] = ROOT
     if method == "filter_in_tenant":
         kwargs["target_directories"] = [ROOT]
     result = await getattr(s.backend, method)(**kwargs)
-    assert [row["uri"] for row in result] == [f"{ROOT}/5.md", f"{ROOT}/6.md"]
+    assert [row["uri"] for row in result] == [f"{ROOT}/2026/09/06/5.md", f"{ROOT}/2026/09/07/6.md"]
     assert len(s.calls) == 4
     assert [row["_score"] for row in result] == [0.5, pytest.approx(0.4)]
 
@@ -153,13 +151,13 @@ async def test_expired_candidates_are_replaced_before_limit(setup, method):
 async def test_offset_counts_live_rows_and_preserves_legacy_records(setup):
     s = setup
     for i in range(5):
-        uri = f"{ROOT}/{i}.md"
+        uri = f"{ROOT}/2026/09/{i + 1:02}/{i}.md"
         s.source(uri, PAST if i < 2 else None)
         s.rows.append({"uri": uri, "level": 2})
     result = await s.backend.filter(
         Eq("level", 2), limit=2, offset=1, output_fields=["uri"], ctx=s.ctx, include_expired=False
     )
-    assert result == [{"uri": f"{ROOT}/3.md"}, {"uri": f"{ROOT}/4.md"}]
+    assert result == [{"uri": f"{ROOT}/2026/09/04/3.md"}, {"uri": f"{ROOT}/2026/09/05/4.md"}]
 
 
 @pytest.mark.asyncio
@@ -176,7 +174,7 @@ async def test_all_summary_levels_remain_visible_after_l2_expires(setup, root):
 @pytest.mark.asyncio
 async def test_orphan_vectors_hidden_but_raw_cleanup_query_can_find_them(setup):
     s = setup
-    s.rows.append({"uri": ROOT + "/removed.md", "level": 2})
+    s.rows.append({"uri": ROOT + "/2026/09/01/removed.md", "level": 2})
     assert await s.backend.query(ctx=s.ctx, include_expired=False) == []
     assert await s.backend.query(ctx=s.ctx) == s.rows
 
@@ -187,7 +185,7 @@ async def test_orphan_vectors_hidden_but_raw_cleanup_query_can_find_them(setup):
 )
 async def test_source_read_error_cannot_return_unverified_vector_content(setup, error):
     s = setup
-    uri = ROOT + "/event.md"
+    uri = ROOT + "/2026/09/02/event.md"
     s.source(uri, PAST)
     s.rows.append({"uri": uri, "level": 2})
     s.fs._async_agfs.read = AsyncMock(side_effect=error)
@@ -201,7 +199,7 @@ async def test_source_read_error_cannot_return_unverified_vector_content(setup, 
 )
 async def test_source_read_error_cannot_expose_event_name(setup, error):
     s = setup
-    uri = ROOT + "/event.md"
+    uri = ROOT + "/2026/09/02/event.md"
     s.source(uri, PAST)
     s.fs._async_agfs.read = AsyncMock(side_effect=error)
     with pytest.raises(type(error), match=str(error)):
@@ -220,7 +218,7 @@ async def test_partial_delete_registry_error_cannot_expose_session_subtree(setup
 @pytest.mark.asyncio
 async def test_backend_ignoring_exclusion_fails_without_looping_forever(setup):
     s = setup
-    row = {"uri": ROOT + "/expired.md", "level": 2}
+    row = {"uri": ROOT + "/2026/09/03/expired.md", "level": 2}
     s.source(row["uri"], PAST)
     s.single.query = AsyncMock(return_value=[row])
     with pytest.raises(RuntimeError, match="did not exclude"):
@@ -232,7 +230,7 @@ async def test_backend_ignoring_exclusion_fails_without_looping_forever(setup):
 async def test_default_off_has_no_per_candidate_file_reads(setup):
     s = setup
     s.fs.ttl_registry.account_may_have_records.return_value = False
-    s.rows.append({"uri": ROOT + "/legacy.md", "level": 2})
+    s.rows.append({"uri": ROOT + "/2026/09/04/legacy.md", "level": 2})
     assert await s.backend.query(ctx=s.ctx, include_expired=False) == s.rows
     s.fs._async_agfs.read.assert_not_awaited()
 
@@ -240,7 +238,7 @@ async def test_default_off_has_no_per_candidate_file_reads(setup):
 @pytest.mark.asyncio
 async def test_user_count_excludes_expired_while_cleanup_count_sees_residue(setup):
     s = setup
-    old, live = ROOT + "/old.md", ROOT + "/live.md"
+    old, live = ROOT + "/2026/09/05/old.md", ROOT + "/2026/09/06/live.md"
     s.source(old, PAST)
     s.source(live, FUTURE)
     s.single.scroll = AsyncMock(
@@ -252,3 +250,18 @@ async def test_user_count_excludes_expired_while_cleanup_count_sees_residue(setu
     s.single.count = AsyncMock(return_value=2)
     assert await s.backend.count(ctx=s.ctx, include_expired=False) == 1
     assert await s.backend.count(ctx=s.ctx) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expiry,expected_count", [(PAST, 0), (FUTURE, 2)])
+async def test_children_share_date_directory_visibility(setup, expiry, expected_count):
+    s = setup
+    parent = ROOT + "/2026/09/28"
+    for i in range(3):
+        uri = f"{parent}/{i}.md"
+        s.source(uri, expiry)
+        s.rows.append({"uri": uri, "level": 2, "account_id": "acct"})
+    result = await s.backend.search_children_in_tenant(
+        ctx=s.ctx, parent_uri=parent, query_vector=[0.1, 0.2], limit=2
+    )
+    assert len(result) == expected_count

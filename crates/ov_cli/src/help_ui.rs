@@ -62,7 +62,6 @@ struct CommandHelpSpec {
 
 const CORE_WORKFLOW: &[HelpCommand] = help_commands![
     "add-resource",
-    "update-resource-config",
     "ttl",
     "add-skill",
     "skills",
@@ -128,26 +127,17 @@ const HELP_SECTIONS: &[HelpSection] = &[
 const COMMAND_HELP_SPECS: &[CommandHelpSpec] = &[
     CommandHelpSpec {
         path: &["ttl"],
-        purpose: "Read or revise a live event/resource document's expiry.",
+        purpose: "Read or revise an event date directory or session's expiry.",
         examples: &[
             HelpItem {
-                label: "ov ttl get viking://resources/docs/report",
+                label: "ov ttl get viking://user/alice/memories/events/2026/09/28",
                 description: "Read the frozen deadline and lifecycle owner.",
             },
             HelpItem {
-                label: "ov ttl set viking://resources/docs/report --expires-at 2027-01-01T00:00:00Z",
-                description: "Change this existing document's deadline, preserving its content.",
+                label: "ov ttl set viking://user/alice/memories/events/2026/09/28 --expires-at 2027-01-01T00:00:00Z",
+                description: "Change this date directory's deadline, preserving its content.",
             },
         ],
-        next_steps: &[],
-    },
-    CommandHelpSpec {
-        path: &["update-resource-config"],
-        purpose: "Set the TTL policy for future resource imports at a URI.",
-        examples: &[HelpItem {
-            label: "ov update-resource-config viking://resources/docs --ttl-relative 7",
-            description: "Keep new resources for seven days; existing lifetimes stay unchanged.",
-        }],
         next_steps: &[],
     },
     CommandHelpSpec {
@@ -2386,8 +2376,7 @@ fn localized_command_description<'a>(
     }
     match name {
         "add-resource" => "添加文件、文件夹、URL 或仓库",
-        "update-resource-config" => "设置后续导入资源的 TTL 策略",
-        "ttl" => "查看或调整 event/resource 文档的到期时间",
+        "ttl" => "查看或调整 events 日期目录或 Session 的到期时间",
         "add-skill" => "添加技能到 OpenViking",
         "skills" => "管理已安装技能",
         "find" => "语义检索相关上下文",
@@ -3015,10 +3004,9 @@ mod tests {
     }
 
     #[test]
-    fn curated_help_lists_timeout_for_waiting_commands() {
+    fn curated_help_lists_supported_timeouts() {
         for args in [
             ["ov", "add-resource", "--help"],
-            ["ov", "add-skill", "--help"],
             ["ov", "rm", "--help"],
             ["ov", "write", "--help"],
         ] {

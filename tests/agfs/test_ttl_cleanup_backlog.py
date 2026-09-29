@@ -4,7 +4,7 @@
 
 import asyncio
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -33,8 +33,8 @@ async def test_backlog_strictly_drains_vectors_and_recovers_partial_failures(
     fs, vectors = indexed_fs
     ctx = root_ctx()
     monkeypatch.setattr("openviking.storage.viking_fs.get_viking_fs", lambda: fs)
-    parent = "viking://user/default/memories/events/backlog"
-    uris = [f"{parent}/e{i:03}.txt" for i in range(205)]
+    parent = "viking://user/default/memories/events"
+    uris = [f"{parent}/{datetime(2025, 1, 1) + timedelta(days=i):%Y/%m/%d}" for i in range(205)]
     failures = set(uris[::40])
     summaries = {}
     for level, filename in [(0, ".abstract.md"), (1, ".overview.md")]:
@@ -51,13 +51,14 @@ async def test_backlog_strictly_drains_vectors_and_recovers_partial_failures(
             },
             ctx=ctx,
         )
-    live = parent + "/live.txt"
-    for uri in [*uris, live]:
-        content = "Live control"
-        if uri != live:
-            fields = {"expires_at": "2020-01-01T00:00:00.000Z", "ttl_generation": uri}
-            content = f"<!-- MEMORY_FIELDS {json.dumps(fields)} -->\nExpired L2"
+    live = parent + "/2026/09/29/live.txt"
+    for owner in [*uris, live.rsplit("/", 1)[0]]:
+        uri = owner + "/event.txt" if owner in uris else live
+        content = "Expired L2" if owner in uris else "Live control"
         await fs.write_file(uri, content, ctx=ctx)
+        if owner in uris:
+            fields = {"expires_at": "2020-01-01T00:00:00.000Z", "ttl_generation": owner}
+            await fs.write_file(owner + "/.ttl.json", json.dumps(fields), ctx=ctx)
         await vectors.upsert(
             {
                 "id": vector_record_id(ctx.account_id, uri, 2),
@@ -102,7 +103,9 @@ async def test_backlog_strictly_drains_vectors_and_recovers_partial_failures(
             record = await fs.ttl_registry.get(ctx.account_id, uri)
             assert (record is not None) == (uri in failures)
         remaining = await vectors.query(ctx=ctx, limit=300)
-        assert {row["uri"] for row in remaining if row["level"] == 2} == failures | {live}
+        assert {row["uri"] for row in remaining if row["level"] == 2} == {
+            owner + "/event.txt" for owner in failures
+        } | {live}
         for uri in failures:
             message = messages[uri]
             task = await tracker.get(
@@ -141,8 +144,9 @@ async def test_backlog_strictly_drains_vectors_and_recovers_partial_failures(
         for uri, content in summaries.items():
             assert await fs.read_file(uri, ctx=ctx) == content
         assert await fs.read_file(live, ctx=ctx) == "Live control"
-        files = await fs._async_agfs.ls(fs._uri_to_path(parent, ctx=ctx), limit=300)
-        assert not any(entry["name"].startswith("e") for entry in files)
+        for owner in uris:
+            files = await fs._async_agfs.ls(fs._uri_to_path(owner, ctx=ctx))
+            assert not any(entry["name"] == "event.txt" for entry in files)
     finally:
         set_task_tracker(None)
 
@@ -151,9 +155,11 @@ async def test_backlog_strictly_drains_vectors_and_recovers_partial_failures(
 async def test_confirmation_lag_recovers_without_repeating_delete(indexed_fs, monkeypatch, clock):
     fs, vectors = indexed_fs
     ctx = root_ctx()
-    uri = "viking://user/default/memories/events/confirmation.txt"
+    owner = "viking://user/default/memories/events/2026/09/28"
+    uri = owner + "/confirmation.txt"
     fields = {"expires_at": "2020-01-01T00:00:00.000Z", "ttl_generation": "confirmation"}
-    await fs.write_file(uri, f"<!-- MEMORY_FIELDS {json.dumps(fields)} -->\nExpired L2", ctx=ctx)
+    await fs.write_file(uri, "Expired L2", ctx=ctx)
+    await fs.write_file(owner + "/.ttl.json", json.dumps(fields), ctx=ctx)
     await vectors.upsert(
         {
             "id": vector_record_id(ctx.account_id, uri, 2),
@@ -164,7 +170,7 @@ async def test_confirmation_lag_recovers_without_repeating_delete(indexed_fs, mo
         },
         ctx=ctx,
     )
-    record = await fs.ttl_registry.get(ctx.account_id, uri)
+    record = await fs.ttl_registry.get(ctx.account_id, owner)
     delete = AsyncMock(wraps=fs._delete_from_vector_store)
     monkeypatch.setattr(fs, "_delete_from_vector_store", delete)
     original_confirm = fs._confirm_vector_scope_cleared
@@ -188,13 +194,13 @@ async def test_confirmation_lag_recovers_without_repeating_delete(indexed_fs, mo
         ).outcome is ProcessOutcome.REQUEUED
         set_task_tracker(TaskTracker(PersistentTaskStore(fs._async_agfs)))
         fs.ttl_registry = TTLRegistry(fs._async_agfs)
-        item = await fs.ttl_registry.get_scheduled(ctx.account_id, uri)
+        item = await fs.ttl_registry.get_scheduled(ctx.account_id, owner)
         clock.current = parse_iso_datetime(item["run_at"])
         queue = CleanupQueue()
         await scheduler_for(fs.ttl_registry, queue)._scan_once()
         assert (await cleanup._process(queue.items.popleft())).outcome is ProcessOutcome.SUCCESS
         delete.assert_awaited_once()
         assert calls == 2
-        assert await fs.ttl_registry.get(ctx.account_id, uri) is None
+        assert await fs.ttl_registry.get(ctx.account_id, owner) is None
     finally:
         set_task_tracker(None)

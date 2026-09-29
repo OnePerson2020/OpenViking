@@ -368,7 +368,7 @@ def _ttl_event(generation: str, expires_at: str = "2030-01-02T00:00:00.000Z") ->
         "expires_at": expires_at,
         "ttl_generation": generation,
     }
-    return f"event\n\n<!-- MEMORY_FIELDS\n{json.dumps(fields)}\n-->".encode()
+    return json.dumps(fields).encode()
 
 
 def _ttl_session(generation: str) -> bytes:
@@ -486,7 +486,7 @@ def _record(uri: str, generation: str) -> TTLRecord:
 
 
 async def test_restore_registers_ttl_event_and_session_before_writeback():
-    event_path = "user/user/memories/events/e.md"
+    event_path = "user/user/memories/events/2026/09/28/.ttl.json"
     session_meta = "user/user/sessions/s1/.meta.json"
     plan = _restore_plan(to_write=(event_path, session_meta))
     agfs = _RestoreAGFS(
@@ -503,7 +503,7 @@ async def test_restore_registers_ttl_event_and_session_before_writeback():
 
     await VikingFS.restore(vfs, source_commit="source", ctx=_request_context())
 
-    event_uri = "viking://user/user/memories/events/e.md"
+    event_uri = "viking://user/user/memories/events/2026/09/28/".rstrip("/")
     session_uri = "viking://user/user/sessions/s1"
     assert registry.records[("account", event_uri)].generation == "event-new"
     assert registry.records[("account", session_uri)].generation == "session-new"
@@ -521,9 +521,9 @@ async def test_restore_registers_ttl_event_and_session_before_writeback():
 
 
 async def test_restore_rejects_nonttl_overwrite_before_any_mutation():
-    overwritten_path = "user/user/memories/events/old.md"
+    overwritten_path = "user/user/memories/events/2026/09/27/.ttl.json"
     deleted_meta = "user/user/sessions/deleted/.meta.json"
-    overwritten_uri = "viking://user/user/memories/events/old.md"
+    overwritten_uri = "viking://user/user/memories/events/2026/09/27/".rstrip("/")
     deleted_uri = "viking://user/user/sessions/deleted"
     registry = _MemoryTTLRegistry(
         [_record(overwritten_uri, "old-event"), _record(deleted_uri, "old-session")]
@@ -552,10 +552,10 @@ async def test_restore_rejects_nonttl_overwrite_before_any_mutation():
 
 
 async def test_partial_restore_rolls_back_preregistration_for_failed_write():
-    success_path = "user/user/memories/events/success.md"
-    failed_path = "user/user/memories/events/failed.md"
-    success_uri = f"viking://{success_path}"
-    failed_uri = f"viking://{failed_path}"
+    success_path = "user/user/memories/events/2026/09/28/.ttl.json"
+    failed_path = "user/user/memories/events/2026/09/29/.ttl.json"
+    success_uri = f"viking://{success_path}".removesuffix("/.ttl.json")
+    failed_uri = f"viking://{failed_path}".removesuffix("/.ttl.json")
     registry = _MemoryTTLRegistry()
     plan = _restore_plan(to_write=(success_path, failed_path))
     partial = GitRestoreWritebackPartialError(
@@ -581,8 +581,8 @@ async def test_partial_restore_rolls_back_preregistration_for_failed_write():
 
 
 async def test_restore_rejects_replacing_a_live_generation():
-    path = "user/user/memories/events/e.md"
-    uri = f"viking://{path}"
+    path = "user/user/memories/events/2026/09/28/.ttl.json"
+    uri = f"viking://{path}".removesuffix("/.ttl.json")
     old = _record(uri, "old")
     old = TTLRecord(**{**old.__dict__, "expires_at": "2040-01-01T00:00:00.000Z"})
     registry = _MemoryTTLRegistry([old])
@@ -626,7 +626,7 @@ async def test_restore_rejects_removing_managed_session_metadata():
 
 
 async def test_restore_dry_run_does_not_touch_ttl_registry():
-    path = "user/user/memories/events/e.md"
+    path = "user/user/memories/events/2026/09/28/.ttl.json"
     registry = _MemoryTTLRegistry()
     agfs = _RestoreAGFS(
         plan=_restore_plan(to_write=(path,)),
@@ -644,20 +644,19 @@ async def test_restore_dry_run_does_not_touch_ttl_registry():
     assert [call[0] for call in agfs.calls] == ["git_restore"]
 
 
-@pytest.mark.parametrize("scope", ["event", "resource", "session"])
+@pytest.mark.parametrize("scope", ["event", "session"])
 @pytest.mark.parametrize("expires_at", ["2000-01-01T00:00:00Z", "2040-01-01T00:00:00Z"])
 async def test_restore_old_content_preserves_current_lifecycle(scope, expires_at):
     from openviking.core.ttl import ttl_metadata_uri
 
     paths = {
-        "event": "user/user/memories/events/e.md",
-        "resource": "resources/demo/e.md",
+        "event": "user/user/memories/events/2026/09/28/body.md",
         "session": "user/user/sessions/s1/messages.jsonl",
     }
     path = paths[scope]
-    uri = f"viking://{path}"
-    kind = "resource_file" if scope == "resource" else scope
-    owner = uri.rsplit("/", 1)[0] if scope == "session" else uri
+    uri = f"viking://{path}".removesuffix("/.ttl.json")
+    kind = scope
+    owner = uri.rsplit("/", 1)[0]
     metadata_uri = ttl_metadata_uri(kind, owner)
     metadata = (
         _ttl_event("current", expires_at)
@@ -684,53 +683,8 @@ async def test_restore_old_content_preserves_current_lifecycle(scope, expires_at
     )
 
 
-@pytest.mark.parametrize("managed_source", [False, True])
-async def test_restore_unmanaged_resource_target_accepts_complete_source(managed_source):
-    path = "resources/demo/e.md"
-    sidecar = "resources/demo/.e.md.ttl.json"
-    blobs = {path: b"restored body"}
-    if managed_source:
-        blobs[sidecar] = _ttl_session("new")
-    agfs = _RestoreAGFS(
-        plan=_restore_plan(to_write=tuple(blobs)),
-        blobs=blobs,
-        result={"result": "applied", "written_paths": list(blobs), "deleted_paths": []},
-    )
-    registry = _MemoryTTLRegistry()
-    await _restore_vfs(agfs, registry).restore(source_commit="source", ctx=_request_context())
-    assert bool(registry.records) is managed_source
-    assert any(
-        op == "git_restore" and not args.get("dry_run")
-        for op, args in agfs.calls
-        if isinstance(args, dict)
-    )
-
-
-@pytest.mark.parametrize("expired", [False, True])
-async def test_restore_content_only_cannot_omit_source_resource_fence(expired):
-    path = "resources/demo/e.md"
-    sidecar = "resources/demo/.e.md.ttl.json"
-    expiry = "2000-01-01T00:00:00Z" if expired else "2040-01-01T00:00:00Z"
-    agfs = _RestoreAGFS(
-        plan=_restore_plan(to_write=(path,)),
-        blobs={
-            path: b"body",
-            sidecar: json.dumps({"expires_at": expiry, "ttl_generation": "source"}).encode(),
-        },
-    )
-    registry = _MemoryTTLRegistry()
-    with pytest.raises(NotFoundError if expired else ConflictError):
-        await _restore_vfs(agfs, registry).restore(source_commit="source", ctx=_request_context())
-    assert registry.mutations == []
-    assert not any(
-        op == "git_restore" and not args.get("dry_run")
-        for op, args in agfs.calls
-        if isinstance(args, dict)
-    )
-
-
 @pytest.mark.parametrize("operation", ["show", "show_blob_raw", "diff"])
-@pytest.mark.parametrize("scope", ["event", "resource", "session"])
+@pytest.mark.parametrize("scope", ["event", "session"])
 @pytest.mark.parametrize("current_expired", [False, True])
 async def test_snapshot_reads_enforce_historical_and_current_expiry(
     monkeypatch, operation, scope, current_expired
@@ -741,7 +695,7 @@ async def test_snapshot_reads_enforce_historical_and_current_expiry(
     from openviking.storage.ttl_registry import TTLRegistry
     from openviking_cli.exceptions import NotFoundError
     from openviking_cli.utils.config.ttl_config import TTLConfig
-    from tests.unit.storage.test_resource_ttl import MemoryAGFS
+    from tests.unit.storage.ttl_test_storage import MemoryAGFS
 
     monkeypatch.setattr(ttl, "get_openviking_config", lambda: SimpleNamespace(ttl=TTLConfig()))
     fs = VikingFS(agfs=SimpleNamespace())
@@ -750,18 +704,15 @@ async def test_snapshot_reads_enforce_historical_and_current_expiry(
     fs.ttl_registry = TTLRegistry(agfs)
     ctx = _request_context()
     paths = {
-        "event": "viking://user/user/memories/events/snapshot.md",
-        "resource": "viking://resources/snapshot.md",
+        "event": "viking://user/user/memories/events/2026/09/28/snapshot.md",
         "session": "viking://user/user/sessions/s1/messages.jsonl",
     }
     uri = paths[scope]
-    kind = {"event": "event", "resource": "resource_file", "session": "session"}[scope]
-    owner = uri.rsplit("/", 1)[0] if scope == "session" else uri
+    kind = scope
+    owner = uri.rsplit("/", 1)[0]
     meta_uri = ttl.ttl_metadata_uri(kind, owner)
     fields = {"expires_at": "2000-01-01T00:00:00Z", "ttl_generation": "old"}
-    metadata = (
-        _ttl_event("old", fields["expires_at"]) if scope == "event" else json.dumps(fields).encode()
-    )
+    metadata = json.dumps(fields).encode()
     blobs = {
         uri.removeprefix("viking://"): b"expired body",
         meta_uri.removeprefix("viking://"): metadata,

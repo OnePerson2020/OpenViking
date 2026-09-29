@@ -41,9 +41,6 @@ class _FakeVikingFS:
             raise FileNotFoundError(uri)
         return {"isDir": False}
 
-    async def _remove_resource_file_metadata(self, uri, *, ctx=None, lease_ref=None):
-        self.removed.append((f"metadata:{uri}", False, lease_ref))
-
 
 _ROOT = "viking://resources/proj"
 
@@ -114,7 +111,7 @@ class TestAgfsResourceTarget:
 
         assert vfs.removed == [(f"{_ROOT}/old-dir", True, lease)]
 
-    async def test_ttl_target_removes_file_metadata_with_deleted_source(self) -> None:
+    async def test_resource_deletion_only_removes_selected_source(self) -> None:
         lease = {"lease_ref": "root-tree"}
         vfs = _FakeVikingFS(existing={f"{_ROOT}/gone.py": b"x"})
         target = AgfsResourceTarget(
@@ -122,14 +119,12 @@ class TestAgfsResourceTarget:
             root_uri=_ROOT,
             ctx=_Ctx(),
             lease_ref=lease,
-            resource_ttl={"ttl_relative": 7},
         )
 
         await target.delete_path("gone.py", is_dir=False)
 
         assert vfs.removed == [
             (f"{_ROOT}/gone.py", False, lease),
-            (f"metadata:{_ROOT}/gone.py", False, lease),
         ]
 
     async def test_read_file_returns_existing_bytes(self) -> None:

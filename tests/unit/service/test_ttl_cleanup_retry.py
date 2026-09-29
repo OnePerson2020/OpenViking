@@ -45,7 +45,7 @@ async def prepare(error):
     async def release(*args):
         lock.release()
 
-    fs._async_agfs.pathlock_acquire_batch.side_effect = acquire
+    fs._async_agfs.pathlock_acquire_tree.side_effect = acquire
     fs._async_agfs.pathlock_release.side_effect = release
     return cleanup, fs, storage, record
 

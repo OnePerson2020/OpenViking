@@ -36,6 +36,13 @@ async def source_fs(tmp_path):
         _uri_to_path=lambda uri, ctx=None: "/local/default/source",
         read_file=AsyncMock(),
     )
+
+    async def read(path, **kwargs):
+        return (await fs.read_file(path)).encode()
+
+    fs._async_agfs.read = read
+    fs._handle_agfs_read = lambda raw: raw
+    fs._ttl_uri_visible = AsyncMock(return_value=True)
     try:
         yield fs
     finally:
@@ -98,7 +105,7 @@ async def test_event_embedding_waits_and_revalidates_source(source_fs, monkeypat
     message = EmbeddingMsg(
         "body",
         {
-            "uri": "viking://user/default/memories/events/e.md",
+            "uri": "viking://user/default/memories/events/2026/09/28/e.md",
             "ttl_generation": "g1",
             "account_id": "default",
         },
@@ -115,7 +122,7 @@ async def test_event_embedding_waits_and_revalidates_source(source_fs, monkeypat
                 else "2999-01-01T00:00:00.000Z"
             ),
         }
-        fs.read_file.return_value = "<!-- MEMORY_FIELDS " + json.dumps(fields) + " -->\nbody"
+        fs.read_file.return_value = json.dumps(fields)
 
     result = await _handoff(
         fs,

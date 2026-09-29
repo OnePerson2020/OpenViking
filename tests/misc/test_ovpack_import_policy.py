@@ -832,21 +832,21 @@ async def test_restore_ovpack_applies_backup_manifest_scalar_metadata(
 
 
 @pytest.mark.parametrize("operation", ["import", "restore"])
-@pytest.mark.parametrize("scope", ["resource", "event"])
 @pytest.mark.parametrize("expires_at", ["2000-01-01T00:00:00Z", "2040-01-01T00:00:00Z"])
 async def test_ovpack_prettl_overwrite_preserves_current_lifecycle(
-    temp_ovpack_path, request_ctx, operation, scope, expires_at
+    temp_ovpack_path, request_ctx, operation, expires_at
 ):
     from openviking.core.ttl import ttl_metadata_uri
 
-    parent = "viking://resources" if scope == "resource" else "viking://user/alice/memories/events"
-    uri = f"{parent}/demo/e.md"
-    scope_root = "resources" if scope == "resource" else "user"
+    parent = "viking://user/alice/memories/events/2026/09"
+    owner = f"{parent}/28"
+    uri = f"{owner}/e.md"
+    scope_root = "user"
     rel = "e.md" if operation == "import" else uri.removeprefix("viking://")
-    root = "demo" if operation == "import" else "openviking-backup"
+    root = "28" if operation == "import" else "openviking-backup"
     files = {rel: "old unmanaged body"}
     manifest = _manifest_for_files(root, files)
-    manifest["root"].update(uri=f"{parent}/demo", scope=scope_root)
+    manifest["root"].update(uri=owner, scope=scope_root)
     if operation == "restore":
         manifest["root"].update(uri="viking://", package_type="backup")
         manifest["scopes"] = [scope_root]
@@ -859,13 +859,10 @@ async def test_ovpack_prettl_overwrite_preserves_current_lifecycle(
     if operation == "restore":
         with zipfile.ZipFile(temp_ovpack_path, "a") as zf:
             zf.writestr(f"{root}/files/{scope_root}/", "")
-    fs = FakeVikingFS(existing_roots={f"{parent}/demo", f"viking://{scope_root}"})
-    kind = "resource_file" if scope == "resource" else "event"
-    metadata_path = fs._uri_to_path(ttl_metadata_uri(kind, uri), ctx=request_ctx)
+    fs = FakeVikingFS(existing_roots={owner, f"viking://{scope_root}"})
+    metadata_path = fs._uri_to_path(ttl_metadata_uri("event", owner), ctx=request_ctx)
     fields = json.dumps({"expires_at": expires_at, "ttl_generation": "current"})
-    metadata = (
-        fields if scope == "resource" else f"body\n\n<!-- MEMORY_FIELDS\n{fields}\n-->"
-    ).encode()
+    metadata = fields.encode()
 
     async def stat(path, **kwargs):
         if path == metadata_path:
@@ -900,17 +897,23 @@ async def test_ovpack_new_target_accepts_live_source(
 ):
     files = {"e.md": "body"}
     if managed_source:
-        files[".e.md.ttl.json"] = json.dumps(
+        files[".ttl.json"] = json.dumps(
             {"expires_at": "2040-01-01T00:00:00Z", "ttl_generation": "new"}
         )
-    _write_ovpack_with_manifest(temp_ovpack_path, "demo", files)
+    manifest = _manifest_for_files("28", files)
+    manifest["root"].update(uri="viking://user/alice/memories/events/2026/09/28", scope="user")
+    _write_ovpack_with_manifest(temp_ovpack_path, "28", files, manifest=manifest)
     monkeypatch.setattr(
         "openviking.storage.ovpack.operations._enqueue_direct_vectorization", AsyncMock()
     )
     fs = FakeVikingFS()
-    await import_ovpack(fs, str(temp_ovpack_path), "viking://resources", request_ctx)
-    assert "viking://resources/demo/e.md" in fs.written_files
-    assert ("viking://resources/demo/.e.md.ttl.json" in fs.written_files) is managed_source
+    await import_ovpack(
+        fs, str(temp_ovpack_path), "viking://user/alice/memories/events/2026/09", request_ctx
+    )
+    assert "viking://user/alice/memories/events/2026/09/28/e.md" in fs.written_files
+    assert (
+        "viking://user/alice/memories/events/2026/09/28/.ttl.json" in fs.written_files
+    ) is managed_source
 
 
 @pytest.mark.asyncio

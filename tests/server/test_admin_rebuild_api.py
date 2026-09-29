@@ -1433,9 +1433,7 @@ async def test_reindex_semantic_processor_uses_configured_vlm_concurrency(
         user=UserIdentifier(account_id="test", user_id="alice"),
         role=Role.ROOT,
     )
-    await reindex_mod.ReindexExecutor(
-        vlm_resolver=semantic_config
-    )._run_semantic_processor(
+    await reindex_mod.ReindexExecutor(vlm_resolver=semantic_config)._run_semantic_processor(
         uri="viking://resources/demo",
         context_type="resource",
         ctx=ctx,
@@ -2512,9 +2510,13 @@ async def test_reindex_resource_vector_text_summary_first_skips_content_read(mon
 
     monkeypatch.setattr(ReindexExecutor, "_safe_read_text", fail_if_content_read)
     monkeypatch.setattr(ReindexExecutor, "_fetch_existing_record", fake_fetch_existing_record)
-    resolver = SimpleNamespace(resolve=AsyncMock(return_value=SimpleNamespace(
-        embedding=SimpleNamespace(text_source="summary_first"),
-    )))
+    resolver = SimpleNamespace(
+        resolve=AsyncMock(
+            return_value=SimpleNamespace(
+                embedding=SimpleNamespace(text_source="summary_first"),
+            )
+        )
+    )
     service = ReindexExecutor(vector_config_resolver=resolver)
     ctx = RequestContext(
         user=UserIdentifier(account_id="test", user_id="alice"),
@@ -2666,11 +2668,10 @@ async def test_reindex_memory_preserves_frozen_ttl_snapshot(monkeypatch):
         async def stat(self, uri, ctx=None, skip_count=False):
             return {"isDir": False}
 
-    body = (
-        "event body\n\n<!-- MEMORY_FIELDS\n"
-        '{"expires_at":"2030-01-02T00:00:00.000Z",'
-        '"ttl_generation":"generation-1"}\n-->'
-    )
+    body = "event body"
+    snapshot = {"expires_at": "2030-01-02T00:00:00.000Z", "ttl_generation": "generation-1"}
+    directory_fields = AsyncMock(return_value=snapshot)
+    monkeypatch.setattr("openviking.storage.directory_ttl.read_directory_fields", directory_fields)
     upserts = []
 
     async def fake_read_memory_body(self, uri, *, ctx):
@@ -2696,7 +2697,7 @@ async def test_reindex_memory_preserves_frozen_ttl_snapshot(monkeypatch):
         role=Role.ROOT,
     )
     await ReindexExecutor()._reindex_memory_vectors(
-        uri="viking://user/alice/memories/events/item.md",
+        uri="viking://user/alice/memories/events/2026/09/28/item.md",
         counters=_ReindexCounters(),
         ctx=ctx,
     )

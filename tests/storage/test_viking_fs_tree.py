@@ -35,7 +35,7 @@ def _default_ctx() -> RequestContext:
 
 
 def _event_with_expiry(expires_at: str) -> bytes:
-    return ('<!-- MEMORY_FIELDS {"expires_at": "' + expires_at + '"} -->\nbody').encode()
+    return ('{"expires_at": "' + expires_at + '"}').encode()
 
 
 @pytest.mark.asyncio
@@ -43,13 +43,13 @@ async def test_read_stat_exists_hide_expired_event_but_internal_read_can_include
     monkeypatch, fs
 ):
     ctx = _default_ctx()
-    uri = "viking://user/default/memories/events/expired.md"
+    uri = "viking://user/default/memories/events/2026/09/28/expired.md"
     path = fs._uri_to_path(uri, ctx=ctx)
     content = _event_with_expiry("2000-01-01T00:00:00.000Z")
     monkeypatch.setattr(fs.ttl_registry, "account_may_have_records", AsyncMock(return_value=True))
 
-    async def stat(candidate):
-        if candidate != path:
+    async def stat(candidate, **kwargs):
+        if candidate not in {path, path.rsplit("/", 1)[0] + "/.ttl.json"}:
             raise FileNotFoundError(candidate)
         return {"name": "expired.md", "isDir": False, "size": len(content)}
 
@@ -62,9 +62,7 @@ async def test_read_stat_exists_hide_expired_event_but_internal_read_can_include
         await fs.stat(uri, ctx=ctx)
     assert await fs.exists(uri, ctx=ctx) is False
 
-    assert await fs.read_file(uri, ctx=ctx, include_expired=True) == (
-        '<!-- MEMORY_FIELDS {"expires_at": "2000-01-01T00:00:00.000Z"} -->\nbody'
-    )
+    assert await fs.read_file(uri, ctx=ctx, include_expired=True) == content.decode()
     assert (await fs.stat(uri, ctx=ctx, include_expired=True))["name"] == "expired.md"
     assert await fs.exists(uri, ctx=ctx, include_expired=True) is True
 
@@ -148,12 +146,13 @@ async def test_default_off_account_skips_object_metadata_read(monkeypatch, fs):
 @pytest.mark.asyncio
 async def test_ls_and_tree_apply_node_limit_after_ttl_filter(monkeypatch, fs):
     ctx = _default_ctx()
-    root_uri = "viking://user/default/memories/events"
+    root_uri = "viking://user/default/memories/events/2026/09/28"
     root_path = fs._uri_to_path(root_uri, ctx=ctx)
     expired_path = f"{root_path}/expired.md"
-    live_path = f"{root_path}/live.md"
+    live_path = f"{root_path}/.abstract.md"
     contents = {
-        expired_path: _event_with_expiry("2000-01-01T00:00:00.000Z"),
+        expired_path: b"expired body",
+        root_path + "/.ttl.json": _event_with_expiry("2000-01-01T00:00:00.000Z"),
         live_path: _event_with_expiry("2999-01-01T00:00:00.000Z"),
     }
     monkeypatch.setattr(fs.ttl_registry, "account_may_have_records", AsyncMock(return_value=True))
@@ -174,7 +173,7 @@ async def test_ls_and_tree_apply_node_limit_after_ttl_filter(monkeypatch, fs):
             "isDir": False,
         },
         {
-            "name": "live.md",
+            "name": ".abstract.md",
             "size": 1,
             "mode": 0o644,
             "modTime": "2026-01-01T00:00:00Z",
@@ -188,7 +187,7 @@ async def test_ls_and_tree_apply_node_limit_after_ttl_filter(monkeypatch, fs):
     async def tree_directory(_path, **_kwargs):
         return [
             make_entry(expired_path, "expired.md", is_dir=False),
-            make_entry(live_path, "live.md", is_dir=False),
+            make_entry(live_path, ".abstract.md", is_dir=False),
         ]
 
     monkeypatch.setattr(fs._async_agfs, "stat", stat)
@@ -196,11 +195,11 @@ async def test_ls_and_tree_apply_node_limit_after_ttl_filter(monkeypatch, fs):
     monkeypatch.setattr(fs._async_agfs, "ls", ls)
     monkeypatch.setattr(fs._async_agfs, "tree_directory", tree_directory)
 
-    listed = await fs.ls(root_uri, node_limit=1, ctx=ctx)
-    tree = await fs.tree(root_uri, node_limit=1, ctx=ctx)
+    listed = await fs.ls(root_uri, node_limit=1, ctx=ctx, show_all_hidden=True)
+    tree = await fs.tree(root_uri, node_limit=1, ctx=ctx, show_all_hidden=True)
 
-    assert [entry["uri"] for entry in listed] == [f"{root_uri}/live.md"]
-    assert [entry["uri"] for entry in tree] == [f"{root_uri}/live.md"]
+    assert [entry["uri"] for entry in listed] == [f"{root_uri}/.abstract.md"]
+    assert [entry["uri"] for entry in tree] == [f"{root_uri}/.abstract.md"]
 
 
 @pytest.mark.asyncio

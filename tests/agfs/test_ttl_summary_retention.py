@@ -72,7 +72,7 @@ async def test_session_retention_edit_and_append_with_native_locks(indexed_fs, m
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["event", "resource_file", "session"])
+@pytest.mark.parametrize("kind", ["event", "session"])
 @pytest.mark.parametrize("fail_confirmation", [False, True])
 async def test_cleanup_keeps_all_summary_bytes_and_vectors(
     indexed_fs, monkeypatch, kind, fail_confirmation
@@ -81,11 +81,11 @@ async def test_cleanup_keeps_all_summary_bytes_and_vectors(
     ctx = root_ctx()
     monkeypatch.setattr("openviking.storage.viking_fs.get_viking_fs", lambda: fs)
     owner = {
-        "event": "viking://user/default/memories/events/document.txt",
+        "event": "viking://user/default/memories/events/2026/09/01",
         "resource_file": "viking://user/default/resources/document.txt",
         "session": "viking://user/default/sessions/s1",
     }[kind]
-    directory = kind == "session"
+    directory = True
     parent = owner if directory else owner.rsplit("/", 1)[0]
     bodies = (
         [owner + "/body.txt", owner + "/nested/.note", owner + "/nested/.meta.json"]
@@ -131,8 +131,6 @@ async def test_cleanup_keeps_all_summary_bytes_and_vectors(
     fields = {"expires_at": "2000-01-01T00:00:00.000Z", "ttl_generation": "old"}
     metadata = ttl.ttl_metadata_uri(kind, owner)
     raw = json.dumps(fields)
-    if kind == "event":
-        raw = f"<!-- MEMORY_FIELDS {raw} -->\nExpired L2"
     await fs.write_file(metadata, raw, ctx=ctx)
     record = await fs.ttl_registry.get(ctx.account_id, owner)
     for uri in bodies:

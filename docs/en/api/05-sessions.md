@@ -1748,8 +1748,8 @@ omitted, sets an override when it is an integer, and restores inheritance when
 it is null. Sessions do not accept `ttl_absolute`.
 
 Changing configuration does not count as a content update or revive an expired
-session. In per-file sessions, changing the root default preserves existing child
-snapshots. Updating library/directory defaults does not adopt existing unmanaged data.
+session. Each session has one lifetime shared by all its L2 files. Updating
+library/directory defaults does not adopt existing unmanaged sessions.
 
 ```python
 await client.create_session("demo", options={"ttl_relative": 30})

@@ -53,7 +53,7 @@ class _AsyncAppendAGFS:
         self.events.append(("read", path, fs_ctx))
         return b"old"
 
-    async def write(self, path, data, fs_ctx=None):
+    async def write(self, path, data, fs_ctx=None, **kwargs):
         """Record writes with propagated fs_ctx."""
         self.events.append(("write", path, data, fs_ctx))
         return len(data)
@@ -188,6 +188,10 @@ async def test_append_file_holds_exact_lease_across_read_and_write(monkeypatch):
     await fs.append_file("viking://a.md", "+new")
 
     assert fake.events[0] == ("ensure_parent", "/local/default/resources/a.md", None)
+    # Parent preparation may repeat through write_file; content stays inside the lease.
+    fake.events = [
+        event for i, event in enumerate(fake.events) if i == 0 or event[0] != "ensure_parent"
+    ]
     assert fake.events[1][0] == "acquire"
     assert fake.events[2][0:2] == ("read", "/local/default/resources/a.md")
     assert fake.events[2][2]["lease_ref"] == "lease-1"
@@ -207,22 +211,22 @@ def _ttl_event(generation: str, expires_at: str) -> str:
         "expires_at": expires_at,
         "ttl_generation": generation,
     }
-    return f"body\n\n<!-- MEMORY_FIELDS\n{json.dumps(fields)}\n-->"
+    return json.dumps(fields)
 
 
 def _ttl_write_fs(monkeypatch, *, write_error=None):
-    uri = "viking://user/default/memories/events/e.md"
-    path = "/local/default/user/default/memories/events/e.md"
+    uri = "viking://user/default/memories/events/2026/09/28/.ttl.json"
+    path = "/local/default/user/default/memories/events/2026/09/28/.ttl.json"
     events = []
     old = TTLRecord(
-        object_uri=uri,
+        object_uri=uri.rsplit("/", 1)[0],
         object_type="event",
         account_id="default",
         user_id="default",
         expires_at="2040-01-01T00:00:00.000Z",
         generation="old",
     )
-    records = {("default", uri): old}
+    records = {("default", old.object_uri): old}
 
     async def get(account_id, object_uri):
         return records.get((account_id, object_uri))
@@ -247,6 +251,7 @@ def _ttl_write_fs(monkeypatch, *, write_error=None):
     )
     monkeypatch.setattr(fs, "_ensure_access", AsyncMock())
     monkeypatch.setattr(fs, "_uri_to_path", lambda _uri, **_kwargs: path)
+    monkeypatch.setattr(fs, "_ensure_parent_dirs", AsyncMock())
     return fs, records, events, old, uri
 
 
@@ -261,7 +266,7 @@ async def test_ttl_overwrite_keeps_old_generation_until_write_succeeds(monkeypat
         ("write",),
         ("upsert", "new", "2030-01-01T00:00:00.000Z"),
     ]
-    assert records[("default", uri)].generation == "new"
+    assert records[("default", uri.rsplit("/", 1)[0])].generation == "new"
 
 
 @pytest.mark.asyncio
@@ -277,7 +282,7 @@ async def test_failed_ttl_overwrite_restores_old_projection(monkeypatch):
             ctx=_default_ctx(),
         )
 
-    assert records[("default", uri)] == old
+    assert records[("default", uri.rsplit("/", 1)[0])] == old
 
 
 @pytest.mark.asyncio

@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from openviking.core.ttl import (
     OBJECT_TYPE_EVENT,
-    OBJECT_TYPE_RESOURCE_FILE,
     OBJECT_TYPE_SESSION,
     hidden_by_ttl,
     ttl_metadata_uri,
@@ -146,10 +145,6 @@ class _SnapshotMixin:
         if is_abstract_overview_uri(uri):
             return None
         target = ttl_object_for_uri(uri)
-        if target is None and ttl_scope_for_uri(uri) == "resources":
-            from openviking.storage.resource_ttl import resource_ttl_targets
-
-            return next(resource_ttl_targets(uri), None)
         return target
 
     async def _ensure_restore_target_ttl(self, uri: str, *, ctx: RequestContext) -> None:
@@ -254,7 +249,7 @@ class _SnapshotMixin:
         """Pre-register frozen snapshots before native restore publishes them.
 
         The dry-run resolves ``source`` to an immutable commit OID. Only event
-        files and session ``.meta.json`` blobs are read; other restore paths do
+        directory ``.ttl.json`` and session ``.meta.json`` blobs are read; other paths do
         not add work.
         """
         writes: Dict[str, _TTLWriteMutation] = {}
@@ -820,27 +815,20 @@ class _SnapshotMixin:
             return
         if not await self._ttl_uri_visible(uri, ctx):
             raise NotFoundError(uri, "git_blob")
-        target = (
-            (OBJECT_TYPE_RESOURCE_FILE, uri) if scope == "resources" else ttl_object_for_uri(uri)
-        )
+        target = ttl_object_for_uri(uri)
         if target is None:
             return
         kind, owner = target
-        if kind == OBJECT_TYPE_EVENT:
-            from openviking.session.memory.utils.messages import parse_memory_file_with_fields
-
-            fields = parse_memory_file_with_fields(content.decode("utf-8"))
-        else:
-            try:
-                metadata = await self._async_agfs.run(
-                    "git_show",
-                    account=ctx.account_id,
-                    target_ref=source_ref,
-                    path=self._uri_to_tree_path(ttl_metadata_uri(kind, owner), ctx=ctx),
-                )
-            except AGFSPathNotFoundError:
-                return  # This snapshot predates TTL; current expiry was checked above.
-            fields = json.loads(metadata["bytes"])
+        try:
+            metadata = await self._async_agfs.run(
+                "git_show",
+                account=ctx.account_id,
+                target_ref=source_ref,
+                path=self._uri_to_tree_path(ttl_metadata_uri(kind, owner), ctx=ctx),
+            )
+        except AGFSPathNotFoundError:
+            return
+        fields = json.loads(metadata["bytes"])
         # A live renewal of the same incarnation supersedes its historic deadline.
         record = await self.ttl_registry.get(ctx.account_id, owner)
         expiry = (

@@ -334,16 +334,10 @@ enum AclCommands {
 #[derive(Subcommand)]
 enum Commands {
     // --- Data Operations ---
-    /// [Data] Inspect or change an existing event/resource file or session's cleanup time
+    /// [Data] Inspect or change an event date directory or session expiry
     Ttl {
         #[command(subcommand)]
         action: TtlCommands,
-    },
-    /// [Data] Set relative TTL for future imports at a resource path; omit ttl-relative to disable
-    UpdateResourceConfig {
-        uri: String,
-        #[arg(long, value_parser = clap::value_parser!(i64).range(1..=365000))]
-        ttl_relative: Option<i64>,
     },
     /// [Data] Add resources into OpenViking
     AddResource {
@@ -396,12 +390,6 @@ enum Commands {
             help_heading = "Common options"
         )]
         parent_auto_create: Option<String>,
-        /// Resource TTL in whole days (new resources only)
-        #[arg(long, conflicts_with_all = ["ttl_absolute", "manifest"], value_parser = clap::value_parser!(i64).range(1..=365000))]
-        ttl_relative: Option<i64>,
-        /// Absolute resource expiry as Unix seconds (new resources only)
-        #[arg(long, conflicts_with = "manifest", value_parser = clap::value_parser!(i64).range(1..=253402300799))]
-        ttl_absolute: Option<i64>,
         /// Reason for import
         #[arg(
             long,
@@ -2007,13 +1995,9 @@ enum PrivacyCommands {
 
 #[derive(Subcommand)]
 enum TtlCommands {
-    /// Read a live document's content update time and retention policy
+    /// Read a directory lifetime or inherited policy
     Get { uri: String },
-    /// Restore a session subdirectory to its inherited default
-    Inherit { uri: String },
-    /// Disable retention for future files in a session subdirectory
-    Disable { uri: String },
-    /// Set a live document's retention, independently of global TTL
+    /// Set an event date directory or session lifetime
     Set {
         uri: String,
         #[arg(
@@ -3357,8 +3341,6 @@ async fn main() {
             watch_interval,
             processing_mode,
             resource_args,
-            ttl_relative,
-            ttl_absolute,
             upload_options,
         } => {
             let ctx =
@@ -3390,14 +3372,8 @@ async fn main() {
                 match handlers::parse_add_resource_args(resource_args.as_deref()) {
                     Err(e) => Err(e),
                     Ok(args) => {
-                        let mut args = args.unwrap_or_default();
-                        if let Some(value) = ttl_relative {
-                            args.insert("ttl_relative".into(), value.into());
-                        }
-                        if let Some(value) = ttl_absolute {
-                            args.insert("ttl_absolute".into(), value.into());
-                        }
-                        let resource_args = Some(serde_json::Value::Object(args).to_string());
+                        let resource_args =
+                            args.map(|value| serde_json::Value::Object(value).to_string());
                         handlers::handle_add_resource(
                             path,
                             add_type,
@@ -3438,16 +3414,6 @@ async fn main() {
                         .get("/api/v1/content/ttl", &[("uri".into(), uri)])
                         .await
                 }
-                TtlCommands::Inherit { uri } => {
-                    client.patch("/api/v1/content/ttl", &serde_json::json!({
-                        "uri": uri, "policy": {"mode": "inherit"}
-                    }), &[]).await
-                }
-                TtlCommands::Disable { uri } => {
-                    client.patch("/api/v1/content/ttl", &serde_json::json!({
-                        "uri": uri, "policy": {"mode": "disabled"}
-                    }), &[]).await
-                }
                 TtlCommands::Set { uri, expires_at, ttl_relative } => {
                     client
                         .patch(
@@ -3459,15 +3425,6 @@ async fn main() {
                 }
             };
             result.map(|value| output::output_success(&value, ctx.output_format, ctx.compact))
-        }
-        Commands::UpdateResourceConfig { uri, ttl_relative } => {
-            let body = serde_json::json!({"uri": uri, "ttl_relative": ttl_relative});
-            ctx.get_client()
-                .patch::<_, serde_json::Value>("/api/v1/resources/config", &body, &[])
-                .await
-                .map(|result| {
-                    output::output_success(&result, ctx.output_format, ctx.compact);
-                })
         }
         Commands::AddSkill(args) => {
             handlers::handle_add_skill(args, legacy_upload_options, ctx).await
@@ -4051,63 +4008,9 @@ mod tests {
     }
 
     #[test]
-    fn resource_ttl_flags_are_exclusive_and_require_positive_days() {
-        let cli =
-            Cli::try_parse_from(["ov", "add-resource", "a.md", "--ttl-relative", "7"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Commands::AddResource {
-                ttl_relative: Some(7),
-                ttl_absolute: None,
-                ..
-            }
-        ));
-        for values in [
-            vec!["ov", "add-resource", "a.md", "--ttl-relative", "0"],
-            vec![
-                "ov",
-                "add-resource",
-                "a.md",
-                "--ttl-relative",
-                "7",
-                "--ttl-absolute",
-                "2000000000",
-            ],
-            vec![
-                "ov",
-                "add-resource",
-                "--manifest",
-                "a.json",
-                "--ttl-relative",
-                "7",
-            ],
-        ] {
-            assert!(Cli::try_parse_from(values).is_err());
-        }
-        let cli = Cli::try_parse_from([
-            "ov",
-            "update-resource-config",
-            "viking://~/resources/reports",
-            "--ttl-relative",
-            "30",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Commands::UpdateResourceConfig {
-                ttl_relative: Some(30),
-                ..
-            }
-        ));
+    fn resource_ttl_is_out_of_scope() {
         assert!(
-            Cli::try_parse_from([
-                "ov",
-                "update-resource-config",
-                "viking://~/resources/reports",
-                "--ttl-absolute",
-                "2000000000",
-            ])
-            .is_err()
+            Cli::try_parse_from(["ov", "add-resource", "a.md", "--ttl-relative", "7"]).is_err()
         );
     }
 
@@ -4117,7 +4020,7 @@ mod tests {
             "ov",
             "ttl",
             "set",
-            "viking://resources/a.txt",
+            "viking://user/alice/memories/events/2026/09/28",
             "--ttl-relative",
             "30",
         ])
@@ -4143,7 +4046,12 @@ mod tests {
                 "2999-01-01T00:00:00Z",
             ],
         ] {
-            let mut args = vec!["ov", "ttl", "set", "viking://resources/a.txt"];
+            let mut args = vec![
+                "ov",
+                "ttl",
+                "set",
+                "viking://user/alice/memories/events/2026/09/28",
+            ];
             args.extend(tail);
             assert!(Cli::try_parse_from(args).is_err());
         }

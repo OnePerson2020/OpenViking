@@ -796,9 +796,9 @@ class _AccessMixin:
     ) -> bool:
         """Return object-level TTL visibility without recursing through VikingFS.
 
-        Event expiry is stored in the event text file itself. Session expiry
-        is stored at the session root and hides its L2 content.
-        Directory policy nodes are never visibility objects by themselves.
+        Event date directories store expiry in .ttl.json; sessions store it
+        in their root .meta.json. All L2 content shares its owner's deadline,
+        while L0/L1 summaries and their supporting directories stay visible.
         Vector candidates require a readable source: stale index rows must not
         become visible when cleanup has already removed their source metadata.
         """
@@ -814,7 +814,7 @@ class _AccessMixin:
             # Never cache a miss: another worker can import the first frozen TTL
             # object while policy is disabled. Default-off reads skip metadata.
             return True
-        if scope in {"resources", "sessions"} and not require_source:
+        if not require_source:
             for candidate in [path] if path is not None else self._read_paths(uri, ctx=ctx):
                 try:
                     info = await self._async_agfs.stat(candidate, bypass_cache=True)
@@ -823,103 +823,28 @@ class _AccessMixin:
                         continue
                     raise
                 if info.get("isDir", False):
-                    return True
+                    return True  # Retained L0/L1 need their directory scaffolding.
                 break
-        if scope == "resources":
-            from openviking.storage.internal_names import is_ttl_metadata_name
-            from openviking.storage.resource_ttl import resource_ttl_visible
+        target = ttl_object_for_uri(uri)
+        if target is None:
+            return True
+        from openviking.storage.directory_ttl import read_directory_fields
 
-            if is_ttl_metadata_name(uri.rsplit("/", 1)[-1]):
-                target = ttl_object_for_uri(uri)
-                return target is not None and await resource_ttl_visible(
-                    self, target[1], ctx=ctx, require_source=True
-                )
-            return await resource_ttl_visible(self, uri, ctx=ctx, require_source=require_source)
-
-        parts = self._safe_uri_parts(uri)
-        if scope == "sessions":
-            # viking://user/{uid}/sessions is the container, not a TTL object.
-            if len(parts) < 4:
-                return True
-            object_uri = "viking://" + "/".join(parts[:4])
-            from openviking.storage.session_file_ttl import (
-                read_session_metadata,
-                session_file_visible,
-            )
-
-            metadata = await read_session_metadata(self, object_uri, ctx=ctx)
-            if metadata.get("ttl_per_file"):
-                return await session_file_visible(self, uri, ctx=ctx, metadata=metadata)
-            suffix_depth = len(parts) - 4
-            candidate_paths: List[str] = []
-            if path is not None:
-                object_path = path.rstrip("/")
-                for _ in range(suffix_depth):
-                    object_path = object_path.rsplit("/", 1)[0]
-                candidate_paths.append(object_path)
-            for candidate in self._read_paths(object_uri, ctx=ctx):
-                if candidate not in candidate_paths:
-                    candidate_paths.append(candidate)
-            metadata_paths = [f"{candidate}/.meta.json" for candidate in candidate_paths]
-        else:
-            # Match write registration regardless of filename extension.
-            if ttl_object_for_uri(uri) is None:
-                return True
-            metadata_paths = [path] if path is not None else []
-            canonical_path = self._uri_to_path(uri, ctx=ctx)
-            if canonical_path not in metadata_paths:
-                metadata_paths.append(canonical_path)
-
-        for metadata_path in metadata_paths:
-            if not metadata_path:
-                continue
+        fields = await read_directory_fields(self, uri, ctx=ctx)
+        if hidden_by_ttl(fields.get("expires_at")):
+            return False
+        if not fields:
+            record = await self.ttl_registry.get(ctx.account_id, target[1])
+            if record and hidden_by_ttl(record.expires_at):
+                return False
+        if require_source:
             try:
-                stat = await self._async_agfs.stat(metadata_path)
-                if (
-                    scope != "sessions"
-                    and ttl_object_for_uri(
-                        uri, is_dir=isinstance(stat, dict) and stat.get("isDir", False)
-                    )
-                    is None
-                ):
-                    return True
-                raw = self._handle_agfs_read(await self._async_agfs.read(metadata_path))
+                await self._async_agfs.stat(self._uri_to_path(uri, ctx=ctx), bypass_cache=True)
             except Exception as exc:
                 if is_storage_not_found(exc):
-                    continue
-                # A transient source failure cannot prove an object is live.
-                # Propagate it even for ls/glob instead of exposing an expired
-                # name while the TTL metadata is unreadable.
+                    return False
                 raise
-            try:
-                if scope == "sessions":
-                    metadata = json.loads(self._decode_bytes(raw))
-                else:
-                    from openviking.session.memory.utils.messages import (
-                        parse_memory_file_with_fields,
-                    )
-
-                    metadata = parse_memory_file_with_fields(self._decode_bytes(raw))
-            except Exception:
-                if require_source:
-                    raise
-                return True
-            if not isinstance(metadata, dict):
-                return True
-            return not hidden_by_ttl(metadata.get("expires_at"))
-
-        # A strict recursive delete can remove the session metadata before a
-        # later filesystem/vector step fails. Keep any residual subtree hidden
-        # until the durable cleanup record is removed after full success. This
-        # exact-key lookup is only reached when scoped metadata is absent, so
-        # the ordinary/default-off read path pays no registry cost.
-        target = ttl_object_for_uri(uri)
-        if target is not None:
-            _object_type, object_uri = target
-            record = await self.ttl_registry.get(ctx.account_id, object_uri)
-            if record is not None and hidden_by_ttl(record.expires_at):
-                return False
-        return not require_source
+        return True
 
     def _alias_uri_for_path(
         self,

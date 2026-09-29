@@ -1252,7 +1252,7 @@ async def _maybe_sitemap_hint(path: str) -> str:
 @_mcp_error_results()
 @mcp.tool(annotations=_READ_ONLY_TOOL_ANNOTATIONS)
 async def get_ttl(uri: str) -> str:
-    """Read a live event/resource file or session's frozen cleanup time and TTL owner."""
+    """Read an event or session path's effective directory expiry."""
     ctx = _get_ctx()
     uri = validate_request_viking_uri(uri, ctx)
     return str(await get_service().fs.get_ttl(uri, ctx))
@@ -1298,43 +1298,16 @@ async def update_ttl(
     uri: str,
     expires_at: Optional[str] = None,
     ttl_relative: Optional[int] = None,
-    policy: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Set a live event/resource file or session's cleanup time (ISO 8601 with timezone).
+    """Set retention for a live event date directory or session.
 
-    Files accept relative whole days or a future absolute timestamp; sessions
-    accept relative whole days only. Works with
-    global TTL disabled and on previously unmanaged files. Resource files have
-    independent lifetimes; directory defaults are changed with
-    update_resource_config. Does not revive expired data or change policy for
-    future documents. For a session subdirectory, policy accepts mode days
-    (with ttl_days), inherit, or disabled and changes only future file defaults.
+    Event date directories accept relative whole days or a future ISO 8601
+    deadline. Sessions accept relative whole days only. Files inherit their
+    directory's deadline. This does not revive expired data or edit defaults.
     """
     ctx = _get_ctx()
     uri = validate_request_viking_uri(uri, ctx)
-    return str(
-        await get_service().fs.update_ttl(
-            uri, expires_at, ctx, ttl_relative=ttl_relative, policy=policy
-        )
-    )
-
-
-@_mcp_error_results()
-@mcp.tool(annotations=_RETRY_SAFE_DESTRUCTIVE_TOOL_ANNOTATIONS)
-async def update_resource_config(uri: str, ttl_relative: Optional[int] = None) -> str:
-    """Set relative TTL for future resource imports; omit ttl_relative to disable.
-
-    ttl_relative is a positive number of whole days.
-    Existing resources retain their frozen expiry.
-    """
-    ctx = _get_ctx()
-    from openviking.core.uri_validation import validate_content_target_uri
-
-    uri = validate_content_target_uri(uri, ctx, kind="resource")
-    result = await get_service().resources.update_resource_config(
-        uri, ctx, ttl_relative=ttl_relative
-    )
-    return f"Resource TTL policy updated: {result}"
+    return str(await get_service().fs.update_ttl(uri, expires_at, ctx, ttl_relative=ttl_relative))
 
 
 def _resource_add_error(result: Any) -> _MCPToolFailure | None:
@@ -1363,8 +1336,6 @@ async def add_resource(
     tags: Optional[list[str]] = None,
     tag_mode: str = "replace",
     args: Optional[dict[str, Any]] = None,
-    ttl_relative: Optional[int] = None,
-    ttl_absolute: Optional[int] = None,
 ) -> str:
     """Add a resource to OpenViking. Asynchronous — processing happens in the background.
 
@@ -1482,8 +1453,6 @@ async def add_resource(
                 processing_mode=processing_mode,
                 tags=tags,
                 tag_mode=tag_mode,
-                ttl_relative=ttl_relative,
-                ttl_absolute=ttl_absolute,
             )
         except (PermissionDeniedError, InvalidArgumentError) as exc:
             return _mcp_failure(f"Error: {exc}")
@@ -1533,8 +1502,6 @@ async def add_resource(
                 args=args,
                 tags=tags,
                 tag_mode=tag_mode,
-                ttl_relative=ttl_relative,
-                ttl_absolute=ttl_absolute,
             )
         except Exception as exc:
             return _mcp_failure(f"Error adding resource: {exc}")
@@ -1584,8 +1551,6 @@ async def add_resource(
         tags=tags,
         tag_mode=tag_mode,
         parse_mode=mode.value,
-        ttl_relative=ttl_relative,
-        ttl_absolute=ttl_absolute,
     )
     base_url, url_source = _resolve_public_base_url()
     upload_url = f"{base_url}/api/v1/resources/temp_upload?token={quote(token, safe='')}"

@@ -46,5 +46,5 @@ WEBDAV_RESERVED_FILENAMES = frozenset(
 
 
 def is_ttl_metadata_name(name: str) -> bool:
-    """OV-owned resource TTL sidecars (kept in snapshots and directory transfers)."""
-    return name == ".ttl.json" or (name.startswith(".") and name.endswith(".ttl.json"))
+    """OV-owned event date directory metadata, preserved by whole-directory transfers."""
+    return name == ".ttl.json"

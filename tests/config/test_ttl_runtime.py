@@ -58,7 +58,7 @@ def test_alias_does_not_bypass_runtime_write_restrictions():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scope", ["user_events", "resources"])
+@pytest.mark.parametrize("scope", ["user_events", "sessions"])
 @pytest.mark.parametrize("mode", ["disabled", "inherit"])
 async def test_account_policy_mode_replaces_incompatible_cluster_fields(scope, mode):
     original = get_openviking_config()
@@ -92,8 +92,8 @@ async def test_account_policy_mode_replaces_incompatible_cluster_fields(scope, m
 @pytest.mark.parametrize("account", [False, True])
 async def test_policy_switches_are_atomic_and_keep_other_directories(account):
     original = get_openviking_config()
-    first = "viking://user/u1/resources/a"
-    sibling = "viking://user/u1/resources/b"
+    first = "viking://user/u1/memories/events/2026/09"
+    sibling = "viking://user/u1/memories/events/2026/10"
     manager = manager_over_source(
         MemoryConfigSource(), base_config=original.model_copy(update={"ttl": TTLConfig()})
     )
@@ -114,7 +114,7 @@ async def test_policy_switches_are_atomic_and_keep_other_directories(account):
             }
         )
         with pytest.raises(ValueError):
-            await patch({"directories": {first: {"mode": "absolute", "ttl_absolute": 2000000000}}})
+            await patch({"directories": {first: {"mode": "absolute", "ttl_absolute": -1}}})
         effective = await resolve_ttl_config(
             SimpleNamespace(runtime_config_manager=manager), "acct"
         )
@@ -140,7 +140,7 @@ async def test_initial_and_persisted_shorthand_use_the_same_ttl_merge():
     manager = manager_over_source(
         source, base_config=original.model_copy(update={"ttl": TTLConfig()})
     )
-    settings = {"ttl": {"resources": {"ttl_days": 30}}}
+    settings = {"ttl": {"sessions": {"ttl_days": 30}}}
     try:
         await manager.initialize()
         manager.validate_initial_settings("new-account", settings)
@@ -150,7 +150,7 @@ async def test_initial_and_persisted_shorthand_use_the_same_ttl_merge():
             SimpleNamespace(runtime_config_manager=manager), "existing-account"
         )
 
-        assert effective.resources.mode == "days"
-        assert effective.resources.ttl_days == 30
+        assert effective.sessions.mode == "days"
+        assert effective.sessions.ttl_days == 30
     finally:
         set_openviking_config(original)

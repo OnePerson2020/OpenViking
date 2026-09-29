@@ -1818,6 +1818,10 @@ class MemoryUpdater:
                 content = await viking_fs.read_file(uri, ctx=ctx) or ""
 
                 mf = MemoryFileUtils.read(content, uri=uri)
+                from openviking.storage.directory_ttl import read_directory_fields
+
+                mf.extra_fields.update(await read_directory_fields(viking_fs, uri, ctx=ctx))
+
                 from openviking.session.memory.utils.link_renderer import LinkRenderer
 
                 abstract = LinkRenderer.strip_all_links(mf.content or "")

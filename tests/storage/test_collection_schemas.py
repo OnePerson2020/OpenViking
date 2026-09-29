@@ -59,27 +59,6 @@ from openviking_cli.utils.config.vectordb_config import (
 )
 
 
-@pytest.fixture(autouse=True)
-def default_resource_ttl_disabled(monkeypatch):
-    async def stat(path, **kwargs):
-        if path.endswith(".ttl.json"):
-            raise FileNotFoundError(path)
-        return {"isDir": False}
-
-    fs = SimpleNamespace(
-        ttl_registry=SimpleNamespace(
-            account_may_have_records=AsyncMock(return_value=False), get=AsyncMock(return_value=None)
-        ),
-        _uri_to_path=lambda uri, **kwargs: uri,
-        _async_agfs=SimpleNamespace(
-            stat=stat,
-            pathlock_acquire_exact=AsyncMock(return_value={}),
-            pathlock_release=AsyncMock(),
-        ),
-    )
-    monkeypatch.setattr("openviking.storage.viking_fs.get_viking_fs", lambda: fs)
-
-
 class TextEmbeddingHandler(ProductionTextEmbeddingHandler):
     """Inject account resources into the existing worker behavior tests."""
 
@@ -107,7 +86,8 @@ class TextEmbeddingHandler(ProductionTextEmbeddingHandler):
         provider = AccountEmbeddingProvider(AccountVectorConfigResolver(manager), manager)
         vikingdb.account_uses_content_field = AsyncMock(
             return_value=getattr(
-                vikingdb, "uses_content_field",
+                vikingdb,
+                "uses_content_field",
                 config.storage.vectordb.backend in {"volcengine", "vikingdb"},
             )
         )
@@ -857,9 +837,10 @@ async def test_embedding_handler_open_breaker_logs_summary_instead_of_per_item_w
         collection_schemas.logger.removeHandler(caplog.handler)
 
     warnings = [record.message for record in caplog.records if record.levelno == logging.WARNING]
-    assert warnings.count(
-        "Embedding circuit breaker is open; re-enqueueing messages account=default"
-    ) == 1
+    assert (
+        warnings.count("Embedding circuit breaker is open; re-enqueueing messages account=default")
+        == 1
+    )
     for result in (first_result, second_result):
         assert result.outcome is ProcessOutcome.REQUEUED
         assert result.value is None
@@ -1026,7 +1007,7 @@ def _ttl_event_embedding_message(
     return EmbeddingMsg(
         "embedding text",
         {
-            "uri": "viking://user/default/memories/events/" + basename + extension,
+            "uri": "viking://user/default/memories/events/2026/09/28/" + basename + extension,
             "account_id": "default",
             "ttl_generation": generation,
         },
@@ -1034,13 +1015,7 @@ def _ttl_event_embedding_message(
 
 
 def _ttl_memory_content(*, expires_at: str, generation: str) -> str:
-    return (
-        '<!-- MEMORY_FIELDS {"expires_at": "'
-        + expires_at
-        + '", "ttl_generation": "'
-        + generation
-        + '"} -->\nbody'
-    )
+    return json.dumps({"expires_at": expires_at, "ttl_generation": generation})
 
 
 def _install_ttl_event_fs(monkeypatch, *, content=None, error=None):
@@ -1048,9 +1023,18 @@ def _install_ttl_event_fs(monkeypatch, *, content=None, error=None):
         def __init__(self):
             self._async_agfs = SimpleNamespace(
                 pathlock_acquire_exact=AsyncMock(return_value="event-lease"),
+                pathlock_acquire_tree=AsyncMock(return_value="event-lease"),
+                stat=AsyncMock(return_value={"isDir": False}),
                 pathlock_release=AsyncMock(),
             )
             self.read_file = AsyncMock(side_effect=error, return_value=content)
+            self._ttl_uri_visible = AsyncMock(return_value=True)
+            self._handle_agfs_read = lambda raw: raw
+
+            async def read(path, **kwargs):
+                return await self.read_file(path)
+
+            self._async_agfs.read = read
 
         def _uri_to_path(self, uri, *, ctx):
             assert ctx.account_id == "default"
@@ -1085,11 +1069,7 @@ async def test_ttl_event_embedding_skips_when_source_is_missing(monkeypatch):
 
     assert result is None
     write_vector.assert_not_awaited()
-    fs.read_file.assert_awaited_once_with(
-        "viking://user/default/memories/events/event.md",
-        ctx=ctx,
-        include_expired=True,
-    )
+    fs.read_file.assert_awaited_once_with("/user/default/memories/events/2026/09/28/.ttl.json")
     fs._async_agfs.pathlock_release.assert_awaited_once_with("event-lease")
 
 
@@ -1166,7 +1146,7 @@ async def test_ttl_event_merge_reads_and_upserts_under_source_lease(
     monkeypatch, extension, include_level, basename
 ):
     order = []
-    uri = "viking://user/default/memories/events/" + basename + extension
+    uri = "viking://user/default/memories/events/2026/09/28/" + basename + extension
     fs = _install_ttl_event_fs(
         monkeypatch,
         content=_ttl_memory_content(
@@ -1185,7 +1165,7 @@ async def test_ttl_event_merge_reads_and_upserts_under_source_lease(
     async def release(*args, **kwargs):
         order.append("release")
 
-    fs._async_agfs.pathlock_acquire_exact.side_effect = acquire
+    fs._async_agfs.pathlock_acquire_tree.side_effect = acquire
     fs.read_file.side_effect = read_file
     fs._async_agfs.pathlock_release.side_effect = release
 
@@ -3596,10 +3576,14 @@ async def test_single_account_backend_query_runs_adapter_in_threadpool(monkeypat
 @pytest.mark.asyncio
 async def test_non_ttl_embedding_bypasses_lifecycle_storage(monkeypatch):
     handler = _ttl_embedding_handler(monkeypatch)
-    fs_lookup = Mock(side_effect=AssertionError("non-TTL content must not access lifecycle storage"))
+    fs_lookup = Mock(
+        side_effect=AssertionError("non-TTL content must not access lifecycle storage")
+    )
     monkeypatch.setattr("openviking.storage.viking_fs.get_viking_fs", fs_lookup)
     write_vector = AsyncMock(return_value="record-1")
-    msg = EmbeddingMsg("text", {"uri": "viking://user/default/memories/preferences/p.md", "account_id": "default"})
+    msg = EmbeddingMsg(
+        "text", {"uri": "viking://user/default/memories/preferences/p.md", "account_id": "default"}
+    )
     ctx = RequestContext(user=UserIdentifier("default", "default"), role=Role.ROOT)
     assert await handler._write_ttl_vector_if_current(msg, ctx, write_vector) == "record-1"
     write_vector.assert_awaited_once_with()

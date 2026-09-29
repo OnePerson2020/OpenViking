@@ -1,86 +1,73 @@
-# TTL lifetime and renewal
+# Directory TTL
 
-## Expiry contract
+TTL is off by default. The lifecycle unit is one **event date directory**
+(`events/YYYY/MM/DD`) or one **session directory**. User and peer event trees
+use the same rule. Resources and other memory categories have no TTL.
 
-TTL is off by default. An object with relative retention stores its effective
-`ttl_days` and `expires_at`. A successful content update renews its deadline to
-the update time plus the same `ttl_days` (N × 24 hours). Reads, searches, reindex,
-failed writes and empty session commits do not renew retention.
+## Lifetime and renewal
 
-An absolute deadline stores `expires_at` with no relative `ttl_days`. Content
-updates do not move that deadline. A user can explicitly change a live object's
-deadline; there is no automatic 30-day extension or conversion of an absolute
-deadline into a duration. Expired objects cannot be revived by an update.
+Every lifecycle directory owns one `expires_at`. Its L2 descendants inherit
+that deadline; files and nested directories cannot override it. Relative
+retention also stores `ttl_days`. A successful content change renews the
+whole directory to the update time plus that duration (N × 24 hours).
 
-`ttl_relative` and `ttl_absolute` are input parameters. They are normalized into
-the effective lifetime above. This does not eliminate configuration state or
-concurrency metadata: the current session metadata also retains `ttl_relative`
-to represent its explicit configuration override, while `ttl_days` is the frozen
-effective duration. `received_at` remains the compatible name for the content
-time used to calculate relative expiry. Generation checks and cleanup registry
-records protect against stale deletion and delayed writes; none of these
-lifecycle fields requires new public-cloud vector schema columns.
+For events, the date in the path groups events; it is not the TTL start time.
+Adding or changing an event renews the relative lifetime of its date directory.
+A session renews after a successful message append or a completed commit with
+content. Reads, searches, summary generation, reindexing, failed writes and
+empty commits do not renew TTL.
 
-## Incremental defaults
+An absolute deadline stays fixed through content updates. A user can explicitly
+change a live event directory's deadline. There is no automatic 30-day extension.
+Session create/config APIs support relative TTL only. Expired directories cannot
+be revived by a delayed write or a TTL edit.
 
-New objects resolve the nearest applicable directory policy, then the scope
-default, then the library default. Resources use their independent scope default
-and never inherit the library-global TTL. Explicit object settings take priority.
-`inherit` continues resolution; `disabled` stops it.
+`received_at` stores the content timestamp used for relative expiry.
+`ttl_generation` fences delayed cleanup and indexing work after deletion and
+recreation. Session metadata also retains `ttl_relative` as its explicit
+configuration override. TTL needs no extra public-cloud vector schema fields.
 
-Changing library or directory defaults, including disabling them, does not
-rewrite existing lifetimes or adopt unmanaged historical objects. Existing
-relative objects continue renewing with their own frozen duration. Explicit
-single-object retention edits can configure a live unmanaged object or change
-an existing lifetime.
+## Configuration and incremental defaults
 
-## Session boundary
+New directories resolve the nearest explicit directory policy, then their type
+default (`user_events`, `peer_events`, or `sessions`), then the library-global
+policy. Explicit `disabled` stops inheritance; `inherit` continues upward.
 
-A session uses a whole-session lifetime by default. Successful message appends
-and completed content-bearing commits renew its relative lifetime. This also
-extends the lifetime of existing attachments governed by that same session.
-The formal session create/config APIs accept relative TTL only; this change does
-not introduce absolute TTL parameters for sessions.
+Library defaults use the existing account configuration layer. Account and user
+identities do not add extra TTL priority levels. Directory defaults can address
+an events root, year, month or date, or a user's sessions container.
 
-On expiry, normal session access fails and L2 content is hidden. Background
-cleanup removes `messages.jsonl`, archived message bodies, attachments and their
-L2 vectors. It deletes whole files, not selected JSONL messages. All L0/L1
-summaries, their vectors and supporting directories remain visible and stored.
-Messages may remain physically present between logical expiry and cleanup; they
-are not retained indefinitely by this design.
+Changing defaults only affects newly created lifecycle directories. Existing
+managed directories keep their frozen duration, and previously unmanaged
+directories remain unmanaged, including new files written into them. A live
+directory can be explicitly configured through the retention endpoint.
 
-Explicit session child-file and child-directory retention is supported. Configuring it migrates a live session to per-file lifetimes without
-moving existing deadlines. In that mode a changed file does not renew sibling
-files, and `messages.jsonl` is still one expiry unit. This is not message-level
-TTL, and changing a session default does not rewrite existing child snapshots.
+## Visibility and cleanup
 
-## User-visible retention
+At `expires_at`, L2 content is hidden from normal session access, file reads,
+listings, find, search, grep and glob. Files and directory details expose the
+shared `expires_at` and `ttl_days`; no deadline is returned as `expires_at: null`.
+Policy containers have no common deadline and expose `policy` and
+`effective_policy` instead. Summary files always have `expires_at: null`.
 
-File listings/details, session listings/details and TTL queries return `expires_at`,
-explicitly `null` when no deadline is configured, plus `ttl_days` for relative TTL.
-Policy directories return their own `policy` and resolved `effective_policy`, with
-`expires_at: null`. Per-file sessions return `ttl_per_file: true` and the
-`effective_policy` for new files. A null root deadline means no shared lifetime;
-each child file still exposes its own actual expiry.
+Cleanup checks the **directory's** live deadline and generation under a directory
+lock. Once due, it removes all L2 descendants and L2 vectors without checking
+individual file deadlines. For sessions this includes whole `messages.jsonl`
+files, archived messages and attachments. It does not manage individual JSONL
+messages.
 
-For a file, display its effective `expires_at` as the expiry time; no deadline
-means retention is not enabled for that object. Relative retention can also show
-the configured duration. This timestamp is logical expiry, not a promise that
-physical deletion has completed at that instant.
+**All L0/L1 summary files, their vectors and the directories needed to hold them
+remain unchanged, readable and searchable.** Removing expired L2 does not
+regenerate summaries. A retained summary can still describe expired content.
 
-A policy directory displays its retention duration and inheritance/disabled
-state, not one shared `expires_at`: its children can expire at different times.
-A whole-session object can display its session deadline even though its storage
-is a directory. Per-file session mode has no single root expiry.
+Physical cleanup is asynchronous, spread over a day-scale window by default.
+Failed deletion or incomplete verification retains retry state. Messages can
+remain physically stored between expiry and cleanup. Cleanup confirms primary
+L2 storage and index removal; it does not confirm a console refresh, backup
+erasure or a billing adjustment. Retained summaries still occupy storage.
 
-## Cleanup and acceptance
+## Interfaces
 
-Visibility uses the current `expires_at`. Physical cleanup is asynchronous and
-spread over a day-scale scheduling window. Workers recheck the live generation
-and deadline under the object lock before strict deletion; failures retain
-retry state. Scheduling delays are not a guaranteed deletion or billing SLA.
-
-Local acceptance covers configuration, relative renewal, fixed absolute expiry,
-read filtering, strict deletion and retries. Console configuration/presets,
-actual page behavior and billing reconciliation require separate integration
-validation. Storage deletion alone is not proof that billing has caught up.
+- [TTL configuration](../configuration/01-server.md#ttl): library/type/directory defaults.
+- [Directory retention](../api/12-content.md#document-expiry): query deadlines and edit a live date directory or session.
+- [Sessions](../api/05-sessions.md): create and update relative retention.

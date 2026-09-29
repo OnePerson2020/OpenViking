@@ -15,12 +15,12 @@ from openviking.service.task_tracker import TaskTracker, set_task_tracker
 from openviking.session.session import Session
 from openviking.storage.content_write import ContentWriteCoordinator
 from openviking.storage.queuefs.queue_manager import QueueManager
-from openviking.storage.ttl_registry import TTLRegistry
 from openviking.storage.viking_fs import VikingFS
 from openviking_cli.exceptions import AlreadyExistsError, NotFoundError
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config.ttl_config import TTLConfig
 from tests.server.test_content_batch_write import _VFS
+from tests.storage.test_transfer_merge_binding import binding_fs as binding_fs
 from tests.unit.service.test_ttl_cleanup import (
     _cleanup_once,
     _make_service,
@@ -30,7 +30,6 @@ from tests.unit.service.test_ttl_cleanup import (
     _TaskStore,
 )
 from tests.unit.session.test_session_commit_resume import _MemoryVikingFS
-from tests.unit.storage.test_ttl_registry import _MemoryAGFS
 
 
 def _default_ctx():
@@ -59,7 +58,7 @@ class _DummyAgfs:
 @pytest.mark.parametrize("owner", ["user/default", "user/default/peers/assistant"])
 @pytest.mark.parametrize("basename", ["event", ".note"])
 async def test_public_event_write_registers_and_hides_every_supported_file(
-    monkeypatch, entrypoint, owner, basename, extension
+    monkeypatch, entrypoint, owner, basename, extension, binding_fs
 ):
     class Clock(datetime):
         current = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -71,19 +70,15 @@ async def test_public_event_write_registers_and_hides_every_supported_file(
     config = TTLConfig(**{"global": {"mode": "days", "ttl_days": 1}})
     monkeypatch.setattr(ttl, "datetime", Clock)
     monkeypatch.setattr(ttl, "get_openviking_config", lambda: SimpleNamespace(ttl=config))
-    root = f"viking://{owner}/memories/events/2026"
+    root = f"viking://{owner}/memories/events/2026/09/28"
     uri = root + "/" + basename + extension
     ctx = _default_ctx()
-    agfs = _MemoryAGFS()
-    fs = VikingFS(agfs=_DummyAgfs())
-    fs._async_agfs = agfs
-    fs.ttl_registry = TTLRegistry(agfs)
-    monkeypatch.setattr(fs, "_ensure_parent_dirs", AsyncMock())
+    fs = binding_fs
     source = _VFS(root)
     source._async_agfs.pathlock_acquire_exact = AsyncMock(return_value={"lease_ref": "lock-1"})
 
     async def publish(uri, content, ctx=None, lease_ref=None):
-        await fs.write_file(uri, content, ctx=ctx, lease_ref=lease_ref)
+        await fs.write_file(uri, content, ctx=ctx)
         source.files[uri] = content
 
     source.write_file = publish
@@ -111,7 +106,7 @@ async def test_public_event_write_registers_and_hides_every_supported_file(
             ctx=ctx,
         )
 
-    record = await fs.ttl_registry.get(ctx.account_id, uri)
+    record = await fs.ttl_registry.get(ctx.account_id, root)
     assert record is not None
     assert record.object_type == "event"
     assert record.expires_at == "2026-01-02T00:00:00.000Z"
@@ -162,19 +157,18 @@ def test_inherit_preserves_nearest_explicit_ancestor(parent_policy, expected):
 async def test_expired_event_keeps_its_parent_abstract(monkeypatch):
     fs = VikingFS(agfs=_DummyAgfs())
     ctx = _default_ctx()
-    parent = "viking://user/default/memories/events/2026"
+    parent = "viking://user/default/memories/events/2026/09/28"
     event = parent + "/e.md"
     parent_path = fs._uri_to_path(parent, ctx=ctx)
     event_path = fs._uri_to_path(event, ctx=ctx)
     secret = "expired-event-only-secret"
     files = {
-        event_path: (
-            '<!-- MEMORY_FIELDS {"expires_at":"2000-01-01T00:00:00.000Z"} -->\n' + secret
-        ).encode(),
+        event_path: secret.encode(),
+        parent_path + "/.ttl.json": b'{"expires_at":"2000-01-01T00:00:00.000Z"}',
         parent_path + "/.abstract.md": ("Summary: " + secret).encode(),
     }
 
-    async def stat(path):
+    async def stat(path, **kwargs):
         if path == parent_path:
             return {"name": "2026", "isDir": True}
         if path in files:
@@ -203,7 +197,7 @@ async def test_summary_is_retained_in_all_public_read_forms(monkeypatch, expiry,
 
     fs = VikingFS(agfs=_DummyAgfs())
     ctx = _default_ctx()
-    parent = "viking://user/default/memories/events/2026"
+    parent = "viking://user/default/memories/events/2026/09/28"
     path = fs._uri_to_path(parent, ctx=ctx)
     files = {
         path + "/.abstract.md": render_abstract_overview(0, parent, "secret")

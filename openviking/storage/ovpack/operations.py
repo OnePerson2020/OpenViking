@@ -623,9 +623,7 @@ async def export_ovpack(
         )
     )
     entries = await _filter_existing_optional_sidecars(viking_fs, uri, entries, ctx)
-    # Exact per-file TTL sidecars are already present in the recursive tree and
-    # round-trip as ordinary package files. Do not synthesize a root .ttl.json:
-    # directories are policy boundaries, not lifecycle owners.
+    # Directory TTL metadata round-trips with its lifecycle owner's tree.
     if include_vectors:
         await ensure_dense_snapshot_supported(vector_store, vector_config_resolver, ctx)
         report = await check_index_consistency(

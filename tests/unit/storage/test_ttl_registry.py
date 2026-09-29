@@ -148,23 +148,22 @@ async def test_reader_sees_first_ttl_object_imported_by_another_worker(monkeypat
     agfs = CachedAGFS()
     reader = TTLRegistry(agfs)
     writer = TTLRegistry(agfs)
-    uri = "viking://user/u1/memories/events/expired.md"
+    uri = "viking://user/u1/memories/events/2026/09/28/expired.md"
     assert await reader.account_may_have_records("acct") is False
-    record = replace(_record(uri=uri), object_type="event", expires_at="2000-01-01T00:00:00Z")
+    record = replace(
+        _record(uri=uri.rsplit("/", 1)[0]), object_type="event", expires_at="2000-01-01T00:00:00Z"
+    )
     await writer.upsert(record)
 
     fs = VikingFS(agfs=SimpleNamespace())
     fs.ttl_registry = reader
     ctx = RequestContext(user=UserIdentifier("acct", "u1"), role=Role.ROOT)
-    path = fs._uri_to_path(uri, ctx=ctx)
     fs._async_agfs.stat = AsyncMock(return_value={"isDir": False})
-    fs._async_agfs.read = AsyncMock(
-        return_value=b'body\n<!-- MEMORY_FIELDS {"expires_at":"2000-01-01T00:00:00Z"} -->'
-    )
+    fs._async_agfs.read = AsyncMock(return_value=b'{"expires_at":"2000-01-01T00:00:00Z"}')
     monkeypatch.setattr("openviking.storage.viking_fs._access.ttl_enabled", lambda: False)
     if read_kind == "grep":
         fs._async_agfs.grep = AsyncMock(
-            return_value={"matches": [{"file": path, "line": 1, "content": "body"}]}
+            return_value={"matches": [{"file": "expired.md", "line": 1, "content": "body"}]}
         )
         result = await fs._grep_with_agfs(uri.rsplit("/", 1)[0], "body", node_limit=1, ctx=ctx)
         assert result["matches"] == []

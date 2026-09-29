@@ -38,14 +38,14 @@ def _install_config(monkeypatch, config: TTLConfig | None) -> None:
     "uri, expected",
     [
         ("viking://user/u1/memories/events/2026/e.md", "user_events"),
-        ("viking://user/u1/memories/events/e.md", "user_events"),
+        ("viking://user/u1/memories/events/2026/09/28", "user_events"),
         ("viking://user/u1/peers/p1/memories/events/e.md", "peer_events"),
         ("viking://user/u1/sessions/s1", "sessions"),
         ("viking://user/u1/sessions/s1/messages.jsonl", "sessions"),
         # Out of scope: never TTL these.
         ("viking://user/u1/memories/notes/n.md", None),
         ("viking://user/u1/preferences/p", None),
-        ("viking://user/u1/resources/r.md", "resources"),
+        ("viking://user/u1/resources/r.md", None),
         ("viking://user/u1/peers/p1/memories/notes/n.md", None),
         ("viking://user/u1", None),
         ("not-a-viking-uri", None),
@@ -76,8 +76,8 @@ def test_ttl_scope_for_uri(uri, expected):
     ],
 )
 def test_event_objects_cover_all_public_content_write_extensions(owner, basename, extension):
-    uri = f"viking://{owner}/memories/events/2026/{basename}{extension}"
-    assert ttl.ttl_object_for_uri(uri) == (ttl.OBJECT_TYPE_EVENT, uri)
+    uri = f"viking://{owner}/memories/events/2026/09/28/{basename}{extension}"
+    assert ttl.ttl_object_for_uri(uri) == (ttl.OBJECT_TYPE_EVENT, uri.rsplit("/", 1)[0])
 
 
 @pytest.mark.parametrize(
@@ -100,9 +100,7 @@ def test_event_containers_and_derived_files_are_not_ttl_objects(path):
 
 def test_event_directory_is_not_an_object_even_with_a_file_extension():
     for name in ("2026", "notes.md", "events.txt"):
-        assert (
-            ttl.ttl_object_for_uri(f"viking://user/u1/memories/events/{name}", is_dir=True) is None
-        )
+        assert ttl.ttl_object_for_uri(f"viking://user/u1/memories/events/{name}") is None
 
 
 # ── resolve_ttl_days / freeze_ttl_fields ────────────────────────────────────
@@ -117,7 +115,7 @@ def test_resolve_ttl_days_uses_scope_then_global(monkeypatch):
     )
     _install_config(monkeypatch, config)
 
-    assert ttl.resolve_ttl_days("viking://user/u1/memories/events/e.md") == 30
+    assert ttl.resolve_ttl_days("viking://user/u1/memories/events/2026/09/28") == 30
     assert ttl.resolve_ttl_days("viking://user/u1/sessions/s1") == 7
     assert ttl.resolve_ttl_days("viking://user/u1/peers/p1/memories/events/e.md") is None
     assert ttl.resolve_ttl_days("viking://user/u1/resources/r.md") is None
@@ -134,13 +132,13 @@ def test_resolve_ttl_days_uses_nearest_concrete_directory(monkeypatch):
     config = TTLConfig(
         user_events={"mode": "days", "ttl_days": 30},
         directories={
-            "viking://user/u1/memories/events/project": {"mode": "days", "ttl_days": 5},
-            "viking://user/u1/memories/events/project/keep": {"mode": "disabled"},
+            "viking://user/u1/memories/events/2026": {"mode": "days", "ttl_days": 5},
+            "viking://user/u1/memories/events/2026/09": {"mode": "disabled"},
         },
     )
     _install_config(monkeypatch, config)
-    assert ttl.resolve_ttl_days("viking://user/u1/memories/events/project/e.md") == 5
-    assert ttl.resolve_ttl_days("viking://user/u1/memories/events/project/keep/e.md") is None
+    assert ttl.resolve_ttl_days("viking://user/u1/memories/events/2026/e.md") == 5
+    assert ttl.resolve_ttl_days("viking://user/u1/memories/events/2026/09/e.md") is None
     # An out-of-scope URI never becomes TTL-managed merely because configured.
     assert ttl.resolve_ttl_days("viking://user/u1/resources/project/r.md") is None
 
@@ -150,7 +148,9 @@ def test_freeze_ttl_fields_snapshot(monkeypatch):
     _install_config(monkeypatch, config)
 
     received = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    snap = ttl.freeze_ttl_fields("viking://user/u1/memories/events/e.md", received_at=received)
+    snap = ttl.freeze_ttl_fields(
+        "viking://user/u1/memories/events/2026/09/28", received_at=received
+    )
     assert snap is not None
     generation = snap.pop("ttl_generation")
     assert generation
@@ -184,14 +184,14 @@ def test_apply_ttl_fields_owns_creation_and_renews_relative_ttl_on_update(monkey
     _install_config(monkeypatch, config)
     received = datetime(2026, 1, 1, tzinfo=timezone.utc)
     created = ttl.apply_ttl_fields(
-        "viking://user/u1/memories/events/e.md",
+        "viking://user/u1/memories/events/2026/09/28",
         {"title": "x", "ttl_days": 999, "expires_at": "2999-01-01T00:00:00Z"},
         received_at=received,
     )
     assert created["ttl_days"] == 3
     assert created["expires_at"] == "2026-01-04T00:00:00.000Z"
     updated = ttl.apply_ttl_fields(
-        "viking://user/u1/memories/events/e.md",
+        "viking://user/u1/memories/events/2026/09/28",
         {"title": "y", "ttl_days": 1},
         existing_fields=created,
         received_at=datetime(2026, 1, 10, tzinfo=timezone.utc),
@@ -210,7 +210,7 @@ def test_apply_ttl_fields_preserves_explicit_absolute_deadline_on_update():
         "ttl_generation": "absolute-generation",
     }
     updated = ttl.apply_ttl_fields(
-        "viking://user/u1/memories/events/e.md",
+        "viking://user/u1/memories/events/2026/09/28",
         {"title": "changed"},
         existing_fields=existing,
         received_at=datetime(2026, 1, 10, tzinfo=timezone.utc),

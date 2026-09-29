@@ -19,7 +19,7 @@ from openviking.core.namespace import (
     is_session_uri,
     owner_space_for_uri,
 )
-from openviking.core.ttl import TTL_FIELD_NAMES, ttl_scope_for_uri
+from openviking.core.ttl import TTL_FIELD_NAMES
 from openviking.parse.parsers.media.utils import (
     MPEG_TS_PROBE_BYTES,
     is_mpeg_ts,
@@ -139,9 +139,7 @@ def _apply_ingest_options(
             embedding_msg.context_data.get("search_tags"), incoming_tags
         )
     embedding_msg.context_data["search_tags"] = incoming_tags
-    embedding_msg.context_data.setdefault("_upsert_options", {})["search_tag_mode"] = (
-        tag_mode
-    )
+    embedding_msg.context_data.setdefault("_upsert_options", {})["search_tag_mode"] = tag_mode
 
 
 async def _enqueue_embedding_message(
@@ -448,10 +446,6 @@ async def vectorize_directory_meta(
         embedding_queue = queue_manager.get_queue(queue_manager.EMBEDDING)
 
         source_ttl = {}
-        if ttl_scope_for_uri(uri) == "resources":
-            from openviking.storage.resource_ttl import resource_ttl_fields
-
-            source_ttl = await resource_ttl_fields(get_viking_fs(), uri, ctx=ctx)
         parent_uri = VikingURI(uri).parent.uri
         owner_space = owner_space_for_uri(uri)
 
@@ -642,23 +636,9 @@ async def vectorize_file(
 
         # Capture the incarnation before reading/vectorizing content. A source
         # replacement during this operation must invalidate the queued write.
-        source_ttl = None
-        if ttl_scope_for_uri(file_path) in {"user_events", "peer_events"}:
-            from openviking.session.memory.utils.messages import parse_memory_file_with_fields
+        from openviking.storage.directory_ttl import read_directory_fields
 
-            source_ttl = parse_memory_file_with_fields(
-                await viking_fs.read_file(file_path, ctx=ctx)
-            )
-
-        elif ttl_scope_for_uri(file_path) == "resources":
-            from openviking.storage.resource_ttl import resource_ttl_fields
-
-            source_ttl = await resource_ttl_fields(viking_fs, file_path, ctx=ctx)
-
-        elif ttl_scope_for_uri(file_path) == "sessions":
-            from openviking.storage.session_file_ttl import session_file_fields
-
-            source_ttl = await session_file_fields(viking_fs, file_path, ctx=ctx)
+        source_ttl = await read_directory_fields(viking_fs, file_path, ctx=ctx)
 
         file_name = summary_dict.get("name") or os.path.basename(file_path)
         summary = summary_dict.get("summary", "")

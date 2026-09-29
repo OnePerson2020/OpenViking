@@ -47,16 +47,6 @@ class _FakeResourceProcessor:
         return None
 
 
-@pytest.fixture(autouse=True)
-def unmanaged_watch_target(monkeypatch):
-    monkeypatch.setattr(
-        "openviking.storage.resource_ttl.resource_ttl_visible", AsyncMock(return_value=True)
-    )
-    monkeypatch.setattr(
-        "openviking.storage.resource_ttl.resource_ttl_fields", AsyncMock(return_value={})
-    )
-
-
 @pytest.fixture
 def connector_config(monkeypatch):
     import openviking_cli.utils.config.open_viking_config as config_module
@@ -2902,18 +2892,28 @@ async def test_project_oauth_dispatch_and_watch_replay(
     client = SimpleNamespace(submit_doc_add=AsyncMock(return_value={"task_key": "connector-1"}))
     _install_connector_dependencies(monkeypatch, tracker, client)
     reference = {
-        "account_id": "cloud-account", "user_id": "cloud-user", "ov_user_id": "alice",
-        "platform": "feishu_project", "type": "oauth",
+        "account_id": "cloud-account",
+        "user_id": "cloud-user",
+        "ov_user_id": "alice",
+        "platform": "feishu_project",
+        "type": "oauth",
     }
-    fetch = Mock(side_effect=[
-        {"access_token": token, "account": {"id": "project-user"}} for token in ("first", "second")
-    ])
+    fetch = Mock(
+        side_effect=[
+            {"access_token": token, "account": {"id": "project-user"}}
+            for token in ("first", "second")
+        ]
+    )
     monkeypatch.setattr(auth.ConnectorClient, "get_oauth_access_token", fetch)
     args = {auth.OAUTH_REF_ARG: reference, "project_keys": ["project"]}
     path = "https://project.feishu.cn/project"
     delegate = service._connector
     state = await delegate.create_watch_auth_state(
-        api_key=ctx.api_key, account_id=ctx.account_id, add_type=add_type, path=path, connector_args=args
+        api_key=ctx.api_key,
+        account_id=ctx.account_id,
+        add_type=add_type,
+        path=path,
+        connector_args=args,
     )
     for token in ("first", "second"):
         api_key, restored_type, restored_args = await delegate.restore_watch_request(
@@ -2921,7 +2921,11 @@ async def test_project_oauth_dispatch_and_watch_replay(
         )
         assert api_key == ctx.api_key
         await service.add_resource(
-            path=path, ctx=ctx, add_type=restored_type, to="viking://resources/kb/project", args=restored_args
+            path=path,
+            ctx=ctx,
+            add_type=restored_type,
+            to="viking://resources/kb/project",
+            args=restored_args,
         )
         request = client.submit_doc_add.call_args.kwargs
         assert request["auth_config"] == {"user_access_token": token, "user_key": "project-user"}

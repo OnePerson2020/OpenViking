@@ -69,7 +69,7 @@ openviking-server --config /path/to/ov.conf
 | `ingest` | object | 内置默认值 | 会话日志导入配置 |
 | `output_language_override` | string | `""` | 强制摘要和记忆输出语言；空值表示自动识别 |
 | `allow_private_networks` | boolean | `false` | 是否允许抓取内网或私有地址资源 |
-| `ttl` | object | 关闭 | event、session 和 resource 的 TTL 策略；resource 使用独立的长期记忆默认值 |
+| `ttl` | object | 关闭 | events 日期目录和 Session 的 TTL 策略 |
 | `ttl_cleanup` | object | 执行器开启 | 物理清理调度、抖动和批次预算；所有 TTL 策略仍默认关闭 |
 
 `auto_generate_l0`、`auto_generate_l1`、`default_search_mode` 和 `default_search_limit` 是已弃用的兼容字段。旧配置文件仍可加载这些字段，但它们不会影响运行时行为。
@@ -464,9 +464,9 @@ Parser 或 Understanding API 后端自身的限制和上传行为。
 
 ## TTL
 
-TTL 策略默认关闭。`ov.conf` 的 `ttl` 是服务启动基线；运行时复用集群／account 配置覆盖，不需要修改云端向量 schema。一个库的全局策略是其 account 的 `ttl.global`，只影响 user events、peer events 和 sessions。公共／用户／peer resources 属于长期记忆，使用独立的 `ttl.resources` 默认值，绝不继承 `ttl.global`。用户和 peer ID 由 URI 范围匹配，没有独立的用户级配置层。
+TTL 默认关闭，仅用于 events 日期目录和 Session。`ov.conf` 中的 `ttl` 提供启动基线，沿用已有集群/account 运行时配置表达库覆盖；account、user 身份不增加 TTL 优先级。resources 不提供 TTL 配置。
 
-event 和 session 按“最近目录显式策略 → 对应范围默认 → 库全局默认 → 关闭”解析；resource 按“单次导入显式参数 → 最近目录显式策略 → resources 默认 → 关闭”解析。`inherit` 在对应链路中继续向上查找，`disabled` 阻断继承；`days` 使用正整数天，`absolute` 仅用于资源导入和单文件设置，不支持范围或目录默认策略。目录匹配采用路径边界；`events/2026` 比 `events` 更近，不会匹配 `events/20260`。
+新生命周期目录按「最近的显式目录策略 → 类型默认值 → 库全局默认值 → 关闭」解析。`inherit` 继续向上查找，`disabled` 阻断继承。`days` 要求正整数 `ttl_days`。events 类型/目录默认策略另支持 `absolute`，以 Unix 秒数 `ttl_absolute` 指定时间；全局和 Session 默认值支持相对天数或关闭。目录键可为 events 根、合法的年/月/日期前缀或用户的 sessions 容器，不接受文件和 Session 内部子目录。
 
 ```json
 {
@@ -475,7 +475,6 @@ event 和 session 按“最近目录显式策略 → 对应范围默认 → 库�
     "user_events": {"mode": "days", "ttl_days": 60},
     "peer_events": {"mode": "inherit"},
     "sessions": {"mode": "days", "ttl_days": 30},
-    "resources": {"mode": "days", "ttl_days": 90},
     "directories": {
       "viking://user/alice/memories/events/2026": {"mode": "days", "ttl_days": 7}
     }
@@ -490,7 +489,7 @@ ov admin get-configuration --account-id default
 ov admin patch-configuration --account-id default --settings '{"ttl":{"global":{"mode":"days","ttl_days":90}}}'
 ```
 
-CLI 省略 `--account-id` 时操作集群层。Python HTTP SDK 对应 `admin_get_configuration(account_id)`、`admin_patch_configuration(settings, account_id)`。event 公开写入、记忆抽取、session 创建和 resource 导入会按上述 resource/global 隔离规则读取合并后的运行时配置。策略变更只影响新对象；已有对象保留自身保存的策略：event/resource 内容成功更新、session 追加消息和成功 commit 会按保存的 `ttl_days` 顺延相对期限，resource 绝对期限保持不变。resource 目录策略只是分别复制给下属新文件的默认值，不形成目录期限、不限制已有后代，也不删除目录。调整已有 event/resource 文件的清理时间使用 [文档到期时间接口](../api/12-content.md#文档到期时间)。
+CLI 省略 `--account-id` 时操作集群层。Python HTTP SDK 对应 `admin_get_configuration(account_id)`、`admin_patch_configuration(settings, account_id)`。默认策略仅影响新建的日期目录和 Session；已有纳管目录保留冻结的时长，历史未纳管目录继续不生效，向其中新增文件也不会自动纳管。显式调整已有存活目录使用[有效期接口](../api/12-content.md#文档到期时间)。相对期限在内容成功变更后续期，events 绝对期限保持固定。
 
 `ttl_cleanup` 独立控制物理删除执行器。它默认 `enabled: true`，但所有 TTL 策略默认关闭时没有到期任务。关闭执行器会暂停新的物理删除并保留重试状态；已到期 L2 仍会立即逻辑不可见。调度器同时使用扫描抖动和稳定的逐对象清理偏移，避免所有租户集中在 UTC 0 点删除。
 
@@ -507,5 +506,3 @@ CLI 省略 `--account-id` 时操作集群层。Python HTTP SDK 对应 `admin_get
 到期隐藏与清理只针对 L2。逻辑可见性严格在 `expires_at` 改变，`cleanup_jitter_seconds` 只延迟物理删除。所有 L0/L1 均保留；即使目录内 L2 正文全部清除，摘要及其向量仍可读取／召回。
 
 以上为 OV 原生链路。托管控制台或网关还需将对应配置和请求路由转发至 OV；增加 OV 路由不代表既有云端代理会自动开放。该 PR 不修改公有云服务或计费链路。
-
-通过文档保留策略接口可独立设置 session 子文件期限和子目录相对默认值。首次编辑子对象时迁移旧 session，保持已有文件期限；后续内容写入只续期对应文件。迁移后修改 session 根策略仅影响未来新文件。

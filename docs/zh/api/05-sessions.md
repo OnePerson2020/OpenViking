@@ -1716,9 +1716,8 @@ results = await client.search(query=query, session_id=session_id)
 `PATCH /api/v1/sessions/{session_id}/config` 中，省略该字段表示保持原配置，
 整数表示显式设置，null 表示恢复继承。Session 不接受 `ttl_absolute`。
 
-修改配置不算内容更新，也不能恢复已过期的 session。逐文件 TTL 模式下，
-修改 session 根默认值保留已有子文件的期限。修改库或目录默认配置，
-不会把历史未配置 TTL 的数据自动纳入清理范围。
+修改配置不算内容更新，也不能恢复已过期的 Session。每个 Session 的全部 L2
+文件共用一个期限。修改库或目录默认配置不会自动纳管历史未配置 TTL 的 Session。
 
 ```python
 await client.create_session("demo", options={"ttl_relative": 30})

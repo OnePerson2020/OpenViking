@@ -873,10 +873,7 @@ impl HttpClient {
         verbose: bool,
     ) -> Result<serde_json::Value> {
         let path_obj = Path::new(path);
-        let mut resource_args = resource_args.unwrap_or_default();
-        let ttl_relative = resource_args.remove("ttl_relative");
-        let ttl_absolute = resource_args.remove("ttl_absolute");
-        let args = Value::Object(resource_args);
+        let args = Value::Object(resource_args.unwrap_or_default());
 
         // Determine effective parent and create_parent flag.
         // Only send create_parent when the user explicitly selected
@@ -895,12 +892,6 @@ impl HttpClient {
                 body["acl"] = acl.clone();
             }
             add_resource_tag_fields(&mut body, &tags, &tag_mode);
-            if let Some(value) = &ttl_relative {
-                body["ttl_relative"] = value.clone();
-            }
-            if let Some(value) = &ttl_absolute {
-                body["ttl_absolute"] = value.clone();
-            }
             if create_parent {
                 body.as_object_mut()
                     .expect("add_resource request body must be an object")
@@ -2089,7 +2080,6 @@ mod tests {
             HttpClient::new(no_split_url, None, None, None, None, 5.0, false, None);
         let mut no_split_args = Map::new();
         no_split_args.insert("parse_mode".to_string(), json!("no_split"));
-        no_split_args.insert("ttl_relative".to_string(), json!(7));
         no_split_client
             .add_resource(
                 "https://example.com/manual.pdf",
@@ -2121,7 +2111,7 @@ mod tests {
             .await
             .expect("request should be captured");
         assert!(no_split_request.contains(r#""args":{"parse_mode":"no_split"}"#));
-        assert!(no_split_request.contains(r#""ttl_relative":7"#));
+        assert!(!no_split_request.contains("ttl_relative"));
     }
 
     #[test]

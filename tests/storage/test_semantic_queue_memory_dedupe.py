@@ -152,7 +152,9 @@ class _FakeMemoryDirFS:
 def _patch_semantic_config(monkeypatch, *, overview_sample_limit=32):
     monkeypatch.setattr(
         "openviking.storage.queuefs.semantic_processor.get_openviking_config",
-        lambda: SimpleNamespace(semantic=SimpleNamespace(overview_sample_limit=overview_sample_limit)),
+        lambda: SimpleNamespace(
+            semantic=SimpleNamespace(overview_sample_limit=overview_sample_limit)
+        ),
     )
 
 
@@ -266,7 +268,7 @@ async def test_memory_directory_summarizes_all_uncached_files(monkeypatch):
 async def test_ttl_event_summary_does_not_write_after_sources_change_during_llm(
     monkeypatch, source_change
 ):
-    dir_uri = "viking://user/default/memories/events"
+    dir_uri = "viking://user/default/memories/events/2026/09/28"
     event_uri = f"{dir_uri}/event.md"
     registry_record = SimpleNamespace(
         generation="generation-1", expires_at="2999-01-01T00:00:00.000Z"
@@ -299,6 +301,18 @@ async def test_ttl_event_summary_does_not_write_after_sources_change_during_llm(
             raise KeyError(uri)
 
     fs = EventFS()
+
+    async def directory_fields(fs, uri, *, ctx):
+        assert uri == dir_uri
+        record = fs.ttl_registry.record
+        return (
+            {"ttl_generation": record.generation, "expires_at": record.expires_at} if record else {}
+        )
+
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_processor.read_directory_fields", directory_fields
+    )
+
     processor = SemanticProcessor(max_concurrent_llm=1)
 
     async def generate_file_summary(file_path, llm_sem=None, ctx=None):
@@ -319,9 +333,7 @@ async def test_ttl_event_summary_does_not_write_after_sources_change_during_llm(
             )
         return "stale overview"
 
-    monkeypatch.setattr(
-        "openviking.storage.queuefs.semantic_processor.get_viking_fs", lambda: fs
-    )
+    monkeypatch.setattr("openviking.storage.queuefs.semantic_processor.get_viking_fs", lambda: fs)
     _patch_semantic_config(monkeypatch)
     monkeypatch.setattr(processor, "_generate_single_file_summary", generate_file_summary)
     monkeypatch.setattr(processor, "_generate_overview", generate_overview)
@@ -340,13 +352,14 @@ async def test_ttl_event_summary_does_not_write_after_sources_change_during_llm(
 
         assert len(fs.writes) == 2
         for _, content in fs.writes:
-            assert parse_abstract_overview(content).metadata["expires_at"] == registry_record.expires_at
+            assert "expires_at" not in parse_abstract_overview(content).metadata
+
     else:
         assert fs.writes == []
     assert fs._async_agfs.acquired_batches == [
         [
-            "/fake/viking/user/default/memories/events/.overview.md",
-            "/fake/viking/user/default/memories/events/.abstract.md",
+            "/fake/viking/user/default/memories/events/2026/09/28/.overview.md",
+            "/fake/viking/user/default/memories/events/2026/09/28/.abstract.md",
         ]
     ]
 

@@ -89,7 +89,7 @@ async def test_sessions_returns_empty_and_logs_when_storage_listing_fails(
 @pytest.mark.asyncio
 async def test_sessions_uses_canonical_scope_and_relies_on_storage_compatibility(monkeypatch):
     monkeypatch.setattr(
-        "openviking.storage.ttl_view.read_session_metadata", AsyncMock(return_value={})
+        "openviking.storage.ttl_view.read_directory_fields", AsyncMock(return_value={})
     )
     service = SessionService(viking_fs=Mock())
     ctx = _make_ctx()

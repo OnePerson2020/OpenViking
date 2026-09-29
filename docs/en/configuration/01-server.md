@@ -69,7 +69,7 @@ Optional sections use their defaults when omitted. Unknown fields in `ov.conf` a
 | `ingest` | object | built-in defaults | Conversation-log ingestion |
 | `output_language_override` | string | `""` | Force summary/memory language; empty means auto-detect |
 | `allow_private_networks` | boolean | `false` | Allow fetching private-network resources |
-| `ttl` | object | disabled | Event, session, and resource TTL policies; resources use a separate long-term-memory default |
+| `ttl` | object | disabled | Event date directory and session TTL policies |
 | `ttl_cleanup` | object | enabled executor | Physical cleanup scheduling, jitter, and batch budgets; all TTL policies still default to disabled |
 
 `auto_generate_l0`, `auto_generate_l1`, `default_search_mode`, and `default_search_limit` are deprecated compatibility fields. They are accepted when loading older configuration files but have no runtime effect.
@@ -470,9 +470,18 @@ Provider-, parser-, storage-, and encryption-specific fields are documented in [
 
 ## TTL
 
-TTL policies are disabled by default. `ttl` in `ov.conf` supplies the startup baseline; cluster/account runtime overrides reuse the existing configuration manager, without adding cloud vector fields. A library's global policy is its account's `ttl.global` and applies only to user events, peer events, and sessions. Public/user/peer resources are long-term memory and have a separate `ttl.resources` default that never inherits `ttl.global`. User and peer IDs are matched by URI scope; there is no separate per-user configuration layer.
+TTL is disabled by default and applies only to event date directories and sessions.
+`ttl` in `ov.conf` supplies the startup baseline. Existing cluster/account runtime
+configuration supplies library overrides; user and account identities do not add
+extra retention levels. Resources have no TTL configuration.
 
-Events and sessions resolve “nearest explicit directory policy → scope default → library global default → disabled”. Resources resolve “explicit import parameters → nearest explicit directory policy → resource default → disabled”. `inherit` continues upward within that chain; `disabled` stops inheritance. `days` requires positive whole days; `absolute` is supported on resource imports and individual files, not on scope or directory defaults. Directory matching respects path boundaries: `events/2026` overrides `events`, without matching `events/20260`.
+New lifecycle directories resolve nearest explicit directory policy → type default
+→ library global default → disabled. `inherit` continues upward; `disabled` stops
+inheritance. `days` requires positive whole `ttl_days`. Event type/directory defaults
+also accept `absolute` with a Unix-seconds `ttl_absolute`; global and session
+defaults accept relative days or disabled. Directory keys may be events roots,
+valid year/month/date prefixes, or a user's sessions container. Individual files
+and session-internal subdirectories are not policy targets.
 
 ```json
 {
@@ -481,7 +490,6 @@ Events and sessions resolve “nearest explicit directory policy → scope defau
     "user_events": {"mode": "days", "ttl_days": 60},
     "peer_events": {"mode": "inherit"},
     "sessions": {"mode": "days", "ttl_days": 30},
-    "resources": {"mode": "days", "ttl_days": 90},
     "directories": {
       "viking://user/alice/memories/events/2026": {"mode": "days", "ttl_days": 7}
     }
@@ -496,7 +504,13 @@ ov admin get-configuration --account-id default
 ov admin patch-configuration --account-id default --settings '{"ttl":{"global":{"mode":"days","ttl_days":90}}}'
 ```
 
-Omitting `--account-id` selects the cluster layer. Python HTTP SDK methods are `admin_get_configuration(account_id)` and `admin_patch_configuration(settings, account_id)`. Public event writes, memory extraction, session creation and resource imports read the merged runtime policy with the resource/global separation above. Policy changes affect new objects only. Existing objects retain their snapshotted policy: successful event/resource content updates, session message appends and successful commits renew relative deadlines using the saved `ttl_days`, while absolute resource deadlines remain fixed. Resource directory policies are defaults copied independently to new files; they do not create a directory deadline, cap existing descendants, or delete the directory. Use [document expiry](../api/12-content.md#document-expiry) to revise an existing event/resource file deadline.
+Omitting `--account-id` selects the cluster layer. Python HTTP SDK methods are
+`admin_get_configuration(account_id)` and `admin_patch_configuration(settings, account_id)`.
+Defaults affect newly created date directories and sessions only. Existing managed
+directories keep their saved duration, and unmanaged historical directories remain
+unmanaged, even when new files are added. Explicit edits to a live lifecycle directory
+use [document expiry](../api/12-content.md#document-expiry). Relative lifetimes renew
+after successful content changes; absolute event deadlines stay fixed.
 
 `ttl_cleanup` controls the physical deletion executor independently from TTL policy. It defaults to `enabled: true`, but with every TTL policy disabled there is no expiry work to perform. Turning the executor off pauses new physical deletes and preserves retry state; expired L2 remains logically invisible. The scheduler uses a small scan jitter and a stable per-object cleanup offset so tenants do not all delete at UTC midnight.
 
@@ -513,5 +527,3 @@ Omitting `--account-id` selects the cluster layer. Python HTTP SDK methods are `
 Expiry filtering and cleanup apply only to L2. Logical visibility changes exactly at `expires_at`; `cleanup_jitter_seconds` delays only physical deletion. All L0/L1 files and vectors remain readable and searchable, including those inside directories after every L2 content file has been removed.
 
 These are native OV routes. A hosted console or gateway must forward the matching configuration and requests; adding OV routes does not automatically expose them through an existing cloud proxy. This PR does not change public-cloud services or billing.
-
-Session child files can have independent deadlines and child directories can provide relative defaults through the document-retention endpoint. The first child edit migrates a legacy session without moving existing deadlines; later content writes renew only that file. Root edits on a migrated session change defaults for future files.

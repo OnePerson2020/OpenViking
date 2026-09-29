@@ -1,24 +1,12 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""TTL (time-to-live) policy configuration for events, sessions and resources.
+"""Default-off TTL policies for event date directories and sessions.
 
-TTL is default OFF and only ever applies to four supported directory scopes:
-
-- ``user_events``  -> ``viking://user/{user_id}/memories/events/``
-- ``peer_events``  -> ``viking://user/{user_id}/peers/{peer_id}/memories/events/``
-- ``resources``    -> public, user and peer resource import roots
-- ``sessions``     -> ``viking://user/{user_id}/sessions/``
-
-It is not extended to preferences, entities, or any other directory.
-
-The configuration mirrors the design doc's minimal ``policy`` protocol: a library
-global default, per-scope defaults, and optional concrete-directory overrides.
-All levels use the same ``TTLPolicy`` structure. Events and sessions resolve as
-*nearest directory override > scope default > library global default > off*.
-Resources are long-term memory and resolve as *nearest directory override >
-resource default > off*; they never inherit the library global default.
+Priority: nearest explicit directory > type default > library global > off.
+A disabled node stops inheritance. Existing directories keep their snapshots.
 """
 
+from datetime import datetime
 from typing import Dict, Literal, Optional
 
 from pydantic import BaseModel, Field, StrictInt, model_validator
@@ -27,43 +15,40 @@ from .runtime_field import RuntimeField
 
 # The supported TTL scopes. Deliberately closed: TTL never applies to any
 # other directory type.
-TTLScope = Literal["user_events", "peer_events", "sessions", "resources"]
-TTL_SCOPES: tuple[TTLScope, ...] = ("user_events", "peer_events", "sessions", "resources")
+TTLScope = Literal["user_events", "peer_events", "sessions"]
+TTL_SCOPES: tuple[TTLScope, ...] = ("user_events", "peer_events", "sessions")
 
 
 def _is_supported_directory_uri(uri: str) -> bool:
-    """Accept directory policies, never an individual event or session."""
+    """Accept event policy containers/date directories and sessions containers."""
     if not uri.startswith("viking://") or "?" in uri or "#" in uri:
         return False
     path = uri[len("viking://") :].rstrip("/")
     parts = path.split("/")
     if any(not part or part in {".", ".."} or "\\" in part for part in parts):
         return False
-    if parts[0] == "resources":
-        return True
     if len(parts) < 3 or parts[0] != "user":
         return False
-    if parts[2] == "resources" or (
-        len(parts) >= 5 and parts[2] == "peers" and parts[4] == "resources"
-    ):
-        return True
     if parts[2] == "sessions":
         # A session ID is an object root, not a configurable directory.
         return len(parts) == 3
     if len(parts) >= 4 and parts[2:4] == ["memories", "events"]:
-        return True
-    elif (
-        len(parts) >= 6
-        and parts[2] == "peers"
-        and parts[4:6]
-        == [
-            "memories",
-            "events",
-        ]
-    ):
-        return True
+        suffix = parts[4:]
+    elif len(parts) >= 6 and parts[2] == "peers" and parts[4:6] == ["memories", "events"]:
+        suffix = parts[6:]
     else:
         return False
+    if len(suffix) > 3:
+        return False
+    if not suffix:
+        return True
+    if [len(part) for part in suffix] != [4, 2, 2][: len(suffix)]:
+        return False
+    try:
+        datetime.strptime("/".join(suffix + ["01"] * (3 - len(suffix))), "%Y/%m/%d")
+    except ValueError:
+        return False
+    return True
 
 
 class TTLPolicy(BaseModel):
@@ -98,7 +83,7 @@ class TTLPolicy(BaseModel):
 class TTLConfig(BaseModel):
     """Cluster-wide TTL policy. Default OFF.
 
-    The default instance leaves the global and resource policies ``disabled``
+    The default instance leaves the global policy ``disabled``
     and the event/session scopes ``inherit``, so nothing expires unless an
     operator opts in. Changing this config only affects objects created
     afterwards. Existing managed objects retain their snapshotted duration,
@@ -125,10 +110,6 @@ class TTLConfig(BaseModel):
         default_factory=TTLPolicy,
         description="TTL default for viking://user/{user_id}/sessions/.",
     )
-    resources: TTLPolicy = RuntimeField(
-        default_factory=lambda: TTLPolicy(mode="disabled"),
-        description="Separate resource TTL default; never inherits the library global policy.",
-    )
     directories: Dict[str, TTLPolicy] = RuntimeField(
         default_factory=dict,
         description=(
@@ -137,7 +118,7 @@ class TTLConfig(BaseModel):
         ),
     )
 
-    model_config = {"populate_by_name": True}
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
     @model_validator(mode="after")
     def _check_global(self) -> "TTLConfig":
@@ -146,42 +127,23 @@ class TTLConfig(BaseModel):
                 "ttl.global mode must be 'disabled' or 'days' ('inherit' is not "
                 "allowed at the global level)"
             )
-        if any(getattr(self, scope).mode == "absolute" for scope in TTL_SCOPES):
-            raise ValueError(
-                "absolute TTL is supported for resource imports, not directory defaults"
-            )
+        if self.sessions.mode == "absolute":
+            raise ValueError("sessions support relative retention only")
         normalized: Dict[str, TTLPolicy] = {}
         for raw_uri, policy in self.directories.items():
             uri = raw_uri.rstrip("/")
             if not _is_supported_directory_uri(uri):
                 raise ValueError(
                     "ttl.directories keys must be concrete directories under "
-                    "user events, peer events, sessions, or resources"
+                    "user events, peer events, or sessions"
                 )
+            if uri.endswith("/sessions") and policy.mode == "absolute":
+                raise ValueError("sessions support relative retention only")
             if uri in normalized:
                 raise ValueError(f"duplicate ttl directory after normalization: {uri}")
-            if policy.mode == "absolute":
-                raise ValueError("absolute TTL is supported for resource imports, not directories")
             normalized[uri] = policy
         self.directories = normalized
         return self
-
-    def resolve_scope(self, scope: TTLScope) -> Optional[int]:
-        """Return the effective ``ttl_days`` for a scope, or ``None`` when off.
-
-        The scope's own policy wins. For events and sessions, ``inherit`` falls
-        through to the global default; resources never inherit that default.
-        ``disabled`` blocks inheritance and yields off.
-        """
-        policy = getattr(self, scope)
-        if policy.mode == "days":
-            return policy.ttl_days
-        if policy.mode != "inherit" or scope == "resources":
-            return None
-        # mode == "inherit": fall through to the global default.
-        if self.global_default.mode == "days":
-            return self.global_default.ttl_days
-        return None
 
     def resolve_uri(self, uri: str, scope: TTLScope) -> Optional[int]:
         """Resolve one in-scope URI using its nearest directory override.
@@ -198,23 +160,20 @@ class TTLConfig(BaseModel):
         matches = (
             (directory, policy)
             for directory, policy in self.directories.items()
-            if normalized_uri.startswith(directory + "/")
-            or (scope == "resources" and normalized_uri == directory)
+            if normalized_uri.startswith(directory + "/") or normalized_uri == directory
         )
         for _, policy in sorted(matches, key=lambda item: len(item[0]), reverse=True):
             if policy.mode != "inherit":
                 return policy
         policy = getattr(self, scope)
-        if scope == "resources" and policy.mode == "inherit":
-            return TTLPolicy(mode="disabled")
         return self.global_default if policy.mode == "inherit" else policy
 
     @property
     def enabled(self) -> bool:
         """True when TTL resolves to an active expiry for at least one scope."""
-        return any(self.resolve_scope(scope) is not None for scope in TTL_SCOPES) or any(
-            policy.mode == "days" for policy in self.directories.values()
-        )
+        return any(
+            self.resolve_uri_policy("", scope).mode in {"days", "absolute"} for scope in TTL_SCOPES
+        ) or any(policy.mode in {"days", "absolute"} for policy in self.directories.values())
 
 
 class TTLCleanupConfig(BaseModel):
@@ -234,26 +193,6 @@ class TTLCleanupConfig(BaseModel):
     scan_time_budget_seconds: float = RuntimeField(default=5.0, gt=0, le=300)
 
 
-class ResourceTTL(BaseModel):
-    """Public resource TTL: relative whole days or an absolute Unix timestamp in seconds."""
-
-    ttl_relative: Optional[StrictInt] = Field(default=None, ge=1, le=365000)
-    ttl_absolute: Optional[StrictInt] = Field(default=None, ge=1, le=253402300799)
-
-    @model_validator(mode="after")
-    def _exclusive(self) -> "ResourceTTL":
-        if self.ttl_relative is not None and self.ttl_absolute is not None:
-            raise ValueError("ttl_relative and ttl_absolute are mutually exclusive")
-        return self
-
-    def policy(self) -> TTLPolicy:
-        if self.ttl_relative is not None:
-            return TTLPolicy(mode="days", ttl_days=self.ttl_relative)
-        if self.ttl_absolute is not None:
-            return TTLPolicy(mode="absolute", ttl_absolute=self.ttl_absolute)
-        return TTLPolicy(mode="disabled")
-
-
 class SessionTTL(BaseModel):
     """Session override: null inherits the current sessions policy."""
 
@@ -261,7 +200,7 @@ class SessionTTL(BaseModel):
 
 
 class DocumentTTL(BaseModel):
-    """Set one live file's relative retention or fixed ISO 8601 deadline."""
+    """Set a live lifecycle directory's relative retention or fixed deadline."""
 
     expires_at: Optional[str] = None
     ttl_relative: Optional[StrictInt] = Field(default=None, ge=1, le=365000)
@@ -270,28 +209,4 @@ class DocumentTTL(BaseModel):
     def _one_policy(self) -> "DocumentTTL":
         if (self.expires_at is None) == (self.ttl_relative is None):
             raise ValueError("provide exactly one of expires_at or ttl_relative")
-        return self
-
-
-class ContentTTL(DocumentTTL):
-    """File deadline or a session directory's relative/default policy."""
-
-    policy: Optional[TTLPolicy] = None
-
-    @model_validator(mode="after")
-    def _one_policy(self) -> "ContentTTL":
-        if self.policy is not None:
-            if self.policy.mode == "absolute":
-                raise ValueError("session directories support relative retention only")
-            if self.expires_at is not None or self.ttl_relative is not None:
-                raise ValueError("policy cannot be combined with expires_at or ttl_relative")
-            return self
-        if (
-            "ttl_relative" in self.model_fields_set
-            and self.ttl_relative is None
-            and self.expires_at is None
-        ):
-            self.policy = TTLPolicy(mode="inherit")
-            return self
-        super()._one_policy()
         return self

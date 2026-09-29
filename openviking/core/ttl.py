@@ -1,25 +1,11 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""Central TTL resolution: map an object URI to its expiry.
+"""Resolve event-date and session directory lifetimes in one place.
 
-This is the single seam that turns a canonical Viking URI plus the cluster TTL
-config into an ``expires_at``. Relative TTL is based on the latest successful
-content update; an explicit absolute deadline remains fixed. Every writer that
-owns TTL (events via the memory path, sessions via SessionMeta) and the
-background cleanup scanner go through here so the scope rules stay in one place.
-
-TTL is default OFF and strictly scoped to four directory kinds:
-
-- ``user_events``  -> ``viking://user/{uid}/memories/events/...``
-- ``peer_events``  -> ``viking://user/{uid}/peers/{pid}/memories/events/...``
-- ``resources``    -> public, user and peer resource import roots
-- ``sessions``     -> ``viking://user/{uid}/sessions/{sid}...``
-
-Day granularity is expressed as ``ttl_days`` whole days after ``received_at``
-(N x 24h in UTC). For compatibility the persisted field is still named
-``received_at``; for a relative policy it records the update timestamp used to
-derive the current deadline. ``expires_at`` is authoritative for both the read
-barrier and the cleanup scan.
+TTL is off by default. Each events/YYYY/MM/DD directory or session owns one
+expires_at shared by its L2 descendants. Relative deadlines use the latest
+successful content update plus frozen ttl_days; absolute deadlines stay fixed.
+L0/L1 summaries are retained independently of this lifecycle.
 """
 
 from __future__ import annotations
@@ -28,8 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional
 from uuid import uuid4
 
-from openviking.core.namespace import classify_uri, uri_parts
-from openviking.storage.internal_names import WEBDAV_RESERVED_FILENAMES, is_storage_internal_name
+from openviking.core.namespace import uri_parts
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 from openviking_cli.utils.config import TTLConfig, TTLScope, get_openviking_config
 
@@ -37,10 +22,6 @@ from openviking_cli.utils.config import TTLConfig, TTLScope, get_openviking_conf
 # rules so callers do not re-derive them.
 OBJECT_TYPE_EVENT = "event"
 OBJECT_TYPE_SESSION = "session"
-OBJECT_TYPE_SESSION_FILE = "session_file"
-OBJECT_TYPE_RESOURCE = "resource"
-OBJECT_TYPE_RESOURCE_FILE = "resource_file"
-RESOURCE_TTL_FILENAME = ".ttl.json"
 TTL_GENERATION_FIELD = "ttl_generation"
 TTL_FIELD_NAMES = frozenset({"ttl_days", "received_at", "expires_at", TTL_GENERATION_FIELD})
 
@@ -48,7 +29,7 @@ TTL_FIELD_NAMES = frozenset({"ttl_days", "received_at", "expires_at", TTL_GENERA
 def ttl_scope_for_uri(uri: str) -> Optional[TTLScope]:
     """Classify a canonical URI into a TTL scope, or ``None`` when unscoped.
 
-    Only user events, peer events, sessions, and resources are in scope. Anything else
+    Only user events, peer events and sessions are in scope. Anything else
     (preferences, entities, skills, non-event memories, ...) returns
     ``None`` so TTL never touches it.
     """
@@ -56,16 +37,8 @@ def ttl_scope_for_uri(uri: str) -> Optional[TTLScope]:
         parts = uri_parts(uri)
     except ValueError:
         return None
-    if parts[:1] == ["resources"]:
-        return "resources"
     if len(parts) < 3 or parts[0] != "user":
         return None
-    classification = classify_uri(uri)
-    if (
-        classification.content_index is not None
-        and parts[classification.content_index] == "resources"
-    ):
-        return "resources"
     # sessions: viking://user/{uid}/sessions/...
     if parts[2] == "sessions":
         return "sessions"
@@ -78,14 +51,11 @@ def ttl_scope_for_uri(uri: str) -> Optional[TTLScope]:
     return None
 
 
-def ttl_object_for_uri(uri: str, *, is_dir: bool = False) -> Optional[tuple[str, str]]:
-    """Return ``(object_type, canonical_object_uri)`` for a TTL object path.
+def ttl_object_for_uri(uri: str) -> Optional[tuple[str, str]]:
+    """Map a lifecycle directory or descendant to its event-date/session owner.
 
-    A session's root metadata controls its complete subtree. Event files may
-    have any extension (or none), just like public content writes. Callers
-    walking the filesystem must identify directories with ``is_dir``; event
-    containers and reserved system files are not independently expiring objects.
-    User-authored dot-files follow the same TTL rules as other event files.
+    Upper policy containers and paths outside the standard date layout have
+    no lifecycle owner. Summary visibility is handled separately by readers.
     """
     scope = ttl_scope_for_uri(uri)
     if scope is None:
@@ -94,40 +64,21 @@ def ttl_object_for_uri(uri: str, *, is_dir: bool = False) -> Optional[tuple[str,
         parts = uri_parts(uri)
     except ValueError:
         return None
-    if scope == "resources":
-        root_depth = (classify_uri(uri).content_index or 0) + 1
-        if len(parts) <= root_depth or (
-            parts[-1] == RESOURCE_TTL_FILENAME and len(parts) == root_depth + 1
-        ):
-            return None
-        if parts[-1] == RESOURCE_TTL_FILENAME:
-            return OBJECT_TYPE_RESOURCE, "viking://" + "/".join(parts[:-1])
-        if parts[-1].startswith(".") and parts[-1].endswith(RESOURCE_TTL_FILENAME):
-            name = parts[-1][1 : -len(RESOURCE_TTL_FILENAME)]
-            if name:
-                return OBJECT_TYPE_RESOURCE_FILE, "viking://" + "/".join([*parts[:-1], name])
-        return None
     if scope == "sessions":
-        if len(parts) < 4:
-            return None
-        if (
-            len(parts) > 4
-            and parts[-1].startswith(".")
-            and parts[-1].endswith(RESOURCE_TTL_FILENAME)
-        ):
-            name = parts[-1][1 : -len(RESOURCE_TTL_FILENAME)]
-            if name:
-                return OBJECT_TYPE_SESSION_FILE, "viking://" + "/".join([*parts[:-1], name])
-        return OBJECT_TYPE_SESSION, "viking://" + "/".join(parts[:4])
-    event_root_depth = 6 if scope == "peer_events" else 4
-    if (
-        is_dir
-        or len(parts) <= event_root_depth
-        or parts[-1] in WEBDAV_RESERVED_FILENAMES
-        or is_storage_internal_name(parts[-1])
-    ):
+        return (OBJECT_TYPE_SESSION, "viking://" + "/".join(parts[:4])) if len(parts) >= 4 else None
+    depth = 6 if scope == "peer_events" else 4
+    if len(parts) < depth + 3:
         return None
-    return OBJECT_TYPE_EVENT, "viking://" + "/".join(parts)
+    # Only the standard YYYY/MM/DD bucket is a lifecycle owner. A policy
+    # container or an arbitrary event filename never becomes a TTL object.
+    date_parts = parts[depth : depth + 3]
+    if [len(part) for part in date_parts] != [4, 2, 2]:
+        return None
+    try:
+        datetime.strptime("/".join(date_parts), "%Y/%m/%d")
+    except ValueError:
+        return None
+    return OBJECT_TYPE_EVENT, "viking://" + "/".join(parts[: depth + 3])
 
 
 def resolve_ttl_days(uri: str, config: Optional[TTLConfig] = None) -> Optional[int]:
@@ -170,7 +121,6 @@ def freeze_ttl_fields(
     *,
     received_at: Optional[datetime] = None,
     config: Optional[TTLConfig] = None,
-    resource_ttl: Optional[dict] = None,
 ) -> Optional[dict]:
     """Compute the initial TTL snapshot for a new object, or ``None`` when off.
 
@@ -178,22 +128,20 @@ def freeze_ttl_fields(
     integer ``ttl_days`` actually applied. Later config changes do not alter the
     snapshot duration; relative objects renew it from successful content updates.
     """
-    policy = None
-    if ttl_scope_for_uri(uri) == "resources":
-        from openviking_cli.utils.config.ttl_config import ResourceTTL
-
-        ttl_config = config if config is not None else _current_ttl_config()
-        if resource_ttl and any(value is not None for value in resource_ttl.values()):
-            policy = ResourceTTL(**resource_ttl).policy()
-        elif ttl_config is not None:
-            policy = ttl_config.resolve_uri_policy(uri, "resources")
-    ttl_days = policy.ttl_days if policy is not None else resolve_ttl_days(uri, config)
+    scope = ttl_scope_for_uri(uri)
+    target = ttl_object_for_uri(uri)
+    if target is None or target[1] != uri.rstrip("/"):
+        return None
+    ttl_config = config if config is not None else _current_ttl_config()
+    if ttl_config is None:
+        return None
+    policy = ttl_config.resolve_uri_policy(uri, scope)
+    ttl_days = policy.ttl_days if policy.mode == "days" else None
     received = received_at or datetime.now(timezone.utc)
     if received.tzinfo is None:
         received = received.replace(tzinfo=timezone.utc)
-    absolute = policy.ttl_absolute if policy is not None and policy.mode == "absolute" else None
-    if absolute is not None:
-        expires = datetime.fromtimestamp(absolute, timezone.utc)
+    if policy.mode == "absolute":
+        expires = datetime.fromtimestamp(policy.ttl_absolute, timezone.utc)
     elif ttl_days is not None:
         expires = compute_expires_at(received, ttl_days)
     else:
@@ -227,6 +175,9 @@ def apply_ttl_fields(
     choose expiry independently.
     """
     result = {key: value for key, value in metadata.items() if key not in TTL_FIELD_NAMES}
+    target = ttl_object_for_uri(uri)
+    if target is None or target[1] != uri.rstrip("/"):
+        return result
     if existing_fields is None:
         snapshot = freeze_ttl_fields(uri, received_at=received_at, config=config)
         if snapshot:
@@ -329,9 +280,6 @@ def _current_ttl_config() -> Optional[TTLConfig]:
 def ttl_metadata_uri(object_type: str, uri: str) -> str:
     if object_type == OBJECT_TYPE_SESSION:
         return f"{uri}/.meta.json"
-    if object_type == OBJECT_TYPE_RESOURCE:
-        return f"{uri}/{RESOURCE_TTL_FILENAME}"
-    if object_type in {OBJECT_TYPE_RESOURCE_FILE, OBJECT_TYPE_SESSION_FILE}:
-        parent, name = uri.rsplit("/", 1)
-        return f"{parent}/.{name}{RESOURCE_TTL_FILENAME}"
-    return uri
+    if object_type == OBJECT_TYPE_EVENT:
+        return f"{uri}/.ttl.json"
+    raise ValueError(f"Unsupported TTL object type: {object_type}")

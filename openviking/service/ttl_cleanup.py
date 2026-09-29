@@ -21,27 +21,20 @@ from uuid import NAMESPACE_URL, uuid5
 
 from openviking.core.ttl import (
     OBJECT_TYPE_EVENT,
-    OBJECT_TYPE_RESOURCE,
-    OBJECT_TYPE_RESOURCE_FILE,
     OBJECT_TYPE_SESSION,
-    OBJECT_TYPE_SESSION_FILE,
     hidden_by_ttl,
-    ttl_metadata_uri,
 )
 from openviking.pyagfs.exceptions import AGFSConfigError, AGFSPermissionDeniedError
-from openviking.server.error_mapping import is_storage_not_found
 from openviking.server.identity import RequestContext, Role
 from openviking.service.periodic_task import PeriodicTask
 from openviking.service.task_store import SYSTEM_TASK_ACCOUNT_ID, SYSTEM_TASK_USER_ID
 from openviking.service.task_tracker import TaskStatus, get_task_tracker
 from openviking.service.task_tracker_concurrency import OwnerLoopDispatcher, run_to_completion
-from openviking.session.memory.utils.messages import parse_memory_file_with_fields
 from openviking.session.ttl_fence import reconcile_session_ttl
 from openviking.storage.errors import StorageException, VikingDBException
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
 from openviking.storage.queuefs.process_result import ProcessResult
 from openviking.storage.ttl_registry import TTLRecord, cleanup_not_before
-from openviking.utils.content_hash import content_md5
 from openviking.utils.time_utils import format_iso8601
 from openviking_cli.exceptions import InvalidArgumentError, PermissionDeniedError
 from openviking_cli.session.user_id import UserIdentifier
@@ -266,6 +259,16 @@ class TTLCleanupService:
         """Fence duplicate deliveries and persist retry progress under the object lock."""
         viking_fs = self._service.viking_fs
         registry = viking_fs.ttl_registry
+        from openviking.core.ttl import ttl_object_for_uri
+
+        if ttl_object_for_uri(scheduled.object_uri) != (
+            scheduled.object_type,
+            scheduled.object_uri,
+        ):
+            await registry.remove_if_generation(
+                scheduled.account_id, scheduled.object_uri, scheduled.generation
+            )
+            return {"deleted": False, "skipped": "out_of_scope"}
         try:
             ctx, lease = await self._acquire_object_lock(scheduled)
         except Exception as exc:
@@ -305,35 +308,7 @@ class TTLCleanupService:
             role=Role.ROOT,
         )
         object_path = viking_fs._uri_to_path(scheduled.object_uri, ctx=ctx)
-        if scheduled.object_type == OBJECT_TYPE_SESSION:
-            lease = await viking_fs._async_agfs.pathlock_acquire_tree(object_path)
-        else:
-            lease = await viking_fs._async_agfs.pathlock_acquire_batch(
-                [
-                    {
-                        "path": object_path,
-                        "kind": "exact",
-                    },
-                    *(
-                        [
-                            {
-                                "path": viking_fs._uri_to_path(
-                                    ttl_metadata_uri(scheduled.object_type, scheduled.object_uri),
-                                    ctx=ctx,
-                                ),
-                                "kind": "exact",
-                            }
-                        ]
-                        if scheduled.object_type
-                        in {
-                            OBJECT_TYPE_RESOURCE,
-                            OBJECT_TYPE_RESOURCE_FILE,
-                            OBJECT_TYPE_SESSION_FILE,
-                        }
-                        else []
-                    ),
-                ]
-            )
+        lease = await viking_fs._async_agfs.pathlock_acquire_tree(object_path)
         return ctx, lease
 
     async def _cleanup_record(
@@ -361,19 +336,21 @@ class TTLCleanupService:
 
         viking_fs = self._service.viking_fs
         registry = viking_fs.ttl_registry
+        from openviking.core.ttl import ttl_object_for_uri
+
+        if ttl_object_for_uri(scheduled.object_uri) != (
+            scheduled.object_type,
+            scheduled.object_uri,
+        ):
+            await registry.remove_if_generation(
+                scheduled.account_id, scheduled.object_uri, scheduled.generation
+            )
+            return {"deleted": False, "skipped": "out_of_scope"}
         self._check_running()
         registered = await registry.get(scheduled.account_id, scheduled.object_uri)
         if registered is None or registered.generation != scheduled.generation:
             return {"deleted": False, "skipped": "stale_registry_generation"}
 
-        if scheduled.object_type == OBJECT_TYPE_SESSION_FILE:
-            from openviking.storage.session_file_ttl import read_session_metadata, session_root
-
-            metadata = await read_session_metadata(
-                viking_fs, session_root(scheduled.object_uri), ctx=ctx
-            )
-            if not metadata.get("ttl_per_file"):
-                return {"deleted": False, "skipped": "incomplete_session_migration"}
         if scheduled.object_type == OBJECT_TYPE_SESSION:
             await reconcile_session_ttl(
                 viking_fs,
@@ -404,65 +381,10 @@ class TTLCleanupService:
         if not hidden_by_ttl(run_at):
             raise _CleanupDeferred(run_at, "waiting_cleanup_window")
 
-        if scheduled.object_type == OBJECT_TYPE_RESOURCE:
-            # Older builds registered a directory as one lifecycle owner. A
-            # directory is now only a default-policy boundary, so retire only
-            # that legacy fence and never recurse into independently-lived files.
-            metadata_uri = ttl_metadata_uri(scheduled.object_type, scheduled.object_uri)
-            try:
-                await viking_fs.remove_files(metadata_uri, ctx=ctx, lease_ref=lease)
-            except Exception as exc:
-                if not is_storage_not_found(exc):
-                    raise
-            await registry.remove_if_generation(
-                scheduled.account_id, scheduled.object_uri, scheduled.generation
-            )
-            return {"deleted": False, "skipped": "legacy_resource_directory"}
-
-        if scheduled.object_type == OBJECT_TYPE_RESOURCE_FILE and live is not None:
-            # Retain a source fingerprint in the sidecar tombstone. Watch skips
-            # unchanged expired sources but accepts a genuinely updated version.
-            from openviking.storage.resource_ttl import (
-                read_resource_fields,
-                write_resource_fields,
-            )
-
-            try:
-                fields = await read_resource_fields(
-                    viking_fs, OBJECT_TYPE_RESOURCE_FILE, scheduled.object_uri, ctx=ctx
-                )
-                if fields is not None and not fields.get("content_md5"):
-                    read_bytes = getattr(viking_fs, "read_file_bytes", None)
-                    if not callable(read_bytes):
-                        raise AttributeError("binary resource reads are unavailable")
-                    raw = await read_bytes(scheduled.object_uri, ctx=ctx, include_expired=True)
-                    fields["content_md5"] = content_md5(raw)
-                    await write_resource_fields(
-                        viking_fs,
-                        OBJECT_TYPE_RESOURCE_FILE,
-                        scheduled.object_uri,
-                        fields,
-                        ctx=ctx,
-                        lease_ref=lease,
-                    )
-            except Exception as exc:
-                logger.debug(
-                    "Unable to persist TTL tombstone fingerprint for %s: %s",
-                    scheduled.object_uri,
-                    exc,
-                )
-
-        # Missing source still requires strict vector cleanup.  Passing the
-        # already-held lease makes the live re-check and the whole delete
-        # one critical section; writers cannot renew or recreate between.
-        remove = (
-            self._service.fs.rm
-            if scheduled.object_type == OBJECT_TYPE_RESOURCE_FILE
-            else viking_fs.rm
-        )
-        await remove(
+        # One owner deadline covers every L2 descendant. Retain all L0/L1.
+        await viking_fs.rm(
             scheduled.object_uri,
-            recursive=scheduled.object_type == OBJECT_TYPE_SESSION,
+            recursive=True,
             ctx=ctx,
             lease_ref=lease,
             strict=True,
@@ -489,25 +411,11 @@ class TTLCleanupService:
         self, scheduled: TTLRecord, ctx: RequestContext
     ) -> Optional[TTLRecord]:
         viking_fs = self._service.viking_fs
-        if scheduled.object_type == OBJECT_TYPE_SESSION_FILE:
-            from openviking.storage.session_file_ttl import session_file_fields
-            from openviking.storage.ttl_registry import record_from_fields
+        from openviking.storage.directory_ttl import read_directory_fields
 
-            fields = await session_file_fields(viking_fs, scheduled.object_uri, ctx=ctx)
-            return record_from_fields(
-                uri=scheduled.object_uri, object_type=scheduled.object_type, fields=fields, ctx=ctx
-            )
-        read_uri = ttl_metadata_uri(scheduled.object_type, scheduled.object_uri)
-        try:
-            raw = await viking_fs.read_file(read_uri, ctx=ctx, include_expired=True)
-        except Exception as exc:
-            if is_storage_not_found(exc):
-                return None
-            raise
-        if scheduled.object_type != OBJECT_TYPE_EVENT:
-            fields = json.loads(raw)
-        else:
-            fields = parse_memory_file_with_fields(raw)
+        fields = await read_directory_fields(viking_fs, scheduled.object_uri, ctx=ctx)
+        if not fields:
+            return None
         if not isinstance(fields, dict):
             raise ValueError(f"Invalid TTL metadata for {scheduled.object_uri}")
         return TTLRecord(
@@ -611,9 +519,6 @@ class _TTLCleanupProcessor(DequeueHandlerBase):
         if object_type not in (
             OBJECT_TYPE_EVENT,
             OBJECT_TYPE_SESSION,
-            OBJECT_TYPE_SESSION_FILE,
-            OBJECT_TYPE_RESOURCE,
-            OBJECT_TYPE_RESOURCE_FILE,
         ):
             raise ValueError("Invalid TTL cleanup object type")
         if not object_uri or not generation:
