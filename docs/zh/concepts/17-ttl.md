@@ -37,11 +37,17 @@ Session 默认整体管理 TTL。成功追加消息、完成有实际内容的 c
 所有 L0/L1 摘要、对应向量及承载目录继续保留并可见。
 消息仅在逻辑到期到物理清理之间暂存，不属于永久保存。
 
-保留已有的显式 Session 子文件／子目录保留设置能力。配置后，存活 Session
+支持显式配置 Session 子文件／子目录的 TTL。配置后，存活 Session
 迁移为逐文件期限，迁移不改变已有截止时间。该模式下更新一个文件不延长兄弟文件，
 messages.jsonl 仍是一个整体，不支持逐消息 TTL；修改根默认配置不改写已有子文件期限。
 
 ## 用户可见信息
+
+文件列表、文件详情、Session 列表／详情和 TTL 查询返回 `expires_at`；
+未配置到期时间时显式返回 `null`，相对期限另返回 `ttl_days`。
+普通目录返回自身 `policy` 和继承后的 `effective_policy`，`expires_at` 为 `null`。
+逐文件 Session 返回 `ttl_per_file: true` 和新文件的 `effective_policy`；
+根 `expires_at: null` 仅表示没有统一期限，子文件仍各自回显实际到期时间。
 
 文件展示实际生效的 expires_at，表示逻辑到期时间，不代表物理删除已完成。
 没有截止时间表示该对象未启用 TTL；相对 TTL 还可展示配置的保留天数。

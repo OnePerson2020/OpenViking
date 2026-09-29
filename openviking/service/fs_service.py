@@ -338,7 +338,7 @@ class FSService:
                 has_more=page.has_more,
             )
         if tags and (output != "original" or extra_fields):
-            return ListingPage(
+            page = ListingPage(
                 entries=await viking_fs._finalize_listing_entries(
                     page.entries,
                     output,
@@ -349,6 +349,10 @@ class FSService:
                 ),
                 has_more=page.has_more,
             )
+        from openviking.storage.ttl_view import TTLView
+
+        ttl_view = TTLView(viking_fs, ctx)
+        page.entries = [await ttl_view.attach(entry) for entry in page.entries]
         return page
 
     @staticmethod
@@ -378,7 +382,11 @@ class FSService:
 
         self._reject_storage_internal_target(uri)
         return await update_document_expiry(
-            self._ensure_initialized(), uri, expires_at, ctx=ctx, ttl_relative=ttl_relative,
+            self._ensure_initialized(),
+            uri,
+            expires_at,
+            ctx=ctx,
+            ttl_relative=ttl_relative,
             policy=policy,
         )
 
@@ -1077,12 +1085,15 @@ class FSService:
     ) -> Dict[str, Any]:
         """Get resource status."""
         viking_fs = self._ensure_initialized()
-        return await viking_fs.stat(
+        entry = await viking_fs.stat(
             uri,
             ctx=ctx,
             skip_count=skip_count,
             include_lock_status=include_lock_status,
         )
+        from openviking.storage.ttl_view import TTLView
+
+        return await TTLView(viking_fs, ctx).attach(entry)
 
     async def ensure_write_access(self, uri: str, ctx: RequestContext) -> None:
         """Validate write access without mutating the target."""

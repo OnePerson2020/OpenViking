@@ -85,24 +85,28 @@ async def _document_target(fs, uri, *, ctx):
 
 def _public_fields(uri, fields):
     # Watch fingerprints and other lifecycle bookkeeping are private.
-    return {"uri": uri, **{key: value for key, value in fields.items() if key in TTL_FIELD_NAMES}}
+    from openviking.storage.ttl_view import lifetime_fields
+
+    return {
+        "uri": uri,
+        **{key: value for key, value in fields.items() if key in TTL_FIELD_NAMES},
+        **lifetime_fields(fields),
+    }
 
 
 async def get_document_ttl(fs, uri: str, *, ctx) -> dict:
     """Read a live file or session's retention snapshot."""
-    kind, fields, _ = await _document_target(fs, uri, ctx=ctx)
-    if kind == "session_directory":
-        return _directory_fields(uri, fields)
+    from openviking.storage.ttl_view import TTLView
+
+    stat = await fs.stat(uri, ctx=ctx)
+    if stat.get("isDir") and ttl_scope_for_uri(uri):
+        view = await TTLView(fs, ctx).fields(uri, is_dir=True)
+        if ttl_object_for_uri(uri) == (OBJECT_TYPE_SESSION, uri):
+            _, fields, _ = await _document_target(fs, uri, ctx=ctx)
+            return {**_public_fields(uri, fields), **view}
+        return {"uri": uri, **view}
+    _, fields, _ = await _document_target(fs, uri, ctx=ctx)
     return _public_fields(uri, fields)
-
-
-def _directory_fields(uri, fields):
-    policy = (
-        fields
-        if "mode" in fields
-        else ({"mode": "days", **fields} if fields else {"mode": "inherit"})
-    )
-    return {**_public_fields(uri, fields), "policy": policy}
 
 
 async def update_document_expiry(
@@ -169,7 +173,9 @@ async def update_document_expiry(
                 await fs.write_file(
                     uri + "/.ttl.json", json.dumps(fields), ctx=ctx, lease_ref=lease
                 )
-                return _directory_fields(uri, fields)
+                from openviking.storage.ttl_view import TTLView
+
+                return {"uri": uri, **await TTLView(fs, ctx).fields(uri, is_dir=True)}
             from openviking.storage.session_file_ttl import session_file_fields
 
             fields = await session_file_fields(fs, uri, ctx=ctx)

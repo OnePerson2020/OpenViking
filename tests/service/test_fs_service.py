@@ -19,6 +19,14 @@ from openviking_cli.exceptions import InvalidArgumentError
 from openviking_cli.session.user_id import UserIdentifier
 
 
+@pytest.fixture
+def unmanaged_resource_ttl(monkeypatch):
+    """Listing coordination fakes contain no resource TTL sidecars."""
+    monkeypatch.setattr(
+        "openviking.storage.ttl_view.resource_ttl_fields", AsyncMock(return_value={})
+    )
+
+
 class _FakeVikingFS:
     def __init__(self, *, rm_error=None, events=None, parent_exists=True):
         self.rm_calls = []
@@ -485,7 +493,9 @@ async def test_grep_projects_tags_when_include_tags_is_requested(request_context
 
 
 @pytest.mark.asyncio
-async def test_ls_and_tree_skip_tag_projection_without_tags_or_include_tags(request_context):
+async def test_ls_and_tree_skip_tag_projection_without_tags_or_include_tags(
+    request_context, unmanaged_resource_ttl
+):
     entries = [{"uri": "viking://resources/a.md", "isDir": False}]
     viking_fs = SimpleNamespace(
         ls=AsyncMock(return_value=entries),
@@ -499,7 +509,8 @@ async def test_ls_and_tree_skip_tag_projection_without_tags_or_include_tags(requ
     service = FSService(viking_fs=viking_fs, vikingdb=FakeVikingDB())
 
     assert await service.ls("viking://resources", ctx=request_context) == ListingPage(
-        entries=entries, has_more=False
+        entries=[{**entry, "expires_at": None, "ttl_days": None} for entry in entries],
+        has_more=False,
     )
     assert await service.tree("viking://resources", ctx=request_context) == ListingPage(
         entries=entries, has_more=False
@@ -513,7 +524,7 @@ async def test_ls_and_tree_skip_tag_projection_without_tags_or_include_tags(requ
     [(1, False), (2, False), (3, True)],
 )
 async def test_ls_and_tree_detect_more_entries_with_n_plus_one(
-    request_context, method_name, entry_count, expected_has_more
+    request_context, method_name, entry_count, expected_has_more, unmanaged_resource_ttl
 ):
     entries = [
         {"uri": f"viking://resources/{index}.md", "isDir": False} for index in range(entry_count)
@@ -535,7 +546,11 @@ async def test_ls_and_tree_detect_more_entries_with_n_plus_one(
         node_limit=2,
     )
 
-    assert page.entries == entries[:2]
+    assert page.entries == (
+        [{**entry, "expires_at": None, "ttl_days": None} for entry in entries[:2]]
+        if method_name == "ls"
+        else entries[:2]
+    )
     assert page.has_more is expected_has_more
     fetch_mock = getattr(viking_fs, method_name)
     assert fetch_mock.await_args.kwargs["node_limit"] == 3
@@ -688,7 +703,9 @@ async def test_tagged_grep_reuses_tags_returned_by_viking_fs(request_context):
 
 
 @pytest.mark.asyncio
-async def test_ls_applies_offset_and_node_limit_after_tag_filtering(request_context):
+async def test_ls_applies_offset_and_node_limit_after_tag_filtering(
+    request_context, unmanaged_resource_ttl
+):
     entries = [
         {
             "uri": f"viking://resources/unmatched-{index:03d}.md",
@@ -740,7 +757,10 @@ async def test_ls_applies_offset_and_node_limit_after_tag_filtering(request_cont
         output="agent",
     )
 
-    assert result == ListingPage(entries=finalized, has_more=True)
+    assert result == ListingPage(
+        entries=[{**entry, "expires_at": None, "ttl_days": None} for entry in finalized],
+        has_more=True,
+    )
     assert viking_fs.ls.await_count == 2
     assert viking_fs.ls.await_args_list[0].kwargs["output"] == "original"
     assert viking_fs.ls.await_args_list[0].kwargs["node_limit"] == 256
@@ -754,6 +774,7 @@ async def test_ls_applies_offset_and_node_limit_after_tag_filtering(request_cont
 @pytest.mark.asyncio
 async def test_ls_tag_filter_keeps_zero_node_limit_unbounded_for_entry_and_simple_output(
     request_context,
+    unmanaged_resource_ttl,
 ):
     entries = [
         {"uri": "viking://resources/a.md", "isDir": False},

@@ -369,7 +369,14 @@ async def get_session(
         session = await service.sessions.get(session_id, _ctx, auto_create=auto_create)
     except NotFoundError:
         return error_response("NOT_FOUND", f"Session {session_id} not found")
+    from openviking.storage.ttl_view import lifetime_fields
+
     result = session.meta.to_dict()
+    result.update(lifetime_fields(result))
+    if result.get("ttl_per_file"):
+        from openviking.storage.ttl_view import TTLView
+
+        result.update(await TTLView(service.viking_fs, _ctx).fields(session.uri, is_dir=True))
     result["uri"] = session.uri
     result["user"] = session.user.to_dict()
     result["pending_tokens"] = int(session.meta.pending_tokens or 0)

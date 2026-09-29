@@ -348,6 +348,9 @@ class SessionService:
                 sort_order="desc",
                 ctx=ctx,
             )
+            from openviking.storage.ttl_view import TTLView
+
+            ttl_view = TTLView(self._viking_fs, ctx)
             for entry in entries:
                 name = entry.get("name", "")
                 if name in [".", ".."]:
@@ -358,6 +361,7 @@ class SessionService:
                     "uri": session_uri,
                     "is_dir": entry.get("isDir", False),
                     "mod_time": entry.get("modTime", ""),
+                    **await ttl_view.fields(session_uri, is_dir=True),
                 }
         except Exception:
             logger.debug("Failed to list sessions", exc_info=True)
@@ -592,9 +596,7 @@ class SessionService:
                     return False
                 self._auto_commit_inflight.add(claim)
         except Exception:
-            logger.debug(
-                "Skipped auto-commit scheduling for %s", session_id, exc_info=True
-            )
+            logger.debug("Skipped auto-commit scheduling for %s", session_id, exc_info=True)
             return False
 
         task = asyncio.create_task(self.run_auto_commit(session_id, ctx, reason=reason_hint))

@@ -49,13 +49,19 @@ summaries, their vectors and supporting directories remain visible and stored.
 Messages may remain physically present between logical expiry and cleanup; they
 are not retained indefinitely by this design.
 
-Existing explicit session child-file and child-directory retention remains
-supported. Configuring it migrates a live session to per-file lifetimes without
+Explicit session child-file and child-directory retention is supported. Configuring it migrates a live session to per-file lifetimes without
 moving existing deadlines. In that mode a changed file does not renew sibling
 files, and `messages.jsonl` is still one expiry unit. This is not message-level
 TTL, and changing a session default does not rewrite existing child snapshots.
 
 ## User-visible retention
+
+File listings/details, session listings/details and TTL queries return `expires_at`,
+explicitly `null` when no deadline is configured, plus `ttl_days` for relative TTL.
+Policy directories return their own `policy` and resolved `effective_policy`, with
+`expires_at: null`. Per-file sessions return `ttl_per_file: true` and the
+`effective_policy` for new files. A null root deadline means no shared lifetime;
+each child file still exposes its own actual expiry.
 
 For a file, display its effective `expires_at` as the expiry time; no deadline
 means retention is not enabled for that object. Relative retention can also show

@@ -677,6 +677,26 @@ async def test_session_children_have_independent_retention_and_directory_default
         client, "patch", "/api/v1/content/ttl", json={"uri": folder, "ttl_relative": 14}
     )
     assert configured["ttl_days"] == 14
+    assert configured["expires_at"] is None
+    assert configured["effective_policy"] == {"mode": "days", "ttl_days": 14}
+    for endpoint in ("/api/v1/content/ttl", "/api/v1/fs/stat"):
+        root_view = await request(client, "get", endpoint, params={"uri": root})
+        assert root_view["ttl_per_file"] is True
+        assert root_view["expires_at"] is None
+        assert root_view["effective_policy"] == {"mode": "days", "ttl_days": 7}
+    detail = await request(client, "get", "/api/v1/sessions/children-ttl")
+    listing = await request(client, "get", "/api/v1/sessions")
+    row = next(item for item in listing if item["session_id"] == "children-ttl")
+    assert detail["ttl_per_file"] is row["ttl_per_file"] is True
+    assert detail["expires_at"] is row["expires_at"] is None
+    assert detail["effective_policy"] == row["effective_policy"] == {"mode": "days", "ttl_days": 7}
+    children = await request(client, "get", "/api/v1/fs/ls", params={"uri": folder})
+    first_view = next(item for item in children if item["uri"] == first)
+    sibling_view = next(item for item in children if item["uri"] == sibling)
+    assert first_view["expires_at"] == retained["expires_at"]
+    assert sibling_view["expires_at"] == sibling_fields["expires_at"]
+    assert first_view["ttl_days"] == 30
+    assert sibling_view["ttl_days"] == 7
     assert await request(client, "get", "/api/v1/content/ttl", params={"uri": folder}) == configured
     assert (
         await request(client, "get", "/api/v1/content/ttl", params={"uri": sibling})
@@ -887,3 +907,85 @@ async def test_session_default_does_not_adopt_unmanaged_but_explicit_override_do
     assert not (await request(client, "get", "/api/v1/sessions/unmanaged")).get("expires_at")
     await request(client, "patch", "/api/v1/sessions/unmanaged/config", json={"ttl_relative": 7})
     assert (await request(client, "get", "/api/v1/sessions/unmanaged"))["ttl_days"] == 7
+
+
+@pytest.mark.asyncio
+async def test_ttl_visible_in_file_and_session_listings(client):
+    await request(
+        client, "post", "/api/v1/sessions", json={"session_id": "view", "ttl_relative": 7}
+    )
+    detail = await request(client, "get", "/api/v1/sessions/view")
+    listing = await request(client, "get", "/api/v1/sessions")
+    row = next(item for item in listing if item["session_id"] == "view")
+    assert row["expires_at"] == detail["expires_at"]
+    assert row["ttl_days"] == 7
+    await request(
+        client,
+        "patch",
+        CONFIG,
+        json={"settings": {"ttl": {"resources": {"mode": "days", "ttl_days": 7}}}},
+    )
+    uri = ROOT + "/resources/view.txt"
+    fields = await write(client, uri)
+    stat = await request(client, "get", "/api/v1/fs/stat", params={"uri": uri})
+    listing = await request(
+        client, "get", "/api/v1/fs/ls", params={"uri": ROOT + "/resources", "output": "original"}
+    )
+    row = next(item for item in listing if item["uri"] == uri)
+    assert stat["expires_at"] == row["expires_at"] == fields["expires_at"]
+    assert stat["ttl_days"] == row["ttl_days"] == 7
+
+
+@pytest.mark.asyncio
+async def test_unmanaged_ttl_is_explicit_null_without_adoption(client):
+    await request(client, "post", "/api/v1/sessions", json={"session_id": "no-expiry"})
+    detail = await request(client, "get", "/api/v1/sessions/no-expiry")
+    assert detail["expires_at"] is None
+    uri = ROOT + "/resources/unmanaged.txt"
+    assert (await write(client, uri))["expires_at"] is None
+    await request(
+        client,
+        "patch",
+        CONFIG,
+        json={"settings": {"ttl": {"resources": {"mode": "days", "ttl_days": 7}}}},
+    )
+    stat = await request(client, "get", "/api/v1/fs/stat", params={"uri": uri})
+    assert stat["expires_at"] is None
+    assert (await request(client, "get", "/api/v1/content/ttl", params={"uri": uri}))[
+        "expires_at"
+    ] is None
+
+
+@pytest.mark.asyncio
+async def test_directory_projection_resolves_inheritance_without_expiry(client):
+    parent = ROOT + "/resources"
+    child = parent + "/folder"
+    await write(client, child + "/body.txt")
+    await request(
+        client,
+        "patch",
+        CONFIG,
+        json={
+            "settings": {
+                "ttl": {
+                    "directories": {
+                        parent: {"mode": "days", "ttl_days": 11},
+                        child: {"mode": "inherit"},
+                    }
+                }
+            }
+        },
+    )
+    for endpoint in ("/api/v1/fs/stat", "/api/v1/content/ttl"):
+        result = await request(client, "get", endpoint, params={"uri": child})
+        assert result["expires_at"] is None
+        assert result["policy"] == {"mode": "inherit"}
+        assert result["effective_policy"] == {"mode": "days", "ttl_days": 11}
+    await request(
+        client,
+        "patch",
+        CONFIG,
+        json={"settings": {"ttl": {"directories": {child: {"mode": "disabled"}}}}},
+    )
+    result = await request(client, "get", "/api/v1/fs/stat", params={"uri": child})
+    assert result["effective_policy"] == {"mode": "disabled"}
