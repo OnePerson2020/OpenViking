@@ -55,6 +55,18 @@ moving existing deadlines. In that mode a changed file does not renew sibling
 files, and `messages.jsonl` is still one expiry unit. This is not message-level
 TTL, and changing a session default does not rewrite existing child snapshots.
 
+## User-visible retention
+
+For a file, display its effective `expires_at` as the expiry time; no deadline
+means retention is not enabled for that object. Relative retention can also show
+the configured duration. This timestamp is logical expiry, not a promise that
+physical deletion has completed at that instant.
+
+A policy directory displays its retention duration and inheritance/disabled
+state, not one shared `expires_at`: its children can expire at different times.
+A whole-session object can display its session deadline even though its storage
+is a directory. Per-file session mode has no single root expiry.
+
 ## Cleanup and acceptance
 
 Visibility uses the current `expires_at`. Physical cleanup is asynchronous and
