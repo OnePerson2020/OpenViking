@@ -583,3 +583,28 @@ def test_non_failed_response_summary_does_not_include_output_text(status):
     }
 
     assert api._safe_error_summary(body) == {"id": "response-1", "status": status}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source,display_name,expected",
+    [("removed/part.stp", "My model", "step"), ("removed/upload-id", "model.dwg", "dwg")],
+)
+async def test_prepared_response_preserves_type_without_local_source(
+    monkeypatch, tmp_path, source, display_name, expected
+):
+    api = UnderstandingAPI.__new__(UnderstandingAPI)
+    api._video_exts = api._audio_exts = api._image_exts = set()
+    api._poll_response = AsyncMock(
+        return_value={"result": {"zip_url": "https://example.test/result.zip"}}
+    )
+    archive = tmp_path / "result.zip"
+    archive.touch()
+    api._download_zip = AsyncMock(return_value=archive)
+    api._unpack_zip_to_temp_dir = AsyncMock(return_value="viking://temp/result")
+    result = await api.parse(
+        source, understanding_response_id="response-1", resource_name=display_name
+    )
+    assert result.source_format == expected
+    assert result.meta["response_id"] == "response-1"
+    api._poll_response.assert_awaited_once_with(response_id="response-1")

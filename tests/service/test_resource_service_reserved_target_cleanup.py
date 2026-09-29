@@ -180,7 +180,11 @@ async def test_source_job_error_cleans_new_empty_reservation():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_on_failure", [False, True])
 @pytest.mark.parametrize("raises_error", [False, True])
-async def test_prepared_file_failure_preserves_cleanup_policy(cleanup_on_failure, raises_error):
+async def test_prepared_file_failure_preserves_cleanup_policy(
+    cleanup_on_failure, raises_error, monkeypatch
+):
+    tracker = SimpleNamespace(get=AsyncMock(return_value=None))
+    monkeypatch.setattr("openviking.service.task_tracker.get_task_tracker", lambda: tracker)
     service = _service(SimpleNamespace())
     error_message = "remote parser rejected file"
     error_result = {"status": "error", "errors": [error_message]}

@@ -596,6 +596,30 @@ class TaskTracker:
 
         await self._dispatcher.run(record)
 
+    async def record_understanding_response(
+        self, task_id: str, response_id: str, account_id: str, user_id: str
+    ) -> None:
+        """Save an uploaded file's response before polling so queue retries can reuse it."""
+        if not isinstance(response_id, str) or not response_id.strip():
+            raise ValueError("Understanding response_id is required")
+
+        async def record() -> None:
+            async with self._task_locks.acquire(task_id):
+                task = await self._load_for_update(task_id, account_id, user_id)
+                if task is None or task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
+                    raise ValueError("Understanding source task is no longer active")
+                previous_response = task.meta.get("understanding_response_id")
+                if previous_response:
+                    if previous_response != response_id:
+                        raise ValueError("Understanding source response is already checkpointed")
+                    return
+                updated = deepcopy(task)
+                updated.meta["understanding_response_id"] = response_id
+                updated.updated_at = self._next_updated_at(task)
+                await self._persist_and_publish("update", updated, previous=task)
+
+        await self._dispatcher.run(record)
+
     async def complete(
         self,
         task_id: str,

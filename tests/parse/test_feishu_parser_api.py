@@ -872,7 +872,9 @@ async def test_add_resource_job_defers_target_and_expands_prepared_response():
 
 
 @pytest.mark.asyncio
-async def test_add_resource_job_expands_prepared_file_id():
+async def test_add_resource_job_expands_prepared_file_id(monkeypatch):
+    tracker = SimpleNamespace(get=AsyncMock(return_value=None))
+    monkeypatch.setattr("openviking.service.task_tracker.get_task_tracker", lambda: tracker)
     service = ResourceService()
     service._execute_resource_ingestion = AsyncMock(
         return_value={

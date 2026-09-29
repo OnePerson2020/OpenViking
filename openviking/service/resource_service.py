@@ -138,6 +138,7 @@ _ADD_RESOURCE_ARGS_RESERVED_FIELDS = frozenset(
         "tags",
         "tag_mode",
         "internal_task",
+        "_response_checkpoint",
     }
 )
 _ADD_RESOURCE_TRANSIENT_ARGS = frozenset({"tos_signature", "tos_access"})
@@ -783,6 +784,26 @@ class ResourceService:
 
                 internal_kwargs[PREPARED_FILE_ID_ARG] = msg.understanding_file_id
             try:
+                if msg.understanding_file_id is not None:
+                    from openviking.parse.understanding_api import (
+                        PREPARED_FILE_ID_ARG,
+                        PREPARED_RESPONSE_ID_ARG,
+                    )
+                    from openviking.service.task_tracker import get_task_tracker
+
+                    tracker = get_task_tracker()
+                    task = await tracker.get(msg.task_id, ctx.account_id, ctx.user.user_id)
+                    saved_response = task.meta.get("understanding_response_id") if task else None
+                    if saved_response:
+                        internal_kwargs.pop(PREPARED_FILE_ID_ARG, None)
+                        internal_kwargs[PREPARED_RESPONSE_ID_ARG] = saved_response
+
+                    async def checkpoint_response(response_id: str) -> None:
+                        await tracker.record_understanding_response(
+                            msg.task_id, response_id, ctx.account_id, ctx.user.user_id
+                        )
+
+                    internal_kwargs["_response_checkpoint"] = checkpoint_response
                 result = await self._execute_resource_ingestion(
                     path=msg.path,
                     ctx=ctx,

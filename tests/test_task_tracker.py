@@ -167,6 +167,24 @@ async def test_create_task(tracker: TaskTracker):
     assert task.status == TaskStatus.PENDING
 
 
+async def test_understanding_checkpoint_survives_tracker_reload_and_rejects_replacement(tracker):
+    task = await tracker.create("add_resource", **_owner_kwargs())
+    await tracker.record_understanding_response(task.task_id, "response-step", "acme", "alice")
+    reloaded = TaskTracker(store=tracker._store)
+    restored = await reloaded.get(task.task_id, "acme", "alice")
+    assert restored.meta["understanding_response_id"] == "response-step"
+    await reloaded.record_understanding_response(task.task_id, "response-step", "acme", "alice")
+    unchanged = await reloaded.get(task.task_id, "acme", "alice")
+    assert unchanged.updated_at == restored.updated_at
+    with pytest.raises(ValueError, match="already checkpointed"):
+        await tracker.record_understanding_response(task.task_id, "different", "acme", "alice")
+    with pytest.raises(ValueError, match="no longer active"):
+        await tracker.record_understanding_response(task.task_id, "response-step", "other", "alice")
+    await reloaded.complete(task.task_id, result={}, account_id="acme", user_id="alice")
+    with pytest.raises(ValueError, match="no longer active"):
+        await reloaded.record_understanding_response(task.task_id, "response-step", "acme", "alice")
+
+
 async def test_start_task(tracker: TaskTracker):
     task = await tracker.create("session_commit", **_owner_kwargs())
     await tracker.start(task.task_id)

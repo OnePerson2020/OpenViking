@@ -88,7 +88,19 @@ class UnderstandingAPI(BaseParser):
 
     @property
     def supported_extensions(self) -> List[str]:
-        return [".pdf", ".docx", ".pptx", ".xlsx", ".mp4", ".mp3", ".wav", ".mov"]
+        return [
+            ".pdf",
+            ".docx",
+            ".pptx",
+            ".xlsx",
+            ".mp4",
+            ".mp3",
+            ".wav",
+            ".mov",
+            ".dwg",
+            ".stp",
+            ".step",
+        ]
 
     async def parse(self, source: Union[str, Path], instruction: str = "", **kwargs) -> ParseResult:
         """
@@ -136,7 +148,7 @@ class UnderstandingAPI(BaseParser):
             ("http://", "https://")
         ):
             url = original_source
-        elif prepared_file_id:
+        elif prepared_file_id or prepared_response_id:
             local_path = None
         else:
             local_path = source_path
@@ -153,18 +165,26 @@ class UnderstandingAPI(BaseParser):
                 }.get(path_parts[0], path_parts[0])
         else:
             inferred_name = local_path.name if local_path is not None else Path(source_str).name
-            if not prepared_file_id and (local_path is None or not local_path.is_file()):
+            if (
+                not prepared_file_id
+                and not prepared_response_id
+                and (local_path is None or not local_path.is_file())
+            ):
                 raise ValueError(
                     "UnderstandingAPI supports http(s) URLs or local files. "
                     "Got an invalid local file path."
                 )
-            doc_type = resolved_extension or (
-                local_path.suffix.lower().lstrip(".") if local_path is not None else ""
+            doc_type = (
+                resolved_extension
+                or Path(inferred_name).suffix.lower().lstrip(".")
+                or Path(display_name or "").suffix.lower().lstrip(".")
             )
 
         effective_name = str(display_name or inferred_name or "resource")
         doc_name = Path(effective_name).stem or "resource"
         doc_type = doc_type or "unknown"
+        if doc_type == "stp":
+            doc_type = "step"
 
         task_meta: Dict[str, Any] = {"doc_name": doc_name, "doc_type": doc_type}
         source_name = kwargs.get("source_name")

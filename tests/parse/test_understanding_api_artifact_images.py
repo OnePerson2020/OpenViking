@@ -100,3 +100,47 @@ async def test_unpack_artifact_cleans_temp_on_failure(tmp_path: Path):
         await api._unpack_zip_to_temp_dir(invalid_zip, "resource")
 
     assert fake_fs.deleted_temps == ["viking://temp/artifact"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extension", ["step", "stp", "dwg"])
+async def test_cad_plain_zip_uses_generic_materialization(tmp_path, monkeypatch, extension):
+    from unittest.mock import AsyncMock
+
+    source = tmp_path / ("model." + extension)
+    source.write_bytes(b"ISO-10303-21;" if extension != "dwg" else b"AC1032")
+    contents = {
+        source.name: source.read_bytes(),
+        "evidence.json": b'{"schema":"openviking.step-evidence/v1"}',
+        **{
+            name + ".png": b"png"
+            for name in (
+                "front",
+                "top",
+                "right",
+                "iso_front_top",
+                "iso_back_top",
+                "iso_front_bottom",
+            )
+        },
+    }
+    archive_path = tmp_path / "artifact.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        for name, data in contents.items():
+            archive.writestr("model_step/" + name, data)
+    api = UnderstandingAPI.__new__(UnderstandingAPI)
+    api._video_exts = api._audio_exts = api._image_exts = set()
+    api._create_response_for_file = AsyncMock(return_value={"id": "response-1"})
+    api._poll_response = AsyncMock(
+        return_value={"result": {"zip_url": "https://example.test/result.zip"}}
+    )
+    api._download_zip = AsyncMock(return_value=archive_path)
+    fs = _FakeVikingFS()
+    monkeypatch.setattr("openviking.parse.understanding_api.get_viking_fs", lambda: fs)
+    result = await api.parse(source, understanding_file_id="file-1")
+    assert result.source_format == ("step" if extension == "stp" else extension)
+    assert "cad_artifact" not in result.meta
+    assert fs.files == {
+        "viking://temp/artifact/model/" + name: data for name, data in contents.items()
+    }
+    assert not archive_path.exists()
