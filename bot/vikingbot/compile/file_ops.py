@@ -14,19 +14,13 @@ import yaml
 from openviking.core.skill_loader import validate_skill_format
 from openviking.utils.path_safety import safe_join_viking_uri
 from openviking_cli.exceptions import OpenVikingError
-from vikingbot.compile.plan import (
-    FileDraft,
-    FileResponse,
-    Group,
-    InputReferenceError,
-    content_hash,
-    digest,
-)
+from vikingbot.compile.hashing import content_hash, digest
 from vikingbot.compile.renderer import (
     _split_frontmatter,
     validate_relative_file_path,
     validate_resource_file,
 )
+from vikingbot.compile.results import FileDraft, FileResponse, Group, InputReferenceError
 
 if TYPE_CHECKING:
     from vikingbot.compile.pipeline import Pipeline

@@ -14,8 +14,10 @@ from typing import TYPE_CHECKING
 from openviking.core.namespace import relative_uri_path
 from openviking.utils.model_retry import ERROR_CLASS_INPUT_TOO_LARGE, classify_api_error
 from vikingbot.compile import file_ops
+from vikingbot.compile.hashing import digest
 from vikingbot.compile.pipeline_io import retry_allowed
-from vikingbot.compile.plan import (
+from vikingbot.compile.renderer import validate_relative_file_path
+from vikingbot.compile.results import (
     CombineResponse,
     EvidenceSpan,
     FileDraft,
@@ -25,9 +27,7 @@ from vikingbot.compile.plan import (
     MissingReadyPathError,
     Record,
     RecordResponse,
-    digest,
 )
-from vikingbot.compile.renderer import validate_relative_file_path
 from vikingbot.compile.skill_resources import EvidenceReader
 
 if TYPE_CHECKING:
@@ -130,17 +130,29 @@ def validate_input_refs(inputs, included) -> None:
 
 
 async def transform(
-    runtime: Pipeline, label, transform, records, extra=None, *, prompt: str
+    runtime: Pipeline,
+    label,
+    transform,
+    records,
+    extra=None,
+    *,
+    prompt: str,
+    system: str | None = None,
 ) -> list[Record]:
     """Produce records with provenance using the calling operator's prompt.
 
-    Map/Reduce add task context and field definitions; Combine uses only its supplied prompt.
+    A supplied system contains the caller's complete task context. Otherwise Reduce
+    adds shared context; Combine uses only its supplied prompt.
     Invalid lineage, evidence locations or ready files reject the model submission.
     """
-    system = prompt
+    if system is None:
+        system = (
+            runtime.system + prompt + "\n## Stage task\n\n" + transform.instructions
+            if label != "combine"
+            else prompt
+        )
     data = {"inputs": [await payload(runtime, r, combine=label == "combine") for r in records]}
     if label != "combine":
-        system = runtime.system + prompt + "\n## Stage task\n\n" + transform.instructions
         data.update(
             {
                 **(extra or {}),

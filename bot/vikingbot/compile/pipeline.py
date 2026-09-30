@@ -10,21 +10,16 @@ from typing import Any
 
 from openviking.core.namespace import classify_uri
 from openviking.utils.path_safety import safe_join_viking_uri
+from vikingbot.compile.hashing import content_hash, digest
 from vikingbot.compile.models import CompileFailure, utc_now
 from vikingbot.compile.ops import finalize as finalize_op
 from vikingbot.compile.ops import map as map_op
 from vikingbot.compile.ops import reduce as reduce_op
 from vikingbot.compile.ops.shuffle import Shuffle
 from vikingbot.compile.pipeline_io import JsonModel, TaskFiles
-from vikingbot.compile.plan import (
-    Contract,
-    PlanProposal,
-    Record,
-    content_hash,
-    digest,
-    parse_plan,
-)
+from vikingbot.compile.plan import Contract, PlanProposal, parse_plan
 from vikingbot.compile.renderer import RenderedBundle
+from vikingbot.compile.results import Record
 from vikingbot.compile.skill_resources import SkillResources
 
 _PLANNER = """## Task Description
@@ -33,6 +28,11 @@ You are the planner for a compile task. A compile task transforms source materia
 into the outputs required by a Skill and the user's instruction.
 
 Design the simplest sequence of processing steps that fulfills those requirements.
+
+Design processing instructions and record fields so intermediate results
+contain the information needed by later steps without unnecessary repetition.
+Preserve required details, source references and applicability conditions.
+
 The runtime executes your plan to read the materials, process them and publish the outputs.
 Return contract, which describes the work for each step, and plan, which specifies
 which steps run and how their results pass between them. The emit tool defines the

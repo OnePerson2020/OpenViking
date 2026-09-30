@@ -42,6 +42,7 @@ from vikingbot.agent.tools.compile import (
 )
 from vikingbot.agent.tools.registry import ToolRegistry
 from vikingbot.agent.tools.spawn import WaitSubagentsTool
+from vikingbot.compile.hashing import content_hash
 from vikingbot.compile.models import (
     COMPILE_DRAFT_ROOT,
     COMPILE_STAGING_ROOT,
@@ -60,7 +61,6 @@ from vikingbot.compile.models import (
 from vikingbot.compile.ops import finalize as finalize_op
 from vikingbot.compile.pipeline import Pipeline
 from vikingbot.compile.pipeline_agent import agent_runner as pipeline_agent_runner
-from vikingbot.compile.plan import content_hash
 from vikingbot.compile.renderer import (
     RenderedBundle,
     WikiRenderer,
@@ -985,14 +985,6 @@ class BotCompileService:
             }
 
         await self._set_state(task_id, status="running", stage="pipeline")
-        # Split source work into small batches while retaining all source ranges.
-        source_limits = self.limits.model_copy(
-            update={
-                "source_batch_chars": min(
-                    self.limits.source_batch_chars, self.limits.merge_input_chars // 5
-                ),
-            }
-        )
         ordered = (
             source_files
             if source_files is not None
@@ -1019,7 +1011,7 @@ class BotCompileService:
                         raise content
                     else:
                         readable.append((uri, content))
-                for batch in pack_source_batches(readable, source_limits):
+                for batch in pack_source_batches(readable, self.limits):
                     yield batch
 
         try:

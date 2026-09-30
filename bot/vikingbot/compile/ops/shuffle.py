@@ -12,8 +12,10 @@ from collections.abc import Sequence
 from threading import Event
 
 from openviking.core.namespace import relative_uri_path
+from vikingbot.compile.hashing import digest
 from vikingbot.compile.pipeline_io import bounded_jobs, retry_allowed
-from vikingbot.compile.plan import Group, Record, RouteBatchResponse, RouteDecision, Routing, digest
+from vikingbot.compile.plan import Routing
+from vikingbot.compile.results import Group, Record, RouteBatchResponse, RouteDecision
 
 
 def top_candidates(

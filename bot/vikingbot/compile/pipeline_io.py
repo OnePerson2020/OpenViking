@@ -16,21 +16,20 @@ import json_repair
 from loguru import logger
 from pydantic import BaseModel, ValidationError
 
+from vikingbot.compile.hashing import digest
 from vikingbot.compile.models import COMPILE_STAGING_ROOT
-from vikingbot.compile.plan import (
-    DEFAULT_MAX_TOKENS,
-    PROCESSING_VERSION,
-    FileResponse,
-    RouteBatchResponse,
-    digest,
-    result_schema,
-)
+from vikingbot.compile.results import FileResponse, RouteBatchResponse
+from vikingbot.compile.schemas import result_schema
 from vikingbot.compile.skill_resources import EvidenceReader
 from vikingbot.utils.helpers import cal_str_tokens
 
 T = TypeVar("T")
 R = TypeVar("R", bound=BaseModel)
 ROOT = f"{COMPILE_STAGING_ROOT}/pipeline"
+# Cache identity for the processing rules used by model calls.
+PROCESSING_VERSION = "compile-pipeline-33"
+# Output-token fallback when the configured VLM provides no value.
+DEFAULT_MAX_TOKENS = 32_000
 
 
 def parse_file_result(text: str) -> Any:
@@ -415,7 +414,7 @@ class JsonModel:
                     },
                 }
             )
-        if stage not in {"plan", "route", "combine"}:
+        if stage not in {"plan", "route", "combine", "map"}:
             system += (
                 "\n\n## Tool use\n\n"
                 "Use the source text and Skill attachments provided in the input.\n"
@@ -426,6 +425,8 @@ class JsonModel:
             {
                 "role": "system",
                 "content": system
+                if stage == "map"
+                else system
                 + "\nSubmit the final result with one `emit` tool call, without extra prose.",
             },
             {"role": "user", "content": json.dumps(data, ensure_ascii=False)},

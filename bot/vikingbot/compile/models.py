@@ -27,10 +27,11 @@ class CompileLimits(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    # Soft packing target for assignments; larger indivisible records are still submitted.
+    # Soft request budget for prompt, input JSON, emit schema and estimated output space.
+    # Larger indivisible records may exceed it; this is not the model's token limit.
     merge_input_chars: int = Field(default=60_000, ge=1)
-    # Per-source-task Unicode characters, including repeated headings and table headers.
-    source_batch_chars: int = Field(default=80_000, ge=1)
+    # Source text plus repeated context per range/read batch, independent of request packing.
+    source_batch_chars: int = Field(default=12_000, ge=1)
     agent_iterations: int = 120
     # Per-child model/tool rounds, including draft checks and submission; parent budget is separate.
     subagent_iterations: int = Field(default=70, ge=1)

@@ -8,10 +8,12 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from vikingbot.compile import file_ops
+from vikingbot.compile.hashing import content_hash
 from vikingbot.compile.ops import finalize as finalize_op
 from vikingbot.compile.ops import reduce as reduce_op
 from vikingbot.compile.pipeline_io import ROOT
-from vikingbot.compile.plan import Contract, Record, content_hash
+from vikingbot.compile.plan import Contract
+from vikingbot.compile.results import Record
 
 
 def read_checkpoint(workspace: Path) -> dict:

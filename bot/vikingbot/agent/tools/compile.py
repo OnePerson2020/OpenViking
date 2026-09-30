@@ -244,22 +244,26 @@ class CompileChildTool(Tool):
         """Describe the bound path base without changing the parent tool's schema."""
         parameters = deepcopy(self.tool.parameters)
         field = "working_dir" if self.name == "exec" else "path"
+        if self.merge_only:
+            parameters["properties"][field]["description"] = (
+                "File path relative to the current working directory; use a relative path within this directory."
+            )
+            if self.name == "read_file":
+                parameters["properties"][field]["description"] += (
+                    " Only files in this directory are readable. Read Skill references with "
+                    "read_skill_resource and source text with read_evidence when available. "
+                    "Use offset/limit for large files."
+                )
+            return parameters
         parameters["properties"][field]["description"] = (
             "Relative to your draft root, which is the current directory. "
             + (
                 "Defaults to '.'."
                 if self.name == "exec"
-                else "Use the assigned target-relative path, without a staging prefix."
-                if self.merge_only
                 else "Use the target-relative page path from the Skill, without a staging prefix."
             )
         )
-        if self.name == "read_file" and self.merge_only:
-            parameters["properties"][field]["description"] += (
-                " Only your own output files are readable; Skills and originals are unavailable. "
-                "Use offset/limit for large files; shared tool-result files are not readable."
-            )
-        elif self.name == "read_file":
+        if self.name == "read_file":
             parameters["properties"][field]["description"] += (
                 f" To read another child's input, pass its returned {COMPILE_DRAFT_ROOT}/ path verbatim; "
                 f"{TOOL_RESULT_DIRECTORY}/ paths also address the task root. These paths are read-only."

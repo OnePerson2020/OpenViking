@@ -13,19 +13,11 @@ from typing import TYPE_CHECKING
 from openviking.core.namespace import relative_uri_path
 from openviking.utils.model_retry import ERROR_CLASS_INPUT_TOO_LARGE, classify_api_error
 from vikingbot.compile import file_ops
+from vikingbot.compile.hashing import content_hash, digest
 from vikingbot.compile.ops import common
 from vikingbot.compile.pipeline_io import ModelCallError, bounded_jobs, retry_allowed
-from vikingbot.compile.plan import (
-    CombineResponse,
-    FileDraft,
-    FileResponse,
-    Group,
-    Node,
-    Record,
-    Transform,
-    content_hash,
-    digest,
-)
+from vikingbot.compile.plan import Node, Transform
+from vikingbot.compile.results import CombineResponse, FileDraft, FileResponse, Group, Record
 
 if TYPE_CHECKING:
     from vikingbot.compile.pipeline import Pipeline
@@ -208,11 +200,18 @@ async def ready_file(runtime: Pipeline, group):
 
 
 async def reduce_group(
-    runtime: Pipeline, node, group: Group, *, stage="reduce", file_prompt: str = _FILES
+    runtime: Pipeline,
+    node,
+    group: Group,
+    *,
+    stage="reduce",
+    file_prompt: str = _FILES,
+    system: str | None = None,
 ):
     """Generate a work set using the caller's file prompt or Reduce record guidance.
 
-    Reduce combines after provider input overflow, at most three times; Map propagates overflow.
+    Map may supply its complete system prompt. Reduce combines after provider input
+    overflow, at most three times; Map propagates overflow.
     """
     transform = getattr(runtime.contract, node.task)
     records, old = group.records, {}
@@ -277,7 +276,10 @@ async def reduce_group(
         ]
     if transform.output == "records":
         extra.update(record_fields=transform.fields, scope_fields=runtime.contract.distinguish)
-    system = runtime.system + "\n\n# Stage task\n" + transform.instructions + "\n\n" + file_prompt
+    if system is None:
+        system = (
+            runtime.system + "\n\n# Stage task\n" + transform.instructions + "\n\n" + file_prompt
+        )
     if old:
         system += _EXISTING_FILES
     for depth in range(4):

@@ -12,7 +12,7 @@ import uuid
 from openviking.core.namespace import relative_uri_path
 from openviking.utils.path_safety import safe_join_viking_uri
 from vikingbot.agent.tools.base import Tool
-from vikingbot.compile.plan import content_hash
+from vikingbot.compile.hashing import content_hash
 from vikingbot.compile.renderer import validate_relative_file_path
 
 

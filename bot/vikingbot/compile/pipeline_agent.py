@@ -12,15 +12,12 @@ import json_repair
 from vikingbot.agent.tools.base import Tool
 from vikingbot.agent.tools.compile import CompileChildTool
 from vikingbot.agent.tools.registry import ToolRegistry
+from vikingbot.compile.hashing import content_hash
 from vikingbot.compile.models import COMPILE_DRAFT_ROOT
 from vikingbot.compile.pipeline_io import retry_allowed
-from vikingbot.compile.plan import (
-    FileResponse,
-    RecordResponse,
-    content_hash,
-    result_schema,
-)
 from vikingbot.compile.renderer import validate_relative_file_path
+from vikingbot.compile.results import FileResponse, RecordResponse
+from vikingbot.compile.schemas import result_schema
 from vikingbot.compile.skill_resources import EvidenceReader, SkillScript
 from vikingbot.providers.base import LLMProvider
 
@@ -124,8 +121,9 @@ class EmitResult(Tool):
         parameters = result_schema(self.schema, self.data)
         parameters["properties"]["result_ref"] = {
             "type": "string",
-            "description": "Alternative to inline fields: relative path to a complete JSON result "
-            "in your scratch directory, matching this result schema. Use for large record collections.",
+            "description": "Relative path used with write_file for a JSON file containing the "
+            "complete emit arguments, without result_ref. Submit result_ref alone instead of "
+            "inline fields. Use for large results.",
         }
         parameters["required"] = []
         return parameters
@@ -269,6 +267,8 @@ def agent_runner(loop, session_key, connection, limits):
             "Scratch files are data; writing a script does not execute it. "
             "Use edit_file to repair existing JSON."
         )
+        if stage == "map_agent":
+            instructions = ""  # Map's prompt covers both inline and scratch-based submission.
         await child._run_agent_loop(
             messages=[
                 {
