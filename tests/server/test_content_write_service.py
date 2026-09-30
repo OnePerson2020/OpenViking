@@ -257,9 +257,7 @@ async def test_shared_resource_creation_inherits_acl_and_preserves_plain_append(
     assert (await service.fs.get_acl(explicit_dir, ctx=admin))[
         "direct_entries"
     ] == inherited_entries
-    await service.fs.write(
-        explicit_file, "first", ctx=admin, wait=True, acl={"entries": []}
-    )
+    await service.fs.write(explicit_file, "first", ctx=admin, wait=True, acl={"entries": []})
     assert (await service.fs.get_acl(explicit_file, ctx=admin))["effective_entries"] == []
 
     explicit_import = "viking://resources/explicit_import"
@@ -270,9 +268,7 @@ async def test_shared_resource_creation_inherits_acl_and_preserves_plain_append(
     assert (await service.fs.get_acl(explicit_import, ctx=admin))[
         "direct_entries"
     ] == inherited_entries
-    imported_children = (
-        await service.fs.ls(explicit_import, ctx=admin, simple=True)
-    ).entries
+    imported_children = (await service.fs.ls(explicit_import, ctx=admin, simple=True)).entries
     for child in imported_children:
         report = await service.fs.get_acl(child, ctx=admin)
         assert report["direct_entries"] == []
@@ -466,7 +462,7 @@ async def test_memory_create_refreshes_nested_schema_overview(service):
 
     overview = await service.viking_fs.read_file(f"{memory_dir}/.overview.md", ctx=ctx)
     assert result["root_uri"] == memory_dir
-    assert "[不二周助-link-test.md](./不二周助-link-test.md)" in overview
+    assert "[不二周助-link-test](./不二周助-link-test.md)" in overview
 
 
 @pytest.mark.asyncio
@@ -617,8 +613,8 @@ class _FakeQueueManager:
 
 
 @pytest.mark.asyncio
-async def test_memory_create_freezes_server_ttl_and_ignores_caller_fields(monkeypatch):
-    uri = "viking://user/default/memories/events/2026/note.md"
+async def test_memory_create_strips_file_ttl_overrides(monkeypatch):
+    uri = "viking://user/default/memories/events/2026/09/28/note.md"
     ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.USER)
     viking_fs = _FakeVikingFS(file_uri=uri, root_uri=uri.rsplit("/", 1)[0])
     coordinator = ContentWriteCoordinator(viking_fs=viking_fs)
@@ -637,14 +633,12 @@ async def test_memory_create_freezes_server_ttl_and_ignores_caller_fields(monkey
         },
     )
 
-    await coordinator._write_in_place(
-        uri, MemoryFileUtils.write(requested), mode="create", ctx=ctx
-    )
+    await coordinator._write_in_place(uri, MemoryFileUtils.write(requested), mode="create", ctx=ctx)
 
     stored = MemoryFileUtils.read(viking_fs.content[uri], uri=uri)
-    assert stored.extra_fields["ttl_days"] == 5
-    assert stored.extra_fields["received_at"] != "2999-01-01T00:00:00.000Z"
-    assert stored.extra_fields["expires_at"] != "2999-01-02T00:00:00.000Z"
+    assert {"ttl_days", "received_at", "expires_at", "ttl_generation"}.isdisjoint(
+        stored.extra_fields
+    )
 
 
 @pytest.mark.asyncio

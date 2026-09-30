@@ -2,14 +2,13 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Default-off TTL policies for event date directories and sessions.
 
-Priority: nearest explicit directory > type default > library global > off.
+Priority: events/sessions root > type default > library global > off.
 A disabled node stops inheritance. Existing directories keep their snapshots.
 """
 
-from datetime import datetime
 from typing import Dict, Literal, Optional
 
-from pydantic import BaseModel, Field, StrictInt, model_validator
+from pydantic import BaseModel, StrictInt, model_validator
 
 from .runtime_field import RuntimeField
 
@@ -20,7 +19,7 @@ TTL_SCOPES: tuple[TTLScope, ...] = ("user_events", "peer_events", "sessions")
 
 
 def _is_supported_directory_uri(uri: str) -> bool:
-    """Accept event policy containers/date directories and sessions containers."""
+    """Accept only concrete events and sessions policy roots."""
     if not uri.startswith("viking://") or "?" in uri or "#" in uri:
         return False
     path = uri[len("viking://") :].rstrip("/")
@@ -38,17 +37,7 @@ def _is_supported_directory_uri(uri: str) -> bool:
         suffix = parts[6:]
     else:
         return False
-    if len(suffix) > 3:
-        return False
-    if not suffix:
-        return True
-    if [len(part) for part in suffix] != [4, 2, 2][: len(suffix)]:
-        return False
-    try:
-        datetime.strptime("/".join(suffix + ["01"] * (3 - len(suffix))), "%Y/%m/%d")
-    except ValueError:
-        return False
-    return True
+    return not suffix
 
 
 class TTLPolicy(BaseModel):
@@ -57,8 +46,7 @@ class TTLPolicy(BaseModel):
     - ``inherit``: defer to the next explicit ancestor, then scope -> global ->
       off. Valid for directories and scope defaults, never for the library global.
     - ``disabled``: explicitly no TTL; blocks inheritance from the global level.
-    - ``days``: expire ``ttl_days`` after the object's latest successful content
-      update. ``ttl_days`` is then a required positive integer (minimum 1 day). "Off" is expressed with
+    - ``days``: initialize retention for a new lifecycle directory. ``ttl_days`` is then a required positive integer (minimum 1 day). "Off" is expressed with
       ``disabled``, never with ``0`` or a negative value.
     """
 
@@ -87,7 +75,7 @@ class TTLConfig(BaseModel):
     and the event/session scopes ``inherit``, so nothing expires unless an
     operator opts in. Changing this config only affects objects created
     afterwards. Existing managed objects retain their snapshotted duration,
-    and relative deadlines renew when their content is successfully updated.
+    and only sessions renew after successful content changes.
     """
 
     global_default: TTLPolicy = RuntimeField(
@@ -114,7 +102,7 @@ class TTLConfig(BaseModel):
         default_factory=dict,
         description=(
             "TTL overrides keyed by a concrete in-scope Viking directory URI. "
-            "The nearest matching ancestor wins."
+            "Only events and sessions roots are configurable."
         ),
     )
 
@@ -134,8 +122,8 @@ class TTLConfig(BaseModel):
             uri = raw_uri.rstrip("/")
             if not _is_supported_directory_uri(uri):
                 raise ValueError(
-                    "ttl.directories keys must be concrete directories under "
-                    "user events, peer events, or sessions"
+                    "ttl.directories keys must be concrete user events, peer events, "
+                    "or sessions roots; child directories are read-only"
                 )
             if uri.endswith("/sessions") and policy.mode == "absolute":
                 raise ValueError("sessions support relative retention only")
@@ -179,7 +167,7 @@ class TTLConfig(BaseModel):
 class TTLCleanupConfig(BaseModel):
     """Cluster-only controls for physical deletion, separate from object expiry.
 
-    Disabling is a rollout/incident pause for new physical deletes; expired L2
+    Disabling is a rollout/incident pause for new physical deletes; expired content
     remains invisible. The default keeps the cleanup behavior enabled whenever
     an object has an expiry snapshot.
     """
@@ -191,22 +179,3 @@ class TTLCleanupConfig(BaseModel):
     batch_size: StrictInt = RuntimeField(default=100, ge=1, le=10000)
     max_batch_bytes: StrictInt = RuntimeField(default=1_048_576, ge=1024, le=104_857_600)
     scan_time_budget_seconds: float = RuntimeField(default=5.0, gt=0, le=300)
-
-
-class SessionTTL(BaseModel):
-    """Session override: null inherits the current sessions policy."""
-
-    ttl_relative: Optional[StrictInt] = Field(default=None, ge=1, le=365000)
-
-
-class DocumentTTL(BaseModel):
-    """Set a live lifecycle directory's relative retention or fixed deadline."""
-
-    expires_at: Optional[str] = None
-    ttl_relative: Optional[StrictInt] = Field(default=None, ge=1, le=365000)
-
-    @model_validator(mode="after")
-    def _one_policy(self) -> "DocumentTTL":
-        if (self.expires_at is None) == (self.ttl_relative is None):
-            raise ValueError("provide exactly one of expires_at or ttl_relative")
-        return self

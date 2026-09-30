@@ -1,73 +1,45 @@
 # Directory TTL
 
-TTL is off by default. The lifecycle unit is one **event date directory**
-(`events/YYYY/MM/DD`) or one **session directory**. User and peer event trees
-use the same rule. Resources and other memory categories have no TTL.
+TTL is off by default. It covers user and peer `events/YYYY/MM/DD` directories and `sessions/{session_id}`. Resources and other memory categories are outside this scope.
+
+## Configuration and incremental application
+
+Configure library defaults, type defaults, or one of these exact policy roots:
+
+- `viking://user/{user_id}/memories/events`
+- `viking://user/{user_id}/peers/{peer_id}/memories/events`
+- `viking://user/{user_id}/sessions`
+
+Priority is concrete root → type (`user_events`, `peer_events`, `sessions`) → library global → disabled. `disabled` stops inheritance; `inherit` falls back. Existing account configuration represents the library; user/account identity adds no policy level.
+
+Years, months, dates, individual sessions, nested directories and files expose read-only deadlines. Policy changes apply to new lifecycle directories. Existing managed directories keep their saved policy; appending to an unmanaged historical directory does not enable TTL.
 
 ## Lifetime and renewal
 
-Every lifecycle directory owns one `expires_at`. Its L2 descendants inherit
-that deadline; files and nested directories cannot override it. Relative
-retention also stores `ttl_days`. A successful content change renews the
-whole directory to the update time plus that duration (N × 24 hours).
+Each lifecycle directory stores one `expires_at` in `.meta.json`, plus `ttl_days` for relative retention. `received_at` records the content time. Events can still read legacy `.ttl.json`. AGFS directory metadata updates preserve other business fields in the same file; directory stat exposes its own deadline.
 
-For events, the date in the path groups events; it is not the TTL start time.
-Adding or changing an event renews the relative lifetime of its date directory.
-A session renews after a successful message append or a completed commit with
-content. Reads, searches, summary generation, reindexing, failed writes and
-empty commits do not renew TTL.
+- Events start their lifetime on the first successful content write. The path date only groups events. Later appends and updates never extend relative or absolute deadlines.
+- Sessions inherit their root policy on creation. Successful message appends and completed nonempty commits renew using the saved `ttl_days`. Replays use the original completion time.
+- Reads, summaries, reindexing, failed writes, empty message batches and empty commits do not renew. Absolute deadlines never renew automatically.
 
-An absolute deadline stays fixed through content updates. A user can explicitly
-change a live event directory's deadline. There is no automatic 30-day extension.
-Session create/config APIs support relative TTL only. Expired directories cannot
-be revived by a delayed write or a TTL edit.
+Messages, attachments, archives and L0/L1/L2 share the directory deadline. There is no message-level JSONL retention, `ttl_generation`, per-session override or per-file mode.
 
-`received_at` stores the content timestamp used for relative expiry.
-`ttl_generation` fences delayed cleanup and indexing work after deletion and
-recreation. Session metadata also retains `ttl_relative` as its explicit
-configuration override. TTL needs no extra public-cloud vector schema fields.
+## Visibility
 
-## Configuration and incremental defaults
+At `now >= expires_at` in UTC, the directory and all descendants become invisible. Direct reads return 404. Session/file listings, find/search/recall, grep and glob filter expired content and refill visible candidates.
 
-New directories resolve the nearest explicit directory policy, then their type
-default (`user_events`, `peer_events`, or `sessions`), then the library-global
-policy. Explicit `disabled` stops inheritance; `inherit` continues upward.
+Structured objects expose their owner's `expires_at`, explicitly `null` without TTL. Mixed results carry per-item deadlines. Single-owner text/list responses include the deadline in the envelope. URI-only listing compatibility modes and download bytes keep their existing shape and still enforce server filtering. Root/year/month containers have no shared expiry; policy roots also expose `policy` and `effective_policy`.
 
-Library defaults use the existing account configuration layer. Account and user
-identities do not add extra TTL priority levels. Directory defaults can address
-an events root, year, month or date, or a user's sessions container.
+## Cleanup and performance
 
-Changing defaults only affects newly created lifecycle directories. Existing
-managed directories keep their frozen duration, and previously unmanaged
-directories remain unmanaged, including new files written into them. A live
-directory can be explicitly configured through the retention endpoint.
+Cleanup uses the existing Session commit QueueFS worker framework. The scheduler claims candidates from the durable expiry index with count, byte and time budgets. Physical deletion is spread over a day-scale window by default.
 
-## Visibility and cleanup
+The worker rechecks the owner deadline under its metadata file lock and reuses the existing Session mutation mutex. It deletes files under individual exact locks, retries contention, and uses no tree lock or per-file expiry decision. It removes all owned bodies, messages, attachments, L0/L1, vectors and Meta. Metadata is removed last; registration is removed after storage and index verification. External parent summaries stay unchanged. Deletion triggers no LLM, embedding or summary rebuild.
 
-At `expires_at`, L2 content is hidden from normal session access, file reads,
-listings, find, search, grep and glob. Files and directory details expose the
-shared `expires_at` and `ttl_days`; no deadline is returned as `expires_at: null`.
-Policy containers have no common deadline and expose `policy` and
-`effective_policy` instead. Summary files always have `expires_at: null`.
-
-Cleanup checks the **directory's** live deadline and generation under a directory
-lock. Once due, it removes all L2 descendants and L2 vectors without checking
-individual file deadlines. For sessions this includes whole `messages.jsonl`
-files, archived messages and attachments. It does not manage individual JSONL
-messages.
-
-**All L0/L1 summary files, their vectors and the directories needed to hold them
-remain unchanged, readable and searchable.** Removing expired L2 does not
-regenerate summaries. A retained summary can still describe expired content.
-
-Physical cleanup is asynchronous, spread over a day-scale window by default.
-Failed deletion or incomplete verification retains retry state. Messages can
-remain physically stored between expiry and cleanup. Cleanup confirms primary
-L2 storage and index removal; it does not confirm a console refresh, backup
-erasure or a billing adjustment. Retained summaries still occupy storage.
+Result batches share owner metadata reads. Retry state lives in the expiry registry, independently of task-history retention. Display and billing may lag physical deletion. OV cleanup alone does not verify cloud billing, gateway forwarding or backup erasure.
 
 ## Interfaces
 
-- [TTL configuration](../configuration/01-server.md#ttl): library/type/directory defaults.
-- [Directory retention](../api/12-content.md#document-expiry): query deadlines and edit a live date directory or session.
-- [Sessions](../api/05-sessions.md): create and update relative retention.
+- [TTL configuration](../configuration/01-server.md#ttl): library/type/root policies.
+- [Expiry query](../api/12-content.md#document-expiry): `GET /api/v1/content/ttl`, SDK/MCP `get_ttl`, CLI `ov ttl get`.
+- [Sessions](../api/05-sessions.md#session-ttl): create/config APIs inherit the root policy and accept no TTL input.

@@ -395,7 +395,6 @@ JSON 输出 - 错误：
 |------|------|------|
 | GET | `/api/v1/content/read` | 读取完整内容（L2） |
 | GET | `/api/v1/content/ttl` | 读取 events/Session 的目录期限 |
-| PATCH | `/api/v1/content/ttl` | 修改存活 events 日期目录或 Session 的期限 |
 | GET | `/api/v1/content/abstract` | 读取摘要（L0） |
 | GET | `/api/v1/content/overview` | 读取概览（L1） |
 | GET | `/api/v1/content/download` | 下载原始文件字节 |

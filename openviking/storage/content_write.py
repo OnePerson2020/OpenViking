@@ -17,7 +17,7 @@ from openviking.core.namespace import (
     relative_uri_path,
     uri_parts,
 )
-from openviking.core.ttl import apply_ttl_fields
+from openviking.core.ttl import strip_ttl_fields
 from openviking.resource.processing_mode import (
     DEFAULT_PROCESSING_MODE,
     VECTORS_ONLY,
@@ -1228,19 +1228,8 @@ class ContentWriteCoordinator:
                 mf.content = mf.content + content
             else:
                 mf = MemoryFileUtils.read(content, uri=uri)
-                from openviking.config.ttl import resolve_ttl_config
 
-                mf.extra_fields = apply_ttl_fields(
-                    uri,
-                    mf.extra_fields,
-                    config=await resolve_ttl_config(self._viking_fs, ctx.account_id),
-                )
-            if mode != "create":
-                mf.extra_fields = apply_ttl_fields(
-                    uri,
-                    mf.extra_fields,
-                    existing_fields=mf.extra_fields,
-                )
+            mf.extra_fields = strip_ttl_fields(mf.extra_fields)
             sync_memory_resource_refs(mf, source=RESOURCE_REF_SOURCE_CONTENT_WRITE)
             rendered = MemoryFileUtils.write(mf)
             await self._viking_fs.write_file(

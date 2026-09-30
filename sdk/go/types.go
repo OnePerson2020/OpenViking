@@ -364,9 +364,6 @@ type GlobOptions struct {
 
 // CreateSessionOptions controls CreateSession.
 type CreateSessionOptions struct {
-	// TTLRelative is retention in whole days; nil inherits the default.
-	TTLRelative *int
-
 	SessionID              string
 	MemoryPolicy           map[string]any
 	AutoCommitPolicy       map[string]any
@@ -383,11 +380,6 @@ type GetSessionOptions struct {
 
 // UpdateSessionConfigOptions controls UpdateSessionConfig.
 type UpdateSessionConfigOptions struct {
-	// TTLRelative sets retention in whole days. InheritTTL clears the override.
-	// Leaving both unset preserves the current setting.
-	TTLRelative *int
-	InheritTTL  bool
-
 	MemoryExtractionConfig map[string]any
 	AutoCommitPolicy       *map[string]any
 	Telemetry              any

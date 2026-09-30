@@ -475,13 +475,12 @@ TTL is disabled by default and applies only to event date directories and sessio
 configuration supplies library overrides; user and account identities do not add
 extra retention levels. Resources have no TTL configuration.
 
-New lifecycle directories resolve nearest explicit directory policy → type default
+New lifecycle directories resolve concrete root policy → type default
 → library global default → disabled. `inherit` continues upward; `disabled` stops
 inheritance. `days` requires positive whole `ttl_days`. Event type/directory defaults
 also accept `absolute` with a Unix-seconds `ttl_absolute`; global and session
-defaults accept relative days or disabled. Directory keys may be events roots,
-valid year/month/date prefixes, or a user's sessions container. Individual files
-and session-internal subdirectories are not policy targets.
+defaults accept relative days or disabled. Directory keys accept only user/peer events roots or a user's sessions root.
+Year/month/date directories, individual sessions and descendants are read-only.
 
 ```json
 {
@@ -491,7 +490,7 @@ and session-internal subdirectories are not policy targets.
     "peer_events": {"mode": "inherit"},
     "sessions": {"mode": "days", "ttl_days": 30},
     "directories": {
-      "viking://user/alice/memories/events/2026": {"mode": "days", "ttl_days": 7}
+      "viking://user/alice/memories/events": {"mode": "days", "ttl_days": 7}
     }
   }
 }
@@ -508,11 +507,11 @@ Omitting `--account-id` selects the cluster layer. Python HTTP SDK methods are
 `admin_get_configuration(account_id)` and `admin_patch_configuration(settings, account_id)`.
 Defaults affect newly created date directories and sessions only. Existing managed
 directories keep their saved duration, and unmanaged historical directories remain
-unmanaged, even when new files are added. Explicit edits to a live lifecycle directory
-use [document expiry](../api/12-content.md#document-expiry). Relative lifetimes renew
-after successful content changes; absolute event deadlines stay fixed.
+unmanaged, even when new files are added. Existing deadlines are read-only.
+Sessions renew after successful appends or completed nonempty commits.
+Both relative and absolute event deadlines stay fixed.
 
-`ttl_cleanup` controls the physical deletion executor independently from TTL policy. It defaults to `enabled: true`, but with every TTL policy disabled there is no expiry work to perform. Turning the executor off pauses new physical deletes and preserves retry state; expired L2 remains logically invisible. The scheduler uses a small scan jitter and a stable per-object cleanup offset so tenants do not all delete at UTC midnight.
+`ttl_cleanup` controls the physical deletion executor independently from TTL policy. It defaults to `enabled: true`, but with every TTL policy disabled there is no expiry work to perform. Turning the executor off pauses new physical deletes and preserves retry state; expired directories and descendants remain logically invisible. The scheduler uses a small scan jitter and a stable per-object cleanup offset so tenants do not all delete at UTC midnight.
 
 | Setting | Default | Purpose |
 |---|---:|---|
@@ -524,6 +523,6 @@ after successful content changes; absolute event deadlines stay fixed.
 | `ttl_cleanup.max_batch_bytes` | `1048576` | Maximum serialized bytes claimed per scan |
 | `ttl_cleanup.scan_time_budget_seconds` | `5` | Maximum registry scan time per pass |
 
-Expiry filtering and cleanup apply only to L2. Logical visibility changes exactly at `expires_at`; `cleanup_jitter_seconds` delays only physical deletion. All L0/L1 files and vectors remain readable and searchable, including those inside directories after every L2 content file has been removed.
+Logical visibility changes at `expires_at`; `cleanup_jitter_seconds` delays only physical deletion. All L0/L1/L2, vectors and Meta inside the expired directory are removed. External parent summaries remain unchanged.
 
 These are native OV routes. A hosted console or gateway must forward the matching configuration and requests; adding OV routes does not automatically expose them through an existing cloud proxy. This PR does not change public-cloud services or billing.

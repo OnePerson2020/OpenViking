@@ -15,17 +15,13 @@ pub async fn new_session(
     no_auto_commit: bool,
     output_format: OutputFormat,
     compact: bool,
-    ttl_relative: Option<i64>,
 ) -> Result<()> {
-    let mut body = create_session_body(
+    let body = create_session_body(
         session_id,
         event_tags,
         auto_commit_policy_json,
         no_auto_commit,
     )?;
-    if let Some(days) = ttl_relative {
-        body["ttl_relative"] = json!(days);
-    }
     let response: serde_json::Value = client.post("/api/v1/sessions", &body).await?;
     output_success(&response, output_format, compact);
     Ok(())
@@ -419,21 +415,14 @@ pub async fn set_session_config(
     no_auto_commit: bool,
     output_format: OutputFormat,
     compact: bool,
-    ttl_relative: Option<i64>,
-    inherit_ttl: bool,
 ) -> Result<()> {
     let path = format!("/api/v1/sessions/{}/config", url_encode(session_id));
-    let mut body = session_config_body(
+    let body = session_config_body(
         event_tags,
         no_event_tags,
         auto_commit_policy_json,
         no_auto_commit,
     )?;
-    if inherit_ttl {
-        body["ttl_relative"] = Value::Null;
-    } else if let Some(days) = ttl_relative {
-        body["ttl_relative"] = json!(days);
-    }
     let response: serde_json::Value = client.patch(&path, &body, &[]).await?;
     output_success(&response, output_format, compact);
     Ok(())

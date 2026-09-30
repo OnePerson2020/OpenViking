@@ -145,6 +145,7 @@ async def test_verification_retry_never_reissues_vector_or_content_delete(monkey
     vectors = SimpleNamespace(count=AsyncMock(return_value=residue))
     fs = VikingFS(agfs=SimpleNamespace(), vector_store=vectors)
     fs._async_agfs.rm = AsyncMock()
+    fs._ls_entries = AsyncMock(return_value=[{"name": "body"}])
     monkeypatch.setattr(fs, "_ensure_access", AsyncMock())
     monkeypatch.setattr(fs, "_delete_from_vector_store", AsyncMock())
     monkeypatch.setattr(fs, "_confirm_fs_scope_cleared", AsyncMock())
@@ -152,7 +153,7 @@ async def test_verification_retry_never_reissues_vector_or_content_delete(monkey
     kwargs = {
         "ctx": _ctx(),
         "strict": True,
-        "preserve_summaries": True,
+        "file_locks": True,
         "verify_only": True,
         "lease_ref": {"lease_ref": "held-by-cleanup"},
     }

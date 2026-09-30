@@ -1709,27 +1709,8 @@ results = await client.search(query=query, session_id=session_id)
 
 ## Session TTL
 
-[TTL 到期与续期设计](../concepts/17-ttl.md)
+Session 创建时继承 `sessions` 根目录的有效策略。创建和配置接口不接受 `ttl_relative`、`ttl_absolute`、`expires_at`、`ttl_days` 或 `ttl_per_file`，显式传 `null` 也会被拒绝。
 
-`POST /api/v1/sessions` 支持 `ttl_relative`，单位为天，范围为 1–365000 的整数。
-省略或传 null 时继承适用的目录、session 范围或库默认配置。
-`PATCH /api/v1/sessions/{session_id}/config` 中，省略该字段表示保持原配置，
-整数表示显式设置，null 表示恢复继承。Session 不接受 `ttl_absolute`。
+创建、详情、列表、配置更新、消息追加、commit 和上下文响应均回显 `expires_at`；未启用为 `null`。相对 TTL 按已保存天数在成功追加消息或完成非空 commit 后续期。已过期 Session 的直接访问返回 404，列表不返回它。
 
-修改配置不算内容更新，也不能恢复已过期的 Session。每个 Session 的全部 L2
-文件共用一个期限。修改库或目录默认配置不会自动纳管历史未配置 TTL 的 Session。
-
-```python
-await client.create_session("demo", options={"ttl_relative": 30})
-await client.update_session_config("demo", {"ttl_relative": 60})
-await client.update_session_config("demo", {"ttl_relative": None})
-```
-
-```bash
-ov session new --session-id demo --ttl-relative 30
-ov session config set demo --ttl-relative 60
-ov session config set demo --inherit-ttl
-```
-
-MCP 提供 `create_session(session_id, ttl_relative)` 和
-`update_session_config(session_id, config)`，参数语义与 HTTP 相同。
+详见[目录 TTL](../concepts/17-ttl.md)及[根目录策略配置](../configuration/01-server.md#ttl)。

@@ -17,7 +17,7 @@ from openviking.core.namespace import (
     uri_parts,
     visible_roots,
 )
-from openviking.core.ttl import TTL_FIELD_NAMES, ttl_enabled, ttl_scope_for_uri
+from openviking.core.ttl import TTL_FIELD_NAMES, ttl_enabled
 from openviking.server.identity import RequestContext, Role
 from openviking.service.task_tracker_concurrency import KeyedAsyncLockPool, run_to_completion
 from openviking.storage.acl import (
@@ -365,7 +365,11 @@ class _SingleAccountBackend:
         self._validate_vector_dimension(data.get("vector"))
         # Lifecycle metadata belongs to OV files and durable tasks. Existing
         # cloud collections need no new fields, including on restore/reindex.
-        payload = {k: v for k, v in data.items() if v is not None and k not in TTL_FIELD_NAMES}
+        payload = {
+            k: v
+            for k, v in data.items()
+            if v is not None and k not in TTL_FIELD_NAMES and k != "ttl_generation"
+        }
         filtered = self._filter_known_fields(payload)
         result = {k: v for k, v in filtered.items() if v is not None}
 
@@ -1562,23 +1566,27 @@ class VikingVectorIndexBackend:
             if ttl_enabled():
                 raise
             return None
-        if ttl_enabled() or await fs.ttl_registry.account_may_have_records(ctx.account_id):
-            return fs
-        return None
+        return fs
 
     @staticmethod
-    async def _ttl_visibility(fs, records, ctx: RequestContext) -> List[bool]:
+    async def _ttl_visibility(fs, records, ctx: RequestContext, ttl_view=None) -> List[bool]:
+        from openviking.storage.ttl_view import TTLView
+
+        ttl_view = ttl_view or TTLView(fs, ctx)
+
         async def visible(record):
             uri = str(record.get("uri") or "")
             if not uri:
                 raise ValueError("Vector candidate has no URI for TTL validation")
-            if record.get("level") in (0, 1):
-                return True
-            if ttl_scope_for_uri(uri) is None and not uri.endswith(
+            record["expires_at"] = (await ttl_view.fields(uri))["expires_at"]
+            source_uri = uri
+            if record.get("level") in (0, 1) and not uri.endswith(
                 ("/.abstract.md", "/.overview.md")
             ):
-                return True
-            return await fs._ttl_uri_visible(uri, ctx, require_source=True)
+                source_uri += "/.abstract.md" if record["level"] == 0 else "/.overview.md"
+            return await fs._ttl_uri_visible(
+                source_uri, ctx, require_source=True, ttl_view=ttl_view
+            )
 
         result = []
         for start in range(0, len(records), 16):
@@ -1613,6 +1621,9 @@ class VikingVectorIndexBackend:
             if output_fields is not None
             else None
         )
+        from openviking.storage.ttl_view import TTLView
+
+        ttl_view = TTLView(fs, ctx)
         requested = limit + offset
         base_filter = RawDSL(filter) if isinstance(filter, dict) else filter
         current_filter = base_filter
@@ -1621,7 +1632,7 @@ class VikingVectorIndexBackend:
             records = await read(
                 filter=current_filter, limit=requested, offset=0, output_fields=fields, **kwargs
             )
-            visibility = await self._ttl_visibility(fs, records, ctx)
+            visibility = await self._ttl_visibility(fs, records, ctx, ttl_view=ttl_view)
             visible = [record for record, keep in zip(records, visibility, strict=True) if keep]
             hidden = [record for record, keep in zip(records, visibility, strict=True) if not keep]
             if not hidden or len(records) < requested:

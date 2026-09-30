@@ -222,6 +222,7 @@ async def attrs(
         stat_result = await service.fs.stat(uri, ctx=_ctx, skip_count=True)
         result = {
             "uri": uri,
+            "expires_at": stat_result.get("expires_at"),
             "context_type": context_type_for_uri(uri),
             "attrs": {
                 "tags": await _tags_attr(

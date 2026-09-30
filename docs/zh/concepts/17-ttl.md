@@ -1,37 +1,45 @@
 # 目录 TTL
 
-TTL 默认关闭。生命周期单位是一个 **events 日期目录**（`events/YYYY/MM/DD`）或一个 **Session 目录**。用户和 peer 的 events 使用同一规则。resources 和其他记忆类别不纳入 TTL。
+TTL 默认关闭，作用于用户和 peer 的 `events/YYYY/MM/DD` 日期目录及 `sessions/{session_id}`。resources 和其他记忆类别不在范围内。
+
+## 配置与增量生效
+
+配置入口保留库全局、类型默认值，以及以下根目录：
+
+- `viking://user/{user_id}/memories/events`
+- `viking://user/{user_id}/peers/{peer_id}/memories/events`
+- `viking://user/{user_id}/sessions`
+
+优先级为具体根目录 → 类型默认值（`user_events`、`peer_events`、`sessions`）→ 库全局 → 关闭。`disabled` 阻断继承，`inherit` 回退。account 配置沿用现有库配置入口；user/account 身份不增加新的优先级。
+
+年月、日期、单 Session、子目录和文件只展示期限，不支持编辑。根目录策略变更只影响新建生命周期目录；已纳管目录保留冻结的期限和天数，未纳管的历史目录追加内容也不会自动纳管。
 
 ## 期限与续期
 
-每个生命周期目录只有一份 `expires_at`，目录内的 L2 内容继承同一到期时间，文件和内部子目录不能单独覆盖。相对 TTL 额外保存 `ttl_days`；内容成功变更后，整个目录续期到更新时间加该天数（N × 24 小时）。
+每个生命周期目录在 `.meta.json` 保存一个 `expires_at`，相对策略额外保存 `ttl_days`；沿用 `received_at` 记录内容时间。events 兼容读取旧 `.ttl.json`。AGFS 元数据更新保留同一文件中的其他业务字段，目录 stat 返回该目录自己的 `expires_at`。
 
-events 路径中的日期用于归组，不作为 TTL 起算时间。新增或修改事件会续期所属日期目录的相对 TTL。Session 成功追加消息或完成有内容的 commit 后续期。读取、搜索、摘要生成、重建索引、失败写入和空 commit 不续期。
+- events：第一次成功写入内容时开始计时，路径日期仅用于归组。后续追加或修改不续期；相对和绝对期限都固定。
+- Session：创建时继承 `sessions` 根策略。成功追加消息、完成有内容的 commit 后，按保存的 `ttl_days` 续期。任务重放沿用原完成时间。
+- 读取、摘要生成、重建索引、失败写入、空消息批次和空 commit 不续期。绝对时间不自动延长。
 
-绝对到期时间不会随内容更新延长。用户可以显式修改仍存活的 events 日期目录期限，没有默认续期 30 天的行为。Session 创建和配置接口只支持相对 TTL。已过期目录不能通过延迟写入或 TTL 编辑恢复。
+目录内的消息、附件、归档、L0/L1/L2 共用同一到期时间，不做 JSONL 消息级 TTL。无 `ttl_generation`、单 Session 覆盖或逐文件模式。
 
-`received_at` 保存相对期限的内容时间基准，`ttl_generation` 用于阻止旧清理、旧索引任务影响同路径重建的对象。Session 元数据另保留 `ttl_relative`，表示显式配置覆盖。这些字段不要求公有云向量 schema 新增列。
+## 可见性
 
-## 配置优先级与增量生效
+UTC 时间达到 `expires_at` 后，目录及全部后代不可见。直接访问返回 404；Session 列表、文件列表、find/search/recall、grep/glob 会过滤到期内容，并补足可见候选。
 
-新目录按「最近的显式目录策略 → 类型默认值（`user_events`、`peer_events`、`sessions`）→ 库全局策略」解析。`disabled` 阻断继承；`inherit` 继续向上查找。
+结构化对象回显实际所属目录的 `expires_at`，未开启时明确返回 `null`。跨目录结果逐项回显；单对象的文本或列表响应在外层提供期限。纯 URI 列表兼容模式和下载字节格式不变，仍执行服务端过滤。年月及根目录没有共同期限，返回 `null`；根目录另展示 `policy`、`effective_policy`。
 
-库配置沿用已有 account 配置层。account、user 身份不会增加新的 TTL 优先级。目录默认策略可配置在 events 根、年、月、日期目录，或用户的 sessions 容器。
+## 清理任务与性能
 
-默认策略变更只影响新建的生命周期目录。已有纳管目录保留其冻结的天数；历史未纳管目录继续不生效，向其中新增文件也不会自动纳管。需要调整已有存活目录时，使用目录有效期接口显式配置。
+任务沿用 Session commit 的 QueueFS 离线执行框架。调度器按持久化到期索引领取候选，受每轮数量、字节和时间预算限制，默认在天级窗口内分散物理删除。
 
-## 可见性与清理
+删除前以元数据文件锁复查目录期限；Session 复用现有 Session 写入互斥锁。目录内逐文件加锁删除，锁忙则重试，不使用 tree 锁，不逐文件判断过期时间。删除包括目录内全部正文、消息、附件、L0/L1、向量和 Meta；元数据最后删除，确认存储与索引清空后才移除到期登记。目录外的上层摘要保持原样，删除不触发 LLM、embedding 或摘要重建。
 
-到达 `expires_at` 后，L2 内容不再通过正常 Session 访问、文件读取、列表、find、search、grep、glob 返回。文件及目录详情回显所属目录的 `expires_at`、`ttl_days`；无期限时明确返回 `expires_at: null`。上层策略容器没有共同期限，另返回 `policy` 和 `effective_policy`。摘要文件始终返回 `expires_at: null`。
-
-清理任务在目录锁内检查**目录本身**的当前期限和 generation。到期后清除全部 L2 内容及 L2 向量，无需逐文件判断到期时间。Session 包括整个 `messages.jsonl`、归档消息文件和附件，不做 JSONL 消息级管理。
-
-**所有 L0/L1 摘要文件、摘要向量及容纳它们的目录原样保留，仍可读取和检索。** 清理 L2 不重写摘要，因此保留的摘要可能仍描述已经过期的内容。
-
-物理清理异步执行，默认分散在天级窗口内；删除失败或校验未完成时保留重试状态。逻辑到期到物理清理之间，消息仍可能占用存储。清理完成仅确认主存储 L2 和索引删除，不代表控制台已刷新、备份已擦除或账单已调整；保留的摘要仍占用存储。
+查询在同一批结果中复用 owner 元数据读取。清理重试保存在到期登记中，任务历史的保留时长不影响正确性。显示和计费允许随异步物理删除延迟；云端计费、网关转发和备份不由 OV 清理完成状态自动证明。
 
 ## 接口
 
-- [TTL 配置](../configuration/01-server.md#ttl)：库、类型和目录默认策略。
-- [目录有效期](../api/12-content.md#文档到期时间)：查询期限，调整存活的日期目录或 Session。
-- [Session](../api/05-sessions.md)：创建和修改相对有效期。
+- [TTL 配置](../configuration/01-server.md#ttl)：库、类型及根目录策略。
+- [期限查询](../api/12-content.md#文档到期时间)：`GET /api/v1/content/ttl`，SDK/MCP `get_ttl`，CLI `ov ttl get`。
+- [Session](../api/05-sessions.md#session-ttl)：统一继承根目录策略，创建/配置接口不接收 TTL 参数。

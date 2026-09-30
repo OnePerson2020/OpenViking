@@ -400,7 +400,6 @@ This catalog follows the routes actually mounted by the server. Each group headi
 |--------|------|-------------|
 | GET | `/api/v1/content/read` | Read full content (L2) |
 | GET | `/api/v1/content/ttl` | Read effective event/session directory expiry |
-| PATCH | `/api/v1/content/ttl` | Update a live event date directory or session deadline |
 | GET | `/api/v1/content/abstract` | Read an abstract (L0) |
 | GET | `/api/v1/content/overview` | Read an overview (L1) |
 | GET | `/api/v1/content/download` | Download original file bytes |

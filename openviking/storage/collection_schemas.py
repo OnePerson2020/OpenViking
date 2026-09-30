@@ -18,10 +18,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from openviking.core.context import ContextType, ResourceContentType
-from openviking.core.ttl import (
-    TTL_FIELD_NAMES,
-    ttl_object_for_uri,
-)
 from openviking.models.embedder.base import embed_compat
 from openviking.server.error_mapping import is_storage_not_found
 from openviking.server.identity import RequestContext, Role
@@ -944,13 +940,7 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                                         f"record_id={write_data.get('id')} "
                                         f"missing_fields={missing_fields}"
                                     )
-                        # TTL metadata is source-only, regardless of backend or
-                        # stale fields returned by an existing vector record.
-                        inserted_data = {
-                            field: value
-                            for field, value in write_data.items()
-                            if field not in TTL_FIELD_NAMES
-                        }
+                        inserted_data = write_data
                         upsert_options = normalize_upsert_options(
                             {**raw_upsert_options, "partial_update": False}
                         )
@@ -974,14 +964,6 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                             source_sidecar_digest,
                             ctx,
                             _write_vector,
-                        )
-                        if result is None:
-                            self._merge_request_stats(embedding_msg.telemetry_id, processed=1)
-                            self._record_request_success(embedding_msg)
-                            return ProcessResult.success(inserted_data)
-                    elif inserted_data.get("level", 2) == 2:
-                        result = await self._write_ttl_vector_if_current(
-                            embedding_msg, ctx, _write_vector
                         )
                         if result is None:
                             self._merge_request_stats(embedding_msg.telemetry_id, processed=1)
@@ -1086,47 +1068,6 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                 )
             if embedding_msg is not None and request_failed_message is not None:
                 self._record_request_failure(embedding_msg, request_failed_message)
-
-    async def _write_ttl_vector_if_current(
-        self,
-        embedding_msg: EmbeddingMsg,
-        ctx: RequestContext,
-        write_vector,
-    ) -> Any:
-        """Write a TTL vector only while its source incarnation is live.
-
-        The source object lock makes the final metadata check and vector upsert
-        mutually exclusive with generation-fenced cleanup. A delayed message
-        from a deleted/recreated URI therefore becomes a harmless no-op.
-        """
-        from openviking.core.ttl import hidden_by_ttl
-        from openviking.storage.directory_ttl import read_directory_fields
-        from openviking.storage.viking_fs import get_viking_fs
-
-        data = embedding_msg.context_data
-        uri = str(data.get("uri") or "")
-        target = ttl_object_for_uri(uri)
-        if target is None:
-            return await write_vector()
-        viking_fs = get_viking_fs()
-        path = viking_fs._uri_to_path(target[1], ctx=ctx)
-        lease = await viking_fs._async_agfs.pathlock_acquire_tree(path, timeout_secs=300.0)
-        try:
-            try:
-                if not await viking_fs._ttl_uri_visible(uri, ctx, require_source=True):
-                    return None
-                fields = await read_directory_fields(viking_fs, uri, ctx=ctx)
-            except Exception as exc:
-                if is_storage_not_found(exc):
-                    return None
-                raise
-            if hidden_by_ttl(fields.get("expires_at")) or str(
-                fields.get("ttl_generation") or ""
-            ) != str(data.get("ttl_generation") or ""):
-                return None
-            return await write_vector()
-        finally:
-            await viking_fs._async_agfs.pathlock_release(lease)
 
     async def _write_directory_vector_if_current(
         self,

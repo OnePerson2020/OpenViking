@@ -36,7 +36,7 @@ from mcp.types import (
     TextContent,
     ToolAnnotations,
 )
-from pydantic import BaseModel, Field, StrictInt
+from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -1260,19 +1260,15 @@ async def get_ttl(uri: str) -> str:
 
 @_mcp_error_results()
 @mcp.tool(annotations=_DESTRUCTIVE_TOOL_ANNOTATIONS)
-async def create_session(
-    session_id: Optional[str] = None, ttl_relative: Optional[StrictInt] = None
-) -> str:
-    """Create a session with optional relative retention in whole days.
+async def create_session(session_id: Optional[str] = None) -> str:
+    """Create a session inheriting root retention.
 
-    Omitted/null ttl_relative inherits the sessions default. Absolute TTL is unsupported.
+    TTL is inherited from the sessions root policy.
     """
     from openviking.server.routers.sessions import CreateSessionRequest
     from openviking.server.routers.sessions import create_session as create
 
-    result = await create(
-        CreateSessionRequest(session_id=session_id, ttl_relative=ttl_relative), _get_ctx()
-    )
+    result = await create(CreateSessionRequest(session_id=session_id), _get_ctx())
     return str(result.model_dump())
 
 
@@ -1281,8 +1277,8 @@ async def create_session(
 async def update_session_config(session_id: str, config: Dict[str, Any]) -> str:
     """Update session config with the HTTP PATCH contract.
 
-    ttl_relative is whole days: omit to preserve, integer to override, null to
-    restore inheritance. Changing config does not count as a content update.
+    TTL is read-only and inherited from the sessions root.
+    Changing other config does not count as a content update.
     """
     from openviking.server.routers.sessions import UpdateSessionConfigRequest
     from openviking.server.routers.sessions import update_session_config as update
@@ -1290,24 +1286,6 @@ async def update_session_config(session_id: str, config: Dict[str, Any]) -> str:
     return str(
         await update(session_id, UpdateSessionConfigRequest.model_validate(config), _get_ctx())
     )
-
-
-@_mcp_error_results()
-@mcp.tool(annotations=_RETRY_SAFE_DESTRUCTIVE_TOOL_ANNOTATIONS)
-async def update_ttl(
-    uri: str,
-    expires_at: Optional[str] = None,
-    ttl_relative: Optional[int] = None,
-) -> str:
-    """Set retention for a live event date directory or session.
-
-    Event date directories accept relative whole days or a future ISO 8601
-    deadline. Sessions accept relative whole days only. Files inherit their
-    directory's deadline. This does not revive expired data or edit defaults.
-    """
-    ctx = _get_ctx()
-    uri = validate_request_viking_uri(uri, ctx)
-    return str(await get_service().fs.update_ttl(uri, expires_at, ctx, ttl_relative=ttl_relative))
 
 
 def _resource_add_error(result: Any) -> _MCPToolFailure | None:

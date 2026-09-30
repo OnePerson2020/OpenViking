@@ -127,15 +127,15 @@ const HELP_SECTIONS: &[HelpSection] = &[
 const COMMAND_HELP_SPECS: &[CommandHelpSpec] = &[
     CommandHelpSpec {
         path: &["ttl"],
-        purpose: "Read or revise an event date directory or session's expiry.",
+        purpose: "Read an event date directory or session's expiry.",
         examples: &[
             HelpItem {
                 label: "ov ttl get viking://user/alice/memories/events/2026/09/28",
                 description: "Read the frozen deadline and lifecycle owner.",
             },
             HelpItem {
-                label: "ov ttl set viking://user/alice/memories/events/2026/09/28 --expires-at 2027-01-01T00:00:00Z",
-                description: "Change this date directory's deadline, preserving its content.",
+                label: "ov ttl get viking://user/alice/sessions/session-1",
+                description: "Read the session deadline inherited from its root policy.",
             },
         ],
         next_steps: &[],
@@ -2376,7 +2376,7 @@ fn localized_command_description<'a>(
     }
     match name {
         "add-resource" => "添加文件、文件夹、URL 或仓库",
-        "ttl" => "查看或调整 events 日期目录或 Session 的到期时间",
+        "ttl" => "查看 events 日期目录或 Session 的到期时间",
         "add-skill" => "添加技能到 OpenViking",
         "skills" => "管理已安装技能",
         "find" => "语义检索相关上下文",

@@ -38,7 +38,6 @@ from tests.storage.test_transfer_merge_binding import indexed_fs as indexed_fs
 
 
 class FakeVikingFS:
-    _restore_ttl_target = staticmethod(VikingFS._restore_ttl_target)
     _ensure_restore_target_ttl = VikingFS._ensure_restore_target_ttl
     _ttl_metadata_target = staticmethod(VikingFS._ttl_metadata_target)
     _ttl_record_for_write = VikingFS._ttl_record_for_write
@@ -740,8 +739,8 @@ async def test_backup_restore_contract(
         == "viking://"
     )
     assert fake_fs.written_files == [
-        "viking://resources/README.md",
         "viking://user/resources/sessions/sess_1/.meta.json",
+        "viking://resources/README.md",
     ]
     fake_fs.rm.assert_not_awaited()
     assert all(ctx.role == Role.ROOT for ctx in fake_fs.write_contexts)

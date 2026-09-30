@@ -55,10 +55,6 @@ from openviking.session.retention import (
     plan_retention,
 )
 from openviking.session.tool_output_externalizer import ToolOutputExternalizer
-from openviking.session.ttl_fence import (
-    StaleSessionGenerationError,
-    session_generation_fence,
-)
 from openviking.session.working_memory import (
     WM_CREATE_WITH_CHECKPOINTS_TOOL,
     WM_SEVEN_SECTIONS,
@@ -337,10 +333,8 @@ class SessionMeta:
     # for the read barrier and cleanup scan. Successful appends and commits renew
     # it from the saved ttl_days, never from the current default configuration.
     ttl_days: Optional[int] = None
-    ttl_relative: Optional[int] = None
     received_at: str = ""
     expires_at: str = ""
-    ttl_generation: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         data = {
@@ -367,7 +361,6 @@ class SessionMeta:
             ),
             "last_message_at": self.last_message_at,
             "last_auto_commit_at": self.last_auto_commit_at,
-            "ttl_relative": self.ttl_relative,
         }
         if self.total_message_count is not None:
             data["total_message_count"] = self.total_message_count
@@ -379,8 +372,6 @@ class SessionMeta:
             data["received_at"] = self.received_at
         if self.expires_at:
             data["expires_at"] = self.expires_at
-        if self.ttl_generation:
-            data["ttl_generation"] = self.ttl_generation
         return data
 
     @classmethod
@@ -432,10 +423,8 @@ class SessionMeta:
             last_auto_commit_at=data.get("last_auto_commit_at", ""),
             event_search_tags=data.get("event_search_tags"),
             ttl_days=data.get("ttl_days"),
-            ttl_relative=data.get("ttl_relative"),
             received_at=data.get("received_at", ""),
             expires_at=data.get("expires_at", ""),
-            ttl_generation=data.get("ttl_generation", ""),
         )
 
 
@@ -673,23 +662,14 @@ class Session:
 
     def _freeze_ttl_snapshot(self, *, config=None) -> None:
         """Populate the session's frozen TTL fields from the current policy."""
-        from openviking.core.ttl import compute_expires_at, freeze_ttl_fields
+        from openviking.core.ttl import freeze_ttl_fields
 
         snapshot = freeze_ttl_fields(self._session_uri, config=config)
-        if self._meta.ttl_relative is not None:
-            received = datetime.now(timezone.utc)
-            snapshot = {
-                "ttl_days": self._meta.ttl_relative,
-                "received_at": format_iso8601(received),
-                "expires_at": format_iso8601(compute_expires_at(received, self._meta.ttl_relative)),
-                "ttl_generation": str(uuid4()),
-            }
         if not snapshot:
             return
         self._meta.ttl_days = snapshot["ttl_days"]
         self._meta.received_at = snapshot["received_at"]
         self._meta.expires_at = snapshot["expires_at"]
-        self._meta.ttl_generation = snapshot["ttl_generation"]
 
     def _renew_ttl_on_content_update(self, completed_at: str) -> None:
         """Record successful content time and renew the saved relative duration.
@@ -732,21 +712,11 @@ class Session:
         event_search_tags: Optional[List[str]] = None,
         auto_commit_policy: Optional[Dict[str, Any]] = None,
         update_auto_commit_policy: bool = False,
-        ttl_relative: Optional[int] = None,
-        update_ttl: bool = False,
     ) -> None:
         """Update mutable session config without overwriting concurrent meta changes."""
         update_auto_commit_policy = update_auto_commit_policy or auto_commit_policy is not None
-        if update_ttl:
-            from openviking_cli.utils.config.ttl_config import SessionTTL
-
-            ttl_relative = SessionTTL(ttl_relative=ttl_relative).ttl_relative
         session_path = self._viking_fs._uri_to_path(self._session_uri, ctx=self.ctx)
-        acquire = (
-            self._viking_fs._async_agfs.pathlock_acquire_tree
-            if update_ttl
-            else self._viking_fs._async_agfs.pathlock_acquire_exact
-        )
+        acquire = self._viking_fs._async_agfs.pathlock_acquire_exact
         lease = await acquire(session_path, timeout_secs=_SESSION_PHASE1_LOCK_TIMEOUT_SECONDS)
         try:
             try:
@@ -758,10 +728,6 @@ class Session:
             except Exception as exc:
                 if not _is_storage_not_found(exc):
                     raise
-                if update_ttl:
-                    raise NotFoundError(self._session_uri, "session") from exc
-            if update_ttl:
-                await self._update_ttl_config(ttl_relative)
             if event_search_tags is not None:
                 self._meta.event_search_tags = list(event_search_tags)
             if update_auto_commit_policy:
@@ -771,30 +737,9 @@ class Session:
                     existing = dict(self._meta.auto_commit_policy or {})
                     existing.update(auto_commit_policy)
                     self._meta.auto_commit_policy = AutoCommitPolicy.from_dict(existing).to_dict()
-            await self._save_meta(lease_ref=lease if update_ttl else None)
+            await self._save_meta()
         finally:
             await self._viking_fs._async_agfs.pathlock_release(lease)
-
-    async def _update_ttl_config(self, ttl_relative: Optional[int]) -> None:
-        from openviking.config.ttl import resolve_ttl_config
-        from openviking.core.ttl import (
-            compute_expires_at,
-            hidden_by_ttl,
-            resolve_ttl_days,
-            session_content_updated_at,
-        )
-
-        if hidden_by_ttl(self._meta.expires_at):
-            raise NotFoundError(self._session_uri, "session")
-        config = await resolve_ttl_config(self._viking_fs, self.ctx.account_id)
-        days = ttl_relative if ttl_relative is not None else resolve_ttl_days(self.uri, config)
-        self._meta.ttl_relative = ttl_relative
-        updated = session_content_updated_at(self._meta.to_dict())
-        self._meta.ttl_days = days
-        self._meta.received_at = format_iso8601(updated)
-        self._meta.expires_at = format_iso8601(compute_expires_at(updated, days)) if days else ""
-        if days and not self._meta.ttl_generation:
-            self._meta.ttl_generation = str(uuid4())
 
     async def update_event_search_tags(self, event_search_tags: List[str]) -> None:
         """Update event-memory default tags."""
@@ -1644,7 +1589,6 @@ class Session:
                 record_auto_commit_success=record_auto_commit_success,
                 event_search_tags=list(effective_event_tags),
                 auto_commit_policy=dict(self._meta.auto_commit_policy or {}),
-                ttl_generation=self._meta.ttl_generation,
             )
             phase1_stage = "phase1_persist"
             try:
@@ -1840,39 +1784,9 @@ class Session:
             done = json.loads(done_raw)
             if not isinstance(done, dict):
                 raise ValueError(f"Invalid Phase 2 completion marker: {msg.archive_uri}")
-            done_generation = str(done.get("ttl_generation") or "")
-            if msg.ttl_generation and done_generation and done_generation != msg.ttl_generation:
-                await tracker.complete(
-                    msg.task_id,
-                    {
-                        "session_id": self.session_id,
-                        "archive_uri": msg.archive_uri,
-                        "skipped": "stale_ttl_generation",
-                    },
-                    account_id=self.ctx.account_id,
-                    user_id=self.ctx.user.user_id,
-                )
-                return True
             completed_at = str(done.get("phase2_completed_at") or "")
-            if msg.ttl_generation and completed_at:
-                try:
-                    await self._renew_ttl_after_phase2(
-                        completed_at,
-                        ttl_generation=msg.ttl_generation,
-                        allow_expired=True,
-                    )
-                except StaleSessionGenerationError:
-                    await tracker.complete(
-                        msg.task_id,
-                        {
-                            "session_id": self.session_id,
-                            "archive_uri": msg.archive_uri,
-                            "skipped": "stale_ttl_generation",
-                        },
-                        account_id=self.ctx.account_id,
-                        user_id=self.ctx.user.user_id,
-                    )
-                    return True
+            if completed_at and self._meta.ttl_days:
+                await self._renew_ttl_after_phase2(completed_at)
             if task.status.value == "completed":
                 return True
             await tracker.complete(
@@ -1882,48 +1796,6 @@ class Session:
                 user_id=self.ctx.user.user_id,
             )
             return True
-
-        # Queue messages belong to the exact session incarnation that produced
-        # their archive. A delayed Phase 2 job must never write memories for a
-        # recreated or already-expired session at the same URI. Legacy messages
-        # without a fence retain their historical behavior.
-        if msg.ttl_generation:
-            from openviking.session.ttl_fence import reconcile_session_ttl
-
-            path = self._viking_fs._uri_to_path(self._session_uri, ctx=self.ctx)
-            # The durable queue is published while Phase 1 still owns the
-            # session lock. Its normal handoff must not fail the owning task.
-            lease = await self._viking_fs._async_agfs.pathlock_acquire_tree(
-                path, timeout_secs=_SESSION_PHASE1_LOCK_TIMEOUT_SECONDS
-            )
-            try:
-                repaired = await reconcile_session_ttl(
-                    self._viking_fs,
-                    self.ctx,
-                    session_uri=self._session_uri,
-                    generation=msg.ttl_generation,
-                    lease_ref=lease,
-                    archive_uri=msg.archive_uri,
-                )
-                if repaired is not None:
-                    self._meta = SessionMeta.from_dict(repaired)
-            finally:
-                await self._viking_fs._async_agfs.pathlock_release(lease)
-            if (
-                hidden_by_ttl(self._meta.expires_at)
-                or self._meta.ttl_generation != msg.ttl_generation
-            ):
-                await tracker.complete(
-                    msg.task_id,
-                    {
-                        "session_id": self.session_id,
-                        "archive_uri": msg.archive_uri,
-                        "skipped": "stale_ttl_generation",
-                    },
-                    account_id=self.ctx.account_id,
-                    user_id=self.ctx.user.user_id,
-                )
-                return True
 
         try:
             failed = json.loads(
@@ -2029,7 +1901,6 @@ class Session:
             record_auto_commit_success=msg.record_auto_commit_success,
             event_search_tags=list(msg.event_search_tags or []),
             auto_commit_policy=msg.auto_commit_policy,
-            ttl_generation=msg.ttl_generation,
         )
         return True
 
@@ -2066,7 +1937,6 @@ class Session:
             [str, str, List[Message], Callable[[], Awaitable[Any]]],
             Awaitable[Any],
         ],
-        ttl_generation: str = "",
     ) -> Any:
         batches = plan_extraction_batches(messages, limits)
         if not batches:
@@ -2119,8 +1989,6 @@ class Session:
                                 archive_uri=archive_uri,
                                 ctx=self.ctx,
                                 memory_diffs=memory_diffs,
-                                source_session_uri=self._session_uri,
-                                source_ttl_generation=ttl_generation,
                             )
                             previous_diff_raw = await self._viking_fs.read_file(
                                 f"{archive_uri}/memory_diff.json",
@@ -2162,7 +2030,6 @@ class Session:
         record_auto_commit_success: bool = False,
         event_search_tags: Optional[List[str]] = None,
         auto_commit_policy: Optional[Dict[str, Any]] = None,
-        ttl_generation: str = "",
     ) -> None:
         """Phase 2: Extract memories and enqueue semantic work in the background."""
         from openviking.service.task_tracker import get_task_tracker
@@ -2180,12 +2047,6 @@ class Session:
         completed_memory_steps: Dict[str, set[str]] = {}
         telemetry = OperationTelemetry(operation="session_commit_phase2", enabled=True)
         archive_index = self._archives.archive_index_from_uri(archive_uri)
-        write_fence = session_generation_fence(
-            self._viking_fs,
-            self.ctx,
-            session_uri=self._session_uri,
-            generation=ttl_generation,
-        )
 
         try:
             await tracker.start(
@@ -2193,7 +2054,6 @@ class Session:
                 account_id=self.ctx.account_id,
                 user_id=self.ctx.user.user_id,
             )
-            await write_fence.require_current()
             (
                 messages,
                 coverage_start_archive,
@@ -2283,48 +2143,47 @@ class Session:
                             )
                         if self._viking_fs and summary:
                             abstract = extract_abstract_from_summary(summary)
-                            async with write_fence.lock() as lease:
-                                await self._viking_fs.write_file(
-                                    uri=f"{archive_uri}/.abstract.md",
-                                    content=render_abstract_overview(
-                                        ContextLevel.ABSTRACT,
-                                        archive_uri,
-                                        abstract,
-                                        {
-                                            "generated_by": {
-                                                "component": "Session",
-                                                "trigger": "archive_summary",
-                                            }
-                                        },
-                                    ),
-                                    ctx=self.ctx,
-                                    lease_ref=lease,
-                                )
-                                await self._viking_fs.write_file(
-                                    uri=f"{archive_uri}/.overview.md",
-                                    content=render_abstract_overview(
-                                        ContextLevel.OVERVIEW,
-                                        archive_uri,
-                                        summary,
-                                        {
-                                            "generated_by": {
-                                                "component": "Session",
-                                                "trigger": "archive_summary",
-                                            }
-                                        },
-                                    ),
-                                    ctx=self.ctx,
-                                    lease_ref=lease,
-                                )
-                                await self._merge_archive_meta(
+                            await self._viking_fs.write_file(
+                                uri=f"{archive_uri}/.abstract.md",
+                                content=render_abstract_overview(
+                                    ContextLevel.ABSTRACT,
                                     archive_uri,
+                                    abstract,
                                     {
-                                        "overview_tokens": estimate_text_tokens(summary),
-                                        "abstract_tokens": estimate_text_tokens(abstract),
-                                        "checkpoints": checkpoint_records,
+                                        "generated_by": {
+                                            "component": "Session",
+                                            "trigger": "archive_summary",
+                                        }
                                     },
-                                    lease_ref=lease,
-                                )
+                                ),
+                                ctx=self.ctx,
+                                lease_ref=None,
+                            )
+                            await self._viking_fs.write_file(
+                                uri=f"{archive_uri}/.overview.md",
+                                content=render_abstract_overview(
+                                    ContextLevel.OVERVIEW,
+                                    archive_uri,
+                                    summary,
+                                    {
+                                        "generated_by": {
+                                            "component": "Session",
+                                            "trigger": "archive_summary",
+                                        }
+                                    },
+                                ),
+                                ctx=self.ctx,
+                                lease_ref=None,
+                            )
+                            await self._merge_archive_meta(
+                                archive_uri,
+                                {
+                                    "overview_tokens": estimate_text_tokens(summary),
+                                    "abstract_tokens": estimate_text_tokens(abstract),
+                                    "checkpoints": checkpoint_records,
+                                },
+                                lease_ref=None,
+                            )
 
                     async def _run_retryable_phase2_step(
                         operation_name: str,
@@ -2358,18 +2217,17 @@ class Session:
                         # Persist progress before waiting for sibling Phase 2
                         # tasks. A process restart or a sibling failure can then
                         # resume without applying this memory step twice.
-                        async with write_fence.lock() as lease:
-                            await self._merge_archive_meta(
-                                archive_uri,
-                                {
-                                    "completed_memory_steps": (
-                                        self._archives.serialize_completed_memory_steps(
-                                            completed_memory_steps
-                                        )
+                        await self._merge_archive_meta(
+                            archive_uri,
+                            {
+                                "completed_memory_steps": (
+                                    self._archives.serialize_completed_memory_steps(
+                                        completed_memory_steps
                                     )
-                                },
-                                lease_ref=lease,
-                            )
+                                )
+                            },
+                            lease_ref=None,
+                        )
                         return result
 
                     # Summary and V3 long-term memory extraction run concurrently.
@@ -2437,8 +2295,6 @@ class Session:
                                     peer_memory_enabled=peer_memory_enabled,
                                     allowed_peer_ids=allowed_peer_ids,
                                     event_search_tags=event_search_tags,
-                                    source_session_uri=self._session_uri,
-                                    source_ttl_generation=ttl_generation,
                                 )
 
                             if extraction_batch_limits.enabled:
@@ -2449,7 +2305,6 @@ class Session:
                                         archive_uri=archive_uri,
                                         extract_batch=_run_long_term_memory_extraction,
                                         record_batch=_run_recorded_memory_step,
-                                        ttl_generation=ttl_generation,
                                     )
                                 )
                             else:
@@ -2583,7 +2438,6 @@ class Session:
                 memories_extracted=memories_extracted,
                 telemetry_snapshot=snapshot,
                 record_auto_commit_success=record_auto_commit_success,
-                ttl_generation=ttl_generation,
             )
 
             # Write .done last so a recovered queue item can skip completed work.
@@ -2598,7 +2452,6 @@ class Session:
                 completed_memory_steps=self._archives.serialize_completed_memory_steps(
                     completed_memory_steps
                 ),
-                ttl_generation=ttl_generation,
                 phase2_completed_at=phase2_completed_at,
             )
 
@@ -2645,64 +2498,28 @@ class Session:
                 user_id=self.ctx.user.user_id,
             )
             logger.info(f"Session {self.session_id} memory extraction completed")
-        except StaleSessionGenerationError:
-            snapshot = telemetry.finish("ok")
-            _publish_telemetry_summary_best_effort(snapshot)
-            await tracker.complete(
-                task_id,
-                {
-                    "session_id": self.session_id,
-                    "archive_uri": archive_uri,
-                    "skipped": "stale_ttl_generation",
-                },
-                account_id=self.ctx.account_id,
-                user_id=self.ctx.user.user_id,
-            )
-            logger.info(
-                "Skipped stale TTL Phase 2 writeback for session %s generation=%s",
-                self.session_id,
-                ttl_generation,
-            )
         except asyncio.CancelledError:
             telemetry.set_error("session.commit.phase2", "CANCELLED", "session commit cancelled")
             snapshot = telemetry.finish("cancelled")
             _publish_telemetry_summary_best_effort(snapshot)
-            try:
-                await self._write_failed_marker(
-                    archive_uri,
-                    stage="cancelled",
-                    error="session commit cancelled",
-                    ttl_generation=ttl_generation,
-                )
-            except StaleSessionGenerationError:
-                pass
+            await self._write_failed_marker(
+                archive_uri,
+                stage="cancelled",
+                error="session commit cancelled",
+            )
             raise
         except Exception as e:
             telemetry.set_error("session.commit.phase2", type(e).__name__, str(e))
             snapshot = telemetry.finish("error")
             _publish_telemetry_summary_best_effort(snapshot)
-            try:
-                await self._write_failed_marker(
-                    archive_uri,
-                    stage="memory_extraction",
-                    error=str(e),
-                    completed_memory_steps=self._archives.serialize_completed_memory_steps(
-                        completed_memory_steps
-                    ),
-                    ttl_generation=ttl_generation,
-                )
-            except StaleSessionGenerationError:
-                await tracker.complete(
-                    task_id,
-                    {
-                        "session_id": self.session_id,
-                        "archive_uri": archive_uri,
-                        "skipped": "stale_ttl_generation",
-                    },
-                    account_id=self.ctx.account_id,
-                    user_id=self.ctx.user.user_id,
-                )
-                return
+            await self._write_failed_marker(
+                archive_uri,
+                stage="memory_extraction",
+                error=str(e),
+                completed_memory_steps=self._archives.serialize_completed_memory_steps(
+                    completed_memory_steps
+                ),
+            )
             await tracker.fail(
                 task_id, str(e), account_id=self.ctx.account_id, user_id=self.ctx.user.user_id
             )
@@ -2719,7 +2536,6 @@ class Session:
         coverage_end_archive: Optional[str] = None,
         covered_failed_archives: Optional[List[str]] = None,
         completed_memory_steps: Optional[Dict[str, List[str]]] = None,
-        ttl_generation: str = "",
         phase2_completed_at: str = "",
     ) -> None:
         """Write .done marker file to the archive directory."""
@@ -2736,23 +2552,15 @@ class Session:
                 "covered_failed_archives": list(covered_failed_archives or []),
                 "completed_memory_steps": dict(completed_memory_steps or {}),
                 "phase2_completed_at": phase2_completed_at,
-                "ttl_generation": ttl_generation,
             },
             ensure_ascii=False,
         )
-        fence = session_generation_fence(
-            self._viking_fs,
-            self.ctx,
-            session_uri=self._session_uri,
-            generation=ttl_generation,
+        await self._viking_fs.write_file(
+            uri=f"{archive_uri}/.done",
+            content=content,
+            ctx=self.ctx,
+            lease_ref=None,
         )
-        async with fence.lock() as lease:
-            await self._viking_fs.write_file(
-                uri=f"{archive_uri}/.done",
-                content=content,
-                ctx=self.ctx,
-                lease_ref=lease,
-            )
 
     async def _write_failed_marker(
         self,
@@ -2763,7 +2571,6 @@ class Session:
         skipped: bool = True,
         completed_memory_steps: Optional[Dict[str, List[str]]] = None,
         lease_ref: Optional[Any] = None,
-        ttl_generation: str = "",
     ) -> None:
         """Persist a terminal failure marker for the archive."""
         if not self._viking_fs:
@@ -2777,14 +2584,7 @@ class Session:
         }
         if blocked_by:
             payload["blocked_by"] = blocked_by
-        fence = session_generation_fence(
-            self._viking_fs,
-            self.ctx,
-            session_uri=self._session_uri,
-            generation=ttl_generation,
-        )
         if lease_ref is not None:
-            await fence.require_current()
             await self._viking_fs.write_file(
                 uri=f"{archive_uri}/.failed.json",
                 content=json.dumps(payload, ensure_ascii=False),
@@ -2792,13 +2592,12 @@ class Session:
                 lease_ref=lease_ref,
             )
             return
-        async with fence.lock() as fence_lease:
-            await self._viking_fs.write_file(
-                uri=f"{archive_uri}/.failed.json",
-                content=json.dumps(payload, ensure_ascii=False),
-                ctx=self.ctx,
-                lease_ref=fence_lease,
-            )
+        await self._viking_fs.write_file(
+            uri=f"{archive_uri}/.failed.json",
+            content=json.dumps(payload, ensure_ascii=False),
+            ctx=self.ctx,
+            lease_ref=None,
+        )
 
     async def get_session_context(self, token_budget: int = 128_000) -> Dict[str, Any]:
         """Get assembled session context with the latest summary archive and merged messages."""
@@ -3077,40 +2876,24 @@ class Session:
         *,
         archive_uri: str = "",
         record_auto_commit_success: bool = False,
-        ttl_generation: str = "",
     ) -> str:
         """Persist one Phase 2 completion and renew its session exactly once."""
         if not archive_uri:
             archive_uri = f"{self._session_uri}/history/archive_{archive_index:03d}"
         session_path = self._viking_fs._uri_to_path(self._session_uri, ctx=self.ctx)
-        acquire = (
-            self._viking_fs._async_agfs.pathlock_acquire_tree
-            if ttl_generation
-            else self._viking_fs._async_agfs.pathlock_acquire_exact
-        )
+        acquire = self._viking_fs._async_agfs.pathlock_acquire_exact
         lease = await acquire(session_path, timeout_secs=_SESSION_PHASE1_LOCK_TIMEOUT_SECONDS)
         try:
-            fence = session_generation_fence(
-                self._viking_fs,
-                self.ctx,
-                session_uri=self._session_uri,
-                generation=ttl_generation,
-            )
-            await fence.require_current()
             latest_meta = self._meta
             try:
                 meta_content = await self._viking_fs.read_file(
                     f"{self._session_uri}/.meta.json",
                     ctx=self.ctx,
-                    include_expired=bool(ttl_generation),
+                    include_expired=True,
                 )
                 latest_meta = SessionMeta.from_dict(json.loads(meta_content))
             except Exception as exc:
-                if ttl_generation:
-                    if _is_storage_not_found(exc):
-                        raise StaleSessionGenerationError(
-                            f"stale TTL session generation: {self._session_uri}"
-                        ) from exc
+                if self._meta.expires_at or not _is_storage_not_found(exc):
                     raise
                 latest_meta = self._meta
 
@@ -3122,8 +2905,8 @@ class Session:
                 phase2_completed_at = get_current_timestamp()
                 await self._merge_archive_meta(
                     archive_uri,
-                    {"phase2_completed_at": phase2_completed_at, "ttl_generation": ttl_generation},
-                    lease_ref=lease,
+                    {"phase2_completed_at": phase2_completed_at},
+                    lease_ref=None,
                 )
 
             if telemetry_snapshot:
@@ -3154,44 +2937,29 @@ class Session:
                 # Mirror the Phase 1 success stamp so the persisted meta reflects
                 # a clean auto-commit even after Phase 2 reloads the latest meta.
                 latest_meta.last_auto_commit_at = get_current_timestamp()
-            await self._save_meta(lease_ref=lease)
+            await self._save_meta()
             return phase2_completed_at
         finally:
             await self._viking_fs._async_agfs.pathlock_release(lease)
 
-    async def _renew_ttl_after_phase2(
-        self,
-        completed_at: str,
-        *,
-        ttl_generation: str,
-        allow_expired: bool = False,
-    ) -> None:
-        """Idempotently repair root metadata and registry from ``.done``."""
-        fence = session_generation_fence(
-            self._viking_fs,
-            self.ctx,
-            session_uri=self._session_uri,
-            generation=ttl_generation,
-        )
-        lease = await self._viking_fs._async_agfs.pathlock_acquire_tree(
-            fence.lock_path(), timeout_secs=_SESSION_PHASE1_LOCK_TIMEOUT_SECONDS
+    async def _renew_ttl_after_phase2(self, completed_at: str) -> None:
+        """Replay a durable completion without assigning a new success time."""
+        path = self._viking_fs._uri_to_path(self._session_uri, ctx=self.ctx)
+        lease = await self._viking_fs._async_agfs.pathlock_acquire_exact(
+            path, timeout_secs=_SESSION_PHASE1_LOCK_TIMEOUT_SECONDS
         )
         try:
-            await fence.require_current(allow_expired=allow_expired)
-            meta_content = await self._viking_fs.read_file(
-                f"{self._session_uri}/.meta.json",
-                ctx=self.ctx,
-                include_expired=True,
-            )
-            self._meta = SessionMeta.from_dict(json.loads(meta_content))
-            if self._meta.ttl_generation != ttl_generation:
-                raise StaleSessionGenerationError(
-                    f"stale TTL session generation: {self._session_uri}"
+            try:
+                raw = await self._viking_fs.read_file(
+                    f"{self._session_uri}/.meta.json", ctx=self.ctx, include_expired=True
                 )
+            except Exception as exc:
+                if _is_storage_not_found(exc):
+                    return
+                raise
+            self._meta = SessionMeta.from_dict(json.loads(raw))
             self._renew_ttl_on_content_update(completed_at)
-            # Always rewrite through VikingFS so a crash after the root write
-            # but before the TTL registry update is repaired as well.
-            await self._save_meta(lease_ref=lease)
+            await self._save_meta()
         finally:
             await self._viking_fs._async_agfs.pathlock_release(lease)
 

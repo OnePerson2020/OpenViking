@@ -1544,9 +1544,6 @@ enum ObserverCommands {
 enum SessionCommands {
     /// Create a new session
     New {
-        /// Session retention in whole days; omit to inherit
-        #[arg(long, value_parser = clap::value_parser!(i64).range(1..=365000))]
-        ttl_relative: Option<i64>,
         /// Optional session ID
         #[arg(long = "session-id", value_name = "session-id")]
         session_id: Option<String>,
@@ -1648,12 +1645,6 @@ enum SessionCommands {
 enum SessionConfigCommands {
     /// Set mutable session configuration
     Set {
-        /// Set the session retention override in whole days
-        #[arg(long, conflicts_with = "inherit_ttl", value_parser = clap::value_parser!(i64).range(1..=365000))]
-        ttl_relative: Option<i64>,
-        /// Clear the session override and inherit the current default
-        #[arg(long, conflicts_with = "ttl_relative")]
-        inherit_ttl: bool,
         /// Session ID
         #[arg(value_name = "session-id")]
         session_id: String,
@@ -1663,7 +1654,6 @@ enum SessionConfigCommands {
             value_name = "key=value",
             value_delimiter = ',',
             required_unless_present_any = [
-                "ttl_relative", "inherit_ttl",
                 "no_event_tags",
                 "auto_commit_policy_json",
                 "no_auto_commit"
@@ -1675,7 +1665,6 @@ enum SessionConfigCommands {
         #[arg(
             long = "no-event-tags",
             required_unless_present_any = [
-                "ttl_relative", "inherit_ttl",
                 "event_tags",
                 "auto_commit_policy_json",
                 "no_auto_commit"
@@ -1687,7 +1676,7 @@ enum SessionConfigCommands {
         #[arg(
             long = "auto-commit-policy-json",
             value_name = "json",
-            required_unless_present_any = ["ttl_relative", "inherit_ttl", "event_tags", "no_event_tags", "no_auto_commit"],
+            required_unless_present_any = ["event_tags", "no_event_tags", "no_auto_commit"],
             conflicts_with = "no_auto_commit"
         )]
         auto_commit_policy_json: Option<String>,
@@ -1695,7 +1684,6 @@ enum SessionConfigCommands {
         #[arg(
             long = "no-auto-commit",
             required_unless_present_any = [
-                "ttl_relative", "inherit_ttl",
                 "event_tags",
                 "no_event_tags",
                 "auto_commit_policy_json"
@@ -1997,19 +1985,6 @@ enum PrivacyCommands {
 enum TtlCommands {
     /// Read a directory lifetime or inherited policy
     Get { uri: String },
-    /// Set an event date directory or session lifetime
-    Set {
-        uri: String,
-        #[arg(
-            long,
-            conflicts_with = "ttl_relative",
-            required_unless_present = "ttl_relative"
-        )]
-        expires_at: Option<String>,
-        /// Retain for this many whole days after the last content update
-        #[arg(long, conflicts_with = "expires_at", required_unless_present = "expires_at", value_parser = clap::value_parser!(i64).range(1..=365000))]
-        ttl_relative: Option<i64>,
-    },
 }
 
 #[derive(Subcommand)]
@@ -3414,15 +3389,6 @@ async fn main() {
                         .get("/api/v1/content/ttl", &[("uri".into(), uri)])
                         .await
                 }
-                TtlCommands::Set { uri, expires_at, ttl_relative } => {
-                    client
-                        .patch(
-                            "/api/v1/content/ttl",
-                            &serde_json::json!({"uri": uri, "expires_at": expires_at, "ttl_relative": ttl_relative}),
-                            &[],
-                        )
-                        .await
-                }
             };
             result.map(|value| output::output_success(&value, ctx.output_format, ctx.compact))
         }
@@ -4015,46 +3981,24 @@ mod tests {
     }
 
     #[test]
-    fn document_ttl_accepts_exactly_one_retention_mode() {
-        let cli = Cli::try_parse_from([
-            "ov",
-            "ttl",
-            "set",
-            "viking://user/alice/memories/events/2026/09/28",
-            "--ttl-relative",
-            "30",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Commands::Ttl {
-                action: TtlCommands::Set {
-                    ttl_relative: Some(30),
-                    expires_at: None,
-                    ..
-                }
-            }
-        ));
-        for tail in [
-            vec![],
-            vec!["--ttl-relative", "0"],
-            vec!["--ttl-relative", "365001"],
+    fn object_ttl_configuration_is_rejected() {
+        for args in [
             vec![
-                "--ttl-relative",
-                "1",
-                "--expires-at",
-                "2999-01-01T00:00:00Z",
-            ],
-        ] {
-            let mut args = vec![
                 "ov",
                 "ttl",
                 "set",
-                "viking://user/alice/memories/events/2026/09/28",
-            ];
-            args.extend(tail);
+                "viking://user/alice/sessions/s1",
+                "--ttl-relative",
+                "30",
+            ],
+            vec!["ov", "session", "new", "--ttl-relative", "30"],
+            vec!["ov", "session", "config", "set", "s1", "--inherit-ttl"],
+        ] {
             assert!(Cli::try_parse_from(args).is_err());
         }
+        assert!(
+            Cli::try_parse_from(["ov", "ttl", "get", "viking://user/alice/sessions/s1"]).is_ok()
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""One lifetime per event date bucket or session, independent of L0/L1."""
+"""One immutable lifetime per event date bucket; sessions own their renewal."""
 
 import hashlib
 import json
@@ -9,8 +9,8 @@ from functools import wraps
 
 from openviking.config.ttl import resolve_ttl_config
 from openviking.core.ttl import (
+    OBJECT_TYPE_EVENT,
     OBJECT_TYPE_SESSION,
-    apply_ttl_fields,
     freeze_ttl_fields,
     hidden_by_ttl,
     ttl_metadata_uri,
@@ -32,9 +32,21 @@ async def read_directory_fields(fs, uri, *, ctx):
         await fs._async_agfs.stat(path, bypass_cache=True)
         fields = json.loads(fs._handle_agfs_read(await fs._async_agfs.read(path)))
     except Exception as exc:
-        if is_storage_not_found(exc):
+        if not is_storage_not_found(exc):
+            raise
+        if kind != OBJECT_TYPE_EVENT:
             return {}
-        raise
+        # Read the previous sidecar during upgrade without changing its deadline.
+        try:
+            fields = json.loads(
+                fs._handle_agfs_read(
+                    await fs._async_agfs.read(fs._uri_to_path(root + "/.ttl.json", ctx=ctx))
+                )
+            )
+        except Exception as legacy_error:
+            if is_storage_not_found(legacy_error):
+                return {}
+            raise
     if not isinstance(fields, dict):
         raise ValueError(f"Invalid TTL metadata: {root}")
     pending = fields.pop("_ttl_pending", None)
@@ -69,18 +81,36 @@ def is_ttl_content(uri):
     )
 
 
+async def _has_content(fs, path):
+    for entry in await fs._ls_entries(path):
+        name = entry.get("name", "")
+        if not name or name in {".", ".."}:
+            continue
+        child = path.rstrip("/") + "/" + name
+        if entry.get("isDir"):
+            if await _has_content(fs, child):
+                return True
+        elif is_ttl_content(child):
+            return True
+    return False
+
+
 @asynccontextmanager
 async def content_update(fs, uri, content, *, ctx, lease_ref=None):
-    """Publish a bucket renewal only after content is durable, under shared metadata and content locks.
+    """Initialize a new bucket only after its first successful content write.
 
     A durable intent lets readers and cleanup recover the write if metadata
     finalization is interrupted. Failed writes retain the old deadline.
     """
     target = ttl_object_for_uri(uri)
-    if target is None or not is_ttl_content(uri):
+    if target is None:
         yield lease_ref
         return
     kind, root = target
+    if uri.rstrip("/") in {ttl_metadata_uri(kind, root), root + "/.ttl.json"}:
+        yield lease_ref
+        return
+    content_file = is_ttl_content(uri)
     # Serialize the shared metadata, while an exact body lock fences directory
     # cleanup. This also composes with callers already holding a file lease:
     # upgrading two sibling file locks to tree locks would deadlock.
@@ -97,12 +127,31 @@ async def content_update(fs, uri, content, *, ctx, lease_ref=None):
         if not previous:
             record = await fs.ttl_registry.get(ctx.account_id, root)
             if record:
-                previous = {"expires_at": record.expires_at, "ttl_generation": record.generation}
+                previous = {"expires_at": record.expires_at}
         if hidden_by_ttl(previous.get("expires_at")):
             raise NotFoundError(root, "directory")
         if kind == OBJECT_TYPE_SESSION:
-            # Formal Session writes own relative renewal; raw children only
-            # share the expiry fence and cannot race directory cleanup.
+            if not previous and not (uri == root + "/messages.jsonl" and not content):
+                # Legacy sessions may have messages without metadata. A deleted
+                # session has neither, so delayed archive writes stop here.
+                try:
+                    await fs._async_agfs.stat(
+                        fs._uri_to_path(root + "/messages.jsonl", ctx=ctx), bypass_cache=True
+                    )
+                except Exception as exc:
+                    if is_storage_not_found(exc):
+                        await fs._remove_empty_lock_directory(fs._uri_to_path(root, ctx=ctx))
+                        raise NotFoundError(root, "session") from exc
+                    raise
+            yield lease
+            return
+        if not content_file:
+            # Derived summaries never initialize a new event bucket. Checking
+            # under the metadata lock also prevents a late summary resurrecting it.
+            if not previous:
+                if not await _has_content(fs, fs._uri_to_path(root, ctx=ctx)):
+                    await fs._remove_empty_lock_directory(fs._uri_to_path(root, ctx=ctx))
+                    raise NotFoundError(root, "directory")
             yield lease
             return
         existed = True
@@ -113,23 +162,17 @@ async def content_update(fs, uri, content, *, ctx, lease_ref=None):
                 raise
             existed = False
         if existed and not previous:
-            entries = await fs._ls_entries(fs._uri_to_path(root, ctx=ctx))
-            existed = any(
-                entry.get("isDir") or is_ttl_content(root + "/" + entry.get("name", ""))
-                for entry in entries
-                if entry.get("name") not in {".", ".."}
-            )
-        desired = (
-            apply_ttl_fields(root, {}, existing_fields=previous)
-            if previous
-            else (
-                {}
-                if existed
-                else freeze_ttl_fields(root, config=await resolve_ttl_config(fs, ctx.account_id))
-                or {}
-            )
-        )
-        if not desired:
+            existed = await _has_content(fs, fs._uri_to_path(root, ctx=ctx))
+        # A managed event bucket never renews. An existing unmanaged bucket
+        # remains unmanaged even when its root policy has since changed.
+        if previous.get("expires_at") or existed:
+            yield lease
+            return
+        desired = {
+            **previous,
+            **(freeze_ttl_fields(root, config=await resolve_ttl_config(fs, ctx.account_id)) or {}),
+        }
+        if not desired.get("expires_at"):
             yield lease
             return
         try:

@@ -91,32 +91,6 @@ def test_global_alias_round_trips():
     assert dumped["global"]["ttl_days"] == 3
 
 
-def test_nearest_directory_override_inherits_explicit_parent():
-    config = TTLConfig(
-        **{"global": {"mode": "days", "ttl_days": 7}},
-        user_events={"mode": "days", "ttl_days": 30},
-        directories={
-            "viking://user/u1/memories/events": {"mode": "days", "ttl_days": 14},
-            "viking://user/u1/memories/events/2026/": {"mode": "disabled"},
-            "viking://user/u1/memories/events/2026/09": {"mode": "inherit"},
-        },
-    )
-    assert config.resolve_uri("viking://user/u1/memories/events/e.md", "user_events") == 14
-    assert config.resolve_uri("viking://user/u1/memories/events/2026/e.md", "user_events") is None
-    assert (
-        config.resolve_uri("viking://user/u1/memories/events/2026/09/e.md", "user_events") is None
-    )
-
-
-def test_directory_matching_respects_path_boundaries():
-    config = TTLConfig(
-        directories={"viking://user/u1/memories/events/2026/01": {"mode": "days", "ttl_days": 9}}
-    )
-    assert (
-        config.resolve_uri("viking://user/u1/memories/events/2026/010/e.md", "user_events") is None
-    )
-
-
 def test_directory_only_policy_enables_ttl_and_normalizes_slash():
     config = TTLConfig(directories={"viking://user/u1/sessions/": {"mode": "days", "ttl_days": 2}})
     assert config.enabled is True
@@ -145,7 +119,7 @@ def test_resources_are_rejected():
 
 
 @pytest.mark.parametrize("suffix", ["notes.md", "2026/09/28/event.md", "2026/02/30"])
-def test_only_date_directories_accept_event_policy(suffix):
+def test_non_root_event_paths_reject_policy(suffix):
     with pytest.raises(ValidationError):
         TTLConfig(
             directories={
@@ -165,3 +139,30 @@ def test_session_defaults_reject_absolute_retention():
     ):
         with pytest.raises(ValueError, match="relative retention only"):
             TTLConfig.model_validate(value)
+
+
+@pytest.mark.parametrize("suffix", ["/2026", "/2026/09", "/2026/09/30", "/2026/09/30/a.md"])
+def test_only_events_root_accepts_policy(suffix):
+    with pytest.raises(ValidationError):
+        TTLConfig(
+            directories={
+                "viking://user/u1/memories/events" + suffix: {"mode": "days", "ttl_days": 7}
+            }
+        )
+
+
+def test_root_policy_overrides_type_then_library_default():
+    config = TTLConfig.model_validate(
+        {
+            "global": {"mode": "days", "ttl_days": 7},
+            "user_events": {"mode": "days", "ttl_days": 30},
+            "directories": {"viking://user/u1/memories/events": {"mode": "days", "ttl_days": 14}},
+        }
+    )
+    assert (
+        config.resolve_uri("viking://user/u1/memories/events/2026/09/30/a.md", "user_events") == 14
+    )
+    assert (
+        config.resolve_uri("viking://user/u2/memories/events/2026/09/30/a.md", "user_events") == 30
+    )
+    assert config.resolve_uri("viking://user/u2/sessions/s1", "sessions") == 7

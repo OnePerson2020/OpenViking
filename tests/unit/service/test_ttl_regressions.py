@@ -141,20 +141,20 @@ async def test_event_directory_is_visible_without_parsing_it_as_a_file(monkeypat
         ({"mode": "disabled"}, None),
     ],
 )
-def test_inherit_preserves_nearest_explicit_ancestor(parent_policy, expected):
+def test_root_policy_overrides_global(parent_policy, expected):
     parent = "viking://user/u1/memories/events"
     config = TTLConfig.model_validate(
         {
             "global": {"mode": "days", "ttl_days": 1},
-            "directories": {parent: parent_policy, parent + "/2026": {"mode": "inherit"}},
+            "directories": {parent: parent_policy},
         }
     )
-    actual = ttl.resolve_ttl_days(parent + "/2026/e.md", config)
+    actual = config.resolve_uri(parent + "/2026/09/28/e.md", "user_events")
     assert actual == expected, f"parent={parent_policy}; expected {expected}; got {actual}"
 
 
 @pytest.mark.asyncio
-async def test_expired_event_keeps_its_parent_abstract(monkeypatch):
+async def test_expired_bucket_hides_its_own_abstract(monkeypatch):
     fs = VikingFS(agfs=_DummyAgfs())
     ctx = _default_ctx()
     parent = "viking://user/default/memories/events/2026/09/28"
@@ -180,19 +180,21 @@ async def test_expired_event_keeps_its_parent_abstract(monkeypatch):
     monkeypatch.setattr(fs.ttl_registry, "account_may_have_records", AsyncMock(return_value=True))
     with pytest.raises(NotFoundError):
         await fs.read_file(event, ctx=ctx)
-    summary = await fs.abstract(parent, ctx=ctx)
-    assert secret in summary  # L0 is intentionally retained after the L2 event expires.
+    with pytest.raises(NotFoundError):
+        await fs.abstract(
+            parent, ctx=ctx
+        )  # L0 is intentionally retained after the L2 event expires.
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "expiry,visible",
     [
-        ("2000-01-01T00:00:00.000Z", True),
+        ("2000-01-01T00:00:00.000Z", False),
         ("2999-01-01T00:00:00.000Z", True),
     ],
 )
-async def test_summary_is_retained_in_all_public_read_forms(monkeypatch, expiry, visible):
+async def test_summary_frontmatter_does_not_override_owner_deadline(monkeypatch, expiry, visible):
     from openviking.storage.abstract_overview import render_abstract_overview
 
     fs = VikingFS(agfs=_DummyAgfs())
@@ -200,11 +202,12 @@ async def test_summary_is_retained_in_all_public_read_forms(monkeypatch, expiry,
     parent = "viking://user/default/memories/events/2026/09/28"
     path = fs._uri_to_path(parent, ctx=ctx)
     files = {
+        path + "/.meta.json": json.dumps({"expires_at": expiry}).encode(),
         path + "/.abstract.md": render_abstract_overview(0, parent, "secret")
-        .replace("---\n", f"---\nexpires_at: {expiry}\n", 1)
+        .replace("---\n", "---\nexpires_at: 2999-12-01T00:00:00.000Z\n", 1)
         .encode(),
         path + "/.overview.md": render_abstract_overview(1, parent, "secret")
-        .replace("---\n", f"---\nexpires_at: {expiry}\n", 1)
+        .replace("---\n", "---\nexpires_at: 2999-12-01T00:00:00.000Z\n", 1)
         .encode(),
     }
 
@@ -220,8 +223,12 @@ async def test_summary_is_retained_in_all_public_read_forms(monkeypatch, expiry,
         fs._async_agfs, "read", AsyncMock(side_effect=lambda candidate: files[candidate])
     )
     monkeypatch.setattr(fs.ttl_registry, "account_may_have_records", AsyncMock(return_value=True))
-    assert ("secret" in await fs.abstract(parent, ctx=ctx)) is visible
-    assert ("secret" in await fs.overview(parent, ctx=ctx)) is visible
+    for read in (fs.abstract, fs.overview):
+        if visible:
+            assert "secret" in await read(parent, ctx=ctx)
+        else:
+            with pytest.raises(NotFoundError):
+                await read(parent, ctx=ctx)
     for filename in (".abstract.md", ".overview.md"):
         for read in (fs.read_file, fs.read_file_bytes):
             if visible:
@@ -280,7 +287,6 @@ async def test_cleanup_reconciles_persisted_phase2_completion_after_crash(monkey
             archive_index=1,
             memories_extracted={},
             telemetry_snapshot=None,
-            ttl_generation="generation-1",
         )
     assert (
         json.loads(files[archive + "/.meta.json"])["phase2_completed_at"]

@@ -106,43 +106,6 @@ def test_event_directory_is_not_an_object_even_with_a_file_extension():
 # ── resolve_ttl_days / freeze_ttl_fields ────────────────────────────────────
 
 
-def test_resolve_ttl_days_uses_scope_then_global(monkeypatch):
-    config = TTLConfig(
-        **{"global": {"mode": "days", "ttl_days": 7}},
-        user_events={"mode": "days", "ttl_days": 30},
-        # sessions inherits -> global (7); peer_events disabled -> off
-        peer_events={"mode": "disabled"},
-    )
-    _install_config(monkeypatch, config)
-
-    assert ttl.resolve_ttl_days("viking://user/u1/memories/events/2026/09/28") == 30
-    assert ttl.resolve_ttl_days("viking://user/u1/sessions/s1") == 7
-    assert ttl.resolve_ttl_days("viking://user/u1/peers/p1/memories/events/e.md") is None
-    assert ttl.resolve_ttl_days("viking://user/u1/resources/r.md") is None
-    # Out-of-scope URIs are never TTL'd even when global is on.
-    assert ttl.resolve_ttl_days("viking://user/u1/skills/r.md") is None
-
-
-def test_resolve_ttl_days_none_when_config_unavailable(monkeypatch):
-    _install_config(monkeypatch, None)
-    assert ttl.resolve_ttl_days("viking://user/u1/sessions/s1") is None
-
-
-def test_resolve_ttl_days_uses_nearest_concrete_directory(monkeypatch):
-    config = TTLConfig(
-        user_events={"mode": "days", "ttl_days": 30},
-        directories={
-            "viking://user/u1/memories/events/2026": {"mode": "days", "ttl_days": 5},
-            "viking://user/u1/memories/events/2026/09": {"mode": "disabled"},
-        },
-    )
-    _install_config(monkeypatch, config)
-    assert ttl.resolve_ttl_days("viking://user/u1/memories/events/2026/e.md") == 5
-    assert ttl.resolve_ttl_days("viking://user/u1/memories/events/2026/09/e.md") is None
-    # An out-of-scope URI never becomes TTL-managed merely because configured.
-    assert ttl.resolve_ttl_days("viking://user/u1/resources/project/r.md") is None
-
-
 def test_freeze_ttl_fields_snapshot(monkeypatch):
     config = TTLConfig(user_events={"mode": "days", "ttl_days": 10})
     _install_config(monkeypatch, config)
@@ -152,8 +115,6 @@ def test_freeze_ttl_fields_snapshot(monkeypatch):
         "viking://user/u1/memories/events/2026/09/28", received_at=received
     )
     assert snap is not None
-    generation = snap.pop("ttl_generation")
-    assert generation
     assert snap == {
         "ttl_days": 10,
         "received_at": "2026-01-01T00:00:00.000Z",
@@ -177,50 +138,6 @@ def test_freeze_ttl_fields_naive_received_at_treated_as_utc(monkeypatch):
     snap = ttl.freeze_ttl_fields("viking://user/u1/sessions/s1", received_at=naive)
     assert snap["received_at"] == "2026-05-01T12:00:00.000Z"
     assert snap["expires_at"] == "2026-05-02T12:00:00.000Z"
-
-
-def test_apply_ttl_fields_owns_creation_and_renews_relative_ttl_on_update(monkeypatch):
-    config = TTLConfig(user_events={"mode": "days", "ttl_days": 3})
-    _install_config(monkeypatch, config)
-    received = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    created = ttl.apply_ttl_fields(
-        "viking://user/u1/memories/events/2026/09/28",
-        {"title": "x", "ttl_days": 999, "expires_at": "2999-01-01T00:00:00Z"},
-        received_at=received,
-    )
-    assert created["ttl_days"] == 3
-    assert created["expires_at"] == "2026-01-04T00:00:00.000Z"
-    updated = ttl.apply_ttl_fields(
-        "viking://user/u1/memories/events/2026/09/28",
-        {"title": "y", "ttl_days": 1},
-        existing_fields=created,
-        received_at=datetime(2026, 1, 10, tzinfo=timezone.utc),
-    )
-    assert updated["title"] == "y"
-    assert updated["ttl_days"] == 3
-    assert updated["received_at"] == "2026-01-10T00:00:00.000Z"
-    assert updated["expires_at"] == "2026-01-13T00:00:00.000Z"
-    assert updated["ttl_generation"] == created["ttl_generation"]
-
-
-def test_apply_ttl_fields_preserves_explicit_absolute_deadline_on_update():
-    existing = {
-        "received_at": "2026-01-01T00:00:00.000Z",
-        "expires_at": "2026-02-01T00:00:00.000Z",
-        "ttl_generation": "absolute-generation",
-    }
-    updated = ttl.apply_ttl_fields(
-        "viking://user/u1/memories/events/2026/09/28",
-        {"title": "changed"},
-        existing_fields=existing,
-        received_at=datetime(2026, 1, 10, tzinfo=timezone.utc),
-    )
-    assert updated == {
-        "title": "changed",
-        **existing,
-        "received_at": "2026-01-10T00:00:00.000Z",
-        "ttl_days": None,
-    }
 
 
 def test_compute_expires_at_day_granularity():
@@ -277,24 +194,3 @@ def test_enabled_config_hides_expired_only(monkeypatch):
     assert ttl.hidden_by_ttl("2999-01-01T00:00:00.000Z", now=now) is False
     # Absent expiry stays visible even with TTL on.
     assert ttl.hidden_by_ttl("", now=now) is False
-
-
-def test_session_content_time_recovers_legacy_renewal_before_policy_edit():
-    fields = {
-        "created_at": "2026-01-01T00:00:00Z",
-        "received_at": "2026-01-01T00:00:00Z",
-        "last_message_at": "2026-01-02T00:00:00Z",
-        "ttl_days": 7,
-        "expires_at": "2026-01-10T00:00:00Z",
-    }
-    assert ttl.session_content_updated_at(fields) == datetime(2026, 1, 3, tzinfo=timezone.utc)
-    assert fields["ttl_days"] == 7
-
-
-def test_session_content_time_uses_last_message_without_ttl():
-    assert ttl.session_content_updated_at(
-        {
-            "created_at": "2026-01-01T00:00:00Z",
-            "last_message_at": "2026-01-04T00:00:00Z",
-        }
-    ) == datetime(2026, 1, 4, tzinfo=timezone.utc)

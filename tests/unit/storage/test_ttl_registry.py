@@ -94,14 +94,13 @@ class _MemoryAGFS:
         return values[offset:] if limit is None else values[offset : offset + limit]
 
 
-def _record(*, generation="g1", uri="viking://user/u1/sessions/s1"):
+def _record(*, uri="viking://user/u1/sessions/s1"):
     return TTLRecord(
         object_uri=uri,
         object_type="session",
         account_id="acct",
         user_id="u1",
         expires_at="2026-09-23T00:00:00.000Z",
-        generation=generation,
     )
 
 
@@ -160,7 +159,6 @@ async def test_reader_sees_first_ttl_object_imported_by_another_worker(monkeypat
     ctx = RequestContext(user=UserIdentifier("acct", "u1"), role=Role.ROOT)
     fs._async_agfs.stat = AsyncMock(return_value={"isDir": False})
     fs._async_agfs.read = AsyncMock(return_value=b'{"expires_at":"2000-01-01T00:00:00Z"}')
-    monkeypatch.setattr("openviking.storage.viking_fs._access.ttl_enabled", lambda: False)
     if read_kind == "grep":
         fs._async_agfs.grep = AsyncMock(
             return_value={"matches": [{"file": "expired.md", "line": 1, "content": "body"}]}
@@ -225,18 +223,21 @@ async def test_get_rejects_record_key_mismatch():
 
 
 @pytest.mark.asyncio
-async def test_remove_is_generation_fenced_and_missing_is_idempotent():
+async def test_remove_checks_current_deadline_and_missing_is_idempotent():
     agfs = _MemoryAGFS()
     registry = TTLRegistry(agfs)
     record = _record()
     await registry.upsert(record)
 
-    assert await registry.remove_if_generation("acct", record.object_uri, "stale") is False
+    assert (
+        await registry.remove_if_current(replace(record, expires_at="2000-01-01T00:00:00Z"))
+        is False
+    )
     assert agfs.rm_calls == []
-    assert await registry.remove_if_generation("acct", record.object_uri, "g1") is True
+    assert await registry.remove_if_current(record) is True
     assert registry.record_path("acct", record.object_uri) not in agfs.files
     assert not any("/due/" in path for path in agfs.files)
-    assert await registry.remove_if_generation("acct", record.object_uri, "g1") is False
+    assert await registry.remove_if_current(record) is False
 
 
 @pytest.mark.asyncio
@@ -281,7 +282,7 @@ async def test_retry_backoff_is_durable_and_cannot_postpone_replacement():
     claims = [item async for item in TTLRegistry(agfs).claim_due(now=now + timedelta(days=1))]
     assert claims[0][1]["task_id"] == "task-1"
     assert claims[0][1]["retry_count"] == 2
-    await registry.upsert(replace(record, generation="new"))
+    await registry.upsert(replace(record, expires_at="2999-01-01T00:00:00Z"))
     assert not await registry.defer_retry(
         record, retry_count=3, task_id="old", next_retry_at="2999-01-01T00:00:00.000Z"
     )
@@ -342,7 +343,7 @@ async def test_due_claims_are_oldest_first_and_obey_object_byte_and_time_budgets
     ] == [older]
 
 
-def test_record_from_fields_requires_complete_frozen_fence():
+def test_record_from_fields_requires_expiry():
     ctx = RequestContext(user=UserIdentifier("acct", "u1"), role=Role.ROOT)
     uri = "viking://user/u1/memories/events/e.md"
 
@@ -350,7 +351,7 @@ def test_record_from_fields_requires_complete_frozen_fence():
     record = record_from_fields(
         uri=uri,
         object_type="event",
-        fields={"expires_at": "2026-09-23T00:00:00.000Z", "ttl_generation": "g1"},
+        fields={"expires_at": "2026-09-23T00:00:00.000Z"},
         ctx=ctx,
     )
     assert record == TTLRecord(
@@ -359,5 +360,4 @@ def test_record_from_fields_requires_complete_frozen_fence():
         account_id="acct",
         user_id="u1",
         expires_at="2026-09-23T00:00:00.000Z",
-        generation="g1",
     )

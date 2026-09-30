@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import unquote, urlsplit
 
 from openviking.core.namespace import classify_uri
-from openviking.core.ttl import hidden_by_ttl, ttl_object_for_uri
 from openviking.observability.context import (
     bind_root_observability_context,
     reset_root_observability_context,
@@ -49,7 +48,6 @@ from openviking.storage.abstract_overview import (
     plan_abstract_overview_refresh,
     write_abstract_overview,
 )
-from openviking.storage.directory_ttl import read_directory_fields
 from openviking.storage.errors import LockAcquisitionError
 from openviking.storage.index_action import FieldPatch
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
@@ -907,28 +905,6 @@ class SemanticProcessor(DequeueHandlerBase):
                 item_uri = VikingURI(dir_uri).join(name).uri
                 file_paths.append(item_uri)
         file_paths.sort()
-        ttl_snapshot = None
-        if ttl_object_for_uri(dir_uri) is not None:
-            fields = await read_directory_fields(viking_fs, dir_uri, ctx=ctx)
-            ttl_snapshot = (fields.get("ttl_generation"), fields.get("expires_at"))
-
-        async def _ttl_sources_changed() -> bool:
-            if ttl_snapshot is None:
-                return False
-            current_entries = await viking_fs.ls(dir_uri, node_limit=LS_ALL_NODES, ctx=ctx)
-            current_paths = sorted(
-                VikingURI(dir_uri).join(str(entry.get("name") or "")).uri
-                for entry in current_entries
-                if entry.get("name")
-                and not str(entry.get("name")).startswith(".")
-                and not entry.get("isDir", False)
-            )
-            if current_paths != file_paths:
-                return True
-            fields = await read_directory_fields(viking_fs, dir_uri, ctx=ctx)
-            current = (fields.get("ttl_generation"), fields.get("expires_at"))
-            return current != ttl_snapshot or hidden_by_ttl(current[1])
-
         if not file_paths:
             logger.info(f"No memory files found in {dir_uri}")
             return
@@ -1058,7 +1034,6 @@ class SemanticProcessor(DequeueHandlerBase):
                 lock=lock,
                 total_entries=len(file_paths),
                 sampled_entries=len(sampled_summaries),
-                is_stale_locked=_ttl_sources_changed,
             )
         except LockAcquisitionError:
             raise

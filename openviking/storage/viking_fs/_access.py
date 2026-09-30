@@ -17,15 +17,12 @@ from openviking.core.namespace import (
     may_include_hidden_actor_peers,
 )
 from openviking.core.ttl import (
-    hidden_by_ttl,
-    ttl_enabled,
     ttl_object_for_uri,
     ttl_scope_for_uri,
 )
 from openviking.resource.watch_storage import is_watch_task_control_uri
 from openviking.server.error_mapping import is_not_found_error, is_storage_not_found
 from openviking.server.identity import RequestContext, Role
-from openviking.storage.abstract_overview import is_abstract_overview_uri
 from openviking.storage.acl import (
     AclAction,
     AclEntry,
@@ -793,50 +790,22 @@ class _AccessMixin:
         *,
         path: Optional[str] = None,
         require_source: bool = False,
+        ttl_view=None,
     ) -> bool:
-        """Return object-level TTL visibility without recursing through VikingFS.
+        """Check the owner deadline for every level, including directories.
 
-        Event date directories store expiry in .ttl.json; sessions store it
-        in their root .meta.json. All L2 content shares its owner's deadline,
-        while L0/L1 summaries and their supporting directories stay visible.
-        Vector candidates require a readable source: stale index rows must not
-        become visible when cleanup has already removed their source metadata.
+        Source metadata remains authoritative when new TTL policies are off.
+        Vector hits additionally require a live source after physical cleanup.
         """
-        # TTL controls L2 content only; summaries and their containers survive.
-        if is_abstract_overview_uri(uri):
+        if ttl_scope_for_uri(uri) is None:
             return True
-        scope = ttl_scope_for_uri(uri)
-        if scope is None:
-            return True
-        if not ttl_enabled() and not await self.ttl_registry.account_may_have_records(
-            ctx.account_id
-        ):
-            # Never cache a miss: another worker can import the first frozen TTL
-            # object while policy is disabled. Default-off reads skip metadata.
-            return True
-        if not require_source:
-            for candidate in [path] if path is not None else self._read_paths(uri, ctx=ctx):
-                try:
-                    info = await self._async_agfs.stat(candidate, bypass_cache=True)
-                except Exception as exc:
-                    if is_storage_not_found(exc):
-                        continue
-                    raise
-                if info.get("isDir", False):
-                    return True  # Retained L0/L1 need their directory scaffolding.
-                break
         target = ttl_object_for_uri(uri)
         if target is None:
             return True
-        from openviking.storage.directory_ttl import read_directory_fields
+        from openviking.storage.ttl_view import TTLView
 
-        fields = await read_directory_fields(self, uri, ctx=ctx)
-        if hidden_by_ttl(fields.get("expires_at")):
+        if not await (ttl_view or TTLView(self, ctx)).visible(uri):
             return False
-        if not fields:
-            record = await self.ttl_registry.get(ctx.account_id, target[1])
-            if record and hidden_by_ttl(record.expires_at):
-                return False
         if require_source:
             try:
                 await self._async_agfs.stat(self._uri_to_path(uri, ctx=ctx), bypass_cache=True)
@@ -1037,12 +1006,15 @@ class _AccessMixin:
         ctx: Optional[RequestContext] = None,
     ) -> tuple[List[tuple[Dict[str, Any], str]], int, bool]:
         """Return one mapped RagFS page, consumed count, and exhaustion state."""
+        from openviking.storage.ttl_view import TTLView
+
         real_ctx = self._ctx_or_default(ctx)
+        ttl_view = TTLView(self, real_ctx)
         if self._is_session_root_uri(uri):
             items = await self._session_root_items(uri, real_ctx)
             visible_items = []
             for entry, entry_uri in items:
-                if await self._ttl_uri_visible(entry_uri, real_ctx):
+                if await self._ttl_uri_visible(entry_uri, real_ctx, ttl_view=ttl_view):
                     visible_items.append((entry, entry_uri))
             return visible_items, len(items), True
 
@@ -1086,7 +1058,9 @@ class _AccessMixin:
                     ctx=ctx,
                 )
                 entry_path = f"{path.rstrip('/')}/{entry.get('name', '')}"
-                if not await self._ttl_uri_visible(entry_uri, real_ctx, path=entry_path):
+                if not await self._ttl_uri_visible(
+                    entry_uri, real_ctx, path=entry_path, ttl_view=ttl_view
+                ):
                     continue
                 by_uri.setdefault(entry_uri, (entry, entry_uri))
             if not merge_paths:

@@ -71,7 +71,13 @@ def setup(monkeypatch):
         return {"isDir": False}
 
     fs._async_agfs.stat = stat
-    fs._async_agfs.read = AsyncMock(side_effect=lambda path: files[path])
+
+    async def read(path):
+        if path not in files:
+            raise FileNotFoundError(path)
+        return files[path]
+
+    fs._async_agfs.read = AsyncMock(side_effect=read)
     fs.ttl_registry.account_may_have_records = AsyncMock(return_value=True)
     fs.ttl_registry.get = AsyncMock(return_value=None)
     monkeypatch.setattr("openviking.storage.viking_fs.get_viking_fs", lambda: fs)
@@ -80,7 +86,7 @@ def setup(monkeypatch):
     def source(uri, expiry=None):
         fields = {"expires_at": expiry} if expiry else {}
         files[fs._uri_to_path(uri, ctx=ctx)] = b"body"
-        files[fs._uri_to_path(uri.rsplit("/", 1)[0] + "/.ttl.json", ctx=ctx)] = json.dumps(
+        files[fs._uri_to_path(uri.rsplit("/", 1)[0] + "/.meta.json", ctx=ctx)] = json.dumps(
             fields
         ).encode()
 
@@ -157,18 +163,29 @@ async def test_offset_counts_live_rows_and_preserves_legacy_records(setup):
     result = await s.backend.filter(
         Eq("level", 2), limit=2, offset=1, output_fields=["uri"], ctx=s.ctx, include_expired=False
     )
-    assert result == [{"uri": f"{ROOT}/2026/09/04/3.md"}, {"uri": f"{ROOT}/2026/09/05/4.md"}]
+    assert [row["uri"] for row in result] == [f"{ROOT}/2026/09/04/3.md", f"{ROOT}/2026/09/05/4.md"]
+    assert all("expires_at" in row for row in result)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "root", [ROOT, "viking://resources/doc", "viking://user/alice/sessions/s1"]
+    "root",
+    [ROOT, "viking://resources/doc", ROOT + "/2026/09/01", "viking://user/alice/sessions/s1"],
 )
-async def test_all_summary_levels_remain_visible_after_l2_expires(setup, root):
+async def test_summaries_follow_owner_expiry_while_containers_stay_visible(setup, root):
     s = setup
+    from openviking.core.ttl import ttl_object_for_uri
+
+    target = ttl_object_for_uri(root)
+    if target:
+        s.files[s.fs._uri_to_path(root, ctx=s.ctx)] = b"directory"
+        s.files[s.fs._uri_to_path(root + "/.meta.json", ctx=s.ctx)] = json.dumps(
+            {"expires_at": PAST}
+        ).encode()
     for level in (0, 1):
-        s.rows.append({"uri": root, "level": level, "abstract": "retained summary"})
-    assert await s.backend.query(ctx=s.ctx, include_expired=False) == s.rows
+        s.rows.append({"uri": root, "level": level, "abstract": "summary"})
+    actual = await s.backend.query(ctx=s.ctx, include_expired=False)
+    assert actual == ([] if target else [{**row, "expires_at": None} for row in s.rows])
 
 
 @pytest.mark.asyncio
@@ -227,12 +244,14 @@ async def test_backend_ignoring_exclusion_fails_without_looping_forever(setup):
 
 
 @pytest.mark.asyncio
-async def test_default_off_has_no_per_candidate_file_reads(setup):
+async def test_default_off_still_checks_stored_directory_deadlines(setup):
     s = setup
     s.fs.ttl_registry.account_may_have_records.return_value = False
-    s.rows.append({"uri": ROOT + "/2026/09/04/legacy.md", "level": 2})
-    assert await s.backend.query(ctx=s.ctx, include_expired=False) == s.rows
-    s.fs._async_agfs.read.assert_not_awaited()
+    uri = ROOT + "/2026/09/04/legacy.md"
+    s.source(uri, PAST)
+    s.rows.append({"uri": uri, "level": 2})
+    assert await s.backend.query(ctx=s.ctx, include_expired=False) == []
+    s.fs._async_agfs.read.assert_awaited()
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""Correctness tests for registry-driven, generation-fenced TTL cleanup."""
+"""Correctness tests for registry-driven directory TTL cleanup."""
 
 from __future__ import annotations
 
@@ -45,7 +45,6 @@ SESSION_URI = "viking://user/u1/sessions/s1"
 EVENT_URI = "viking://user/u1/memories/events/2026/09/28"
 PAST = "2020-01-01T00:00:00.000Z"
 FUTURE = "2999-01-01T00:00:00.000Z"
-GENERATION = "generation-1"
 
 
 def _record(
@@ -53,7 +52,6 @@ def _record(
     *,
     object_uri: str = SESSION_URI,
     expires_at: str = PAST,
-    generation: str = GENERATION,
 ) -> TTLRecord:
     return TTLRecord(
         object_uri=object_uri,
@@ -61,7 +59,6 @@ def _record(
         account_id="acct",
         user_id="u1",
         expires_at=expires_at,
-        generation=generation,
     )
 
 
@@ -69,12 +66,12 @@ def _message(record: TTLRecord, *, task_id: str = "task-1", retry_count: int = 0
     return ttl_cleanup._ttl_cleanup_message(record=record, task_id=task_id, retry_count=retry_count)
 
 
-def _session_meta(expires_at: str = PAST, generation: str = GENERATION) -> str:
-    return json.dumps({"expires_at": expires_at, "ttl_generation": generation})
+def _session_meta(expires_at: str = PAST) -> str:
+    return json.dumps({"expires_at": expires_at})
 
 
-def _event_body(expires_at: str = PAST, generation: str = GENERATION) -> str:
-    fields = {"expires_at": expires_at, "ttl_generation": generation}
+def _event_body(expires_at: str = PAST) -> str:
+    fields = {"expires_at": expires_at}
     return json.dumps(fields)
 
 
@@ -91,7 +88,7 @@ def _make_service(
         ),
         upsert=AsyncMock(),
         defer_retry=AsyncMock(return_value=True),
-        remove_if_generation=AsyncMock(return_value=True),
+        remove_if_current=AsyncMock(return_value=True),
     )
     read_file = (
         AsyncMock(side_effect=live_content)
@@ -150,12 +147,12 @@ def tracker():
 @pytest.mark.parametrize(
     ("record", "content", "recursive", "lock_name"),
     [
-        (_record(), _session_meta(), True, "pathlock_acquire_tree"),
+        (_record(), _session_meta(), True, "pathlock_acquire_batch"),
         (
             _record(OBJECT_TYPE_EVENT, object_uri=EVENT_URI),
             _event_body(),
             True,
-            "pathlock_acquire_tree",
+            "pathlock_acquire_batch",
         ),
     ],
 )
@@ -174,13 +171,11 @@ async def test_expired_object_is_deleted_strictly_and_registry_removed(
         ctx=viking_fs.rm.await_args.kwargs["ctx"],
         lease_ref=viking_fs.rm.await_args.kwargs["lease_ref"],
         strict=True,
-        preserve_summaries=True,
+        file_locks=True,
     )
     assert viking_fs.rm.await_count == 1
     viking_fs._delete_from_vector_store.assert_not_awaited()
-    registry.remove_if_generation.assert_awaited_once_with(
-        record.account_id, record.object_uri, record.generation
-    )
+    registry.remove_if_current.assert_awaited_once_with(record)
     assert viking_fs._count_cache == {}
     task = await tracker.get(
         "task-1",
@@ -203,7 +198,7 @@ async def test_missing_source_still_runs_strict_delete_for_orphan_vectors(tracke
     assert result.outcome is ProcessOutcome.SUCCESS
     assert viking_fs.rm.await_count == 1
     assert viking_fs.rm.await_args_list[0].kwargs["strict"] is True
-    registry.remove_if_generation.assert_awaited_once()
+    registry.remove_if_current.assert_awaited_once()
     task = await tracker.get(
         "task-1",
         account_id=ttl_cleanup.SYSTEM_TASK_ACCOUNT_ID,
@@ -223,7 +218,7 @@ async def test_renewal_wins_under_object_lock(tracker):
 
     assert result.outcome is ProcessOutcome.SUCCESS
     viking_fs.rm.assert_not_awaited()
-    registry.remove_if_generation.assert_not_awaited()
+    registry.remove_if_current.assert_not_awaited()
     task = await tracker.get(
         "task-1",
         account_id=ttl_cleanup.SYSTEM_TASK_ACCOUNT_ID,
@@ -245,32 +240,13 @@ async def test_future_live_expiry_repairs_earlier_registry_deadline(tracker):
     viking_fs.rm.assert_not_awaited()
     registry.upsert.assert_awaited_once()
     repaired = registry.upsert.await_args.args[0]
-    assert repaired.generation == registered.generation
     assert repaired.expires_at == FUTURE
 
 
 @pytest.mark.asyncio
-async def test_old_task_repairs_registry_instead_of_deleting_recreated_object(tracker):
-    old = _record(OBJECT_TYPE_EVENT, object_uri=EVENT_URI)
-    cleanup, viking_fs, registry, _ = _make_service(
-        record=old, live_content=_event_body(PAST, generation="generation-2")
-    )
-
-    result = await cleanup._process(_message(old))
-
-    assert result.outcome is ProcessOutcome.SUCCESS
-    viking_fs.rm.assert_not_awaited()
-    registry.upsert.assert_awaited_once()
-    replacement = registry.upsert.await_args.args[0]
-    assert replacement.object_uri == EVENT_URI
-    assert replacement.generation == "generation-2"
-    registry.remove_if_generation.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_stale_registry_generation_is_a_noop(tracker):
+async def test_stale_registry_deadline_is_a_noop(tracker):
     scheduled = _record()
-    current = _record(generation="generation-2")
+    current = _record(expires_at=FUTURE)
     cleanup, viking_fs, registry, _ = _make_service(record=current, live_content=_session_meta())
 
     result = await cleanup._process(_message(scheduled))
@@ -278,7 +254,7 @@ async def test_stale_registry_generation_is_a_noop(tracker):
     assert result.outcome is ProcessOutcome.SUCCESS
     viking_fs.read_file.assert_not_awaited()
     viking_fs.rm.assert_not_awaited()
-    registry.remove_if_generation.assert_not_awaited()
+    registry.remove_if_current.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -293,7 +269,7 @@ async def test_source_outage_with_not_found_text_retries_without_deleting(tracke
 
     assert result.outcome is ProcessOutcome.REQUEUED
     fs.rm.assert_not_awaited()
-    registry.remove_if_generation.assert_not_awaited()
+    registry.remove_if_current.assert_not_awaited()
     registry.defer_retry.assert_awaited_once()
 
 
@@ -310,7 +286,7 @@ async def test_delete_failure_is_requeued_without_terminal_failure(tracker):
     result = await cleanup._process(_message(record, retry_count=2))
 
     assert result.outcome is ProcessOutcome.REQUEUED
-    registry.remove_if_generation.assert_not_awaited()
+    registry.remove_if_current.assert_not_awaited()
     queue_manager.enqueue.assert_not_awaited()
     registry.defer_retry.assert_awaited_once()
     retry = registry.defer_retry.await_args.kwargs
@@ -415,20 +391,20 @@ async def test_retry_persistence_failure_leaves_delivery_unacknowledged(tracker)
 
 
 @pytest.mark.asyncio
-async def test_event_cleanup_preserves_summaries_and_does_not_schedule_rebuild(tracker):
+async def test_event_cleanup_deletes_whole_directory_without_scheduling_rebuild(tracker):
     record = _record(OBJECT_TYPE_EVENT, object_uri=EVENT_URI)
     cleanup, fs, registry, queues = _make_service(record=record, live_content=_event_body())
     result = await cleanup._process(_message(record))
     assert result.outcome is ProcessOutcome.SUCCESS
     assert [call.args[0] for call in fs.rm.await_args_list] == [EVENT_URI]
-    assert fs.rm.await_args.kwargs["preserve_summaries"] is True
+    assert fs.rm.await_args.kwargs["file_locks"] is True
     fs._delete_from_vector_store.assert_not_awaited()
     queues.get_queue(queues.SEMANTIC).enqueue.assert_not_awaited()
-    registry.remove_if_generation.assert_awaited_once()
+    registry.remove_if_current.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_terminal_delivery_is_idempotent(tracker):
+async def test_completed_task_does_not_replace_current_registry_check(tracker):
     record = _record()
     await tracker.create(
         "ttl_cleanup",
@@ -448,8 +424,7 @@ async def test_terminal_delivery_is_idempotent(tracker):
     result = await cleanup._process(_message(record))
 
     assert result.outcome is ProcessOutcome.SUCCESS
-    viking_fs.read_file.assert_not_awaited()
-    viking_fs.rm.assert_not_awaited()
+    viking_fs.rm.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -486,7 +461,7 @@ async def test_failed_or_cancelled_task_does_not_ack_before_physical_cleanup(
 
     assert result.outcome is ProcessOutcome.REQUEUED
     viking_fs.rm.assert_not_awaited()
-    registry.remove_if_generation.assert_not_awaited()
+    registry.remove_if_current.assert_not_awaited()
     queue_manager.enqueue.assert_not_awaited()
     retry = registry.defer_retry.await_args.kwargs
     replacement = _message(record, task_id=retry["task_id"], retry_count=retry["retry_count"])
@@ -498,7 +473,7 @@ async def test_failed_or_cancelled_task_does_not_ack_before_physical_cleanup(
 
     assert result.outcome is ProcessOutcome.SUCCESS
     viking_fs.rm.assert_awaited_once()
-    registry.remove_if_generation.assert_awaited_once()
+    registry.remove_if_current.assert_awaited_once()
     replacement_task = await tracker.get(
         replacement["task_id"],
         account_id=ttl_cleanup.SYSTEM_TASK_ACCOUNT_ID,
@@ -617,15 +592,11 @@ async def test_scheduler_pause_and_runtime_budgets_are_independent(monkeypatch):
     queue.enqueue.assert_not_awaited()
 
 
-def test_cleanup_message_requires_generation_fence():
+def test_cleanup_message_uses_owner_and_deadline():
     parsed = ttl_cleanup._TTLCleanupProcessor._parse_message(
         {"data": json.dumps(_message(_record()))}
     )
-    assert parsed["target"]["generation"] == GENERATION
-    missing = _message(_record())
-    missing["target"].pop("generation")
-    with pytest.raises(ValueError, match="fence"):
-        ttl_cleanup._TTLCleanupProcessor._parse_message(missing)
+    assert parsed["target"] == asdict(_record())
 
 
 def test_due_boundary_is_inclusive():

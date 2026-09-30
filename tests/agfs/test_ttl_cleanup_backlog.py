@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Drain real file/vector backlog through daily scheduling and strict cleanup."""
 
-import asyncio
 import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -57,8 +56,8 @@ async def test_backlog_strictly_drains_vectors_and_recovers_partial_failures(
         content = "Expired L2" if owner in uris else "Live control"
         await fs.write_file(uri, content, ctx=ctx)
         if owner in uris:
-            fields = {"expires_at": "2020-01-01T00:00:00.000Z", "ttl_generation": owner}
-            await fs.write_file(owner + "/.ttl.json", json.dumps(fields), ctx=ctx)
+            fields = {"expires_at": "2020-01-01T00:00:00.000Z"}
+            await fs.write_file(owner + "/.meta.json", json.dumps(fields), ctx=ctx)
         await vectors.upsert(
             {
                 "id": vector_record_id(ctx.account_id, uri, 2),
@@ -85,9 +84,7 @@ async def test_backlog_strictly_drains_vectors_and_recovers_partial_failures(
     set_task_tracker(tracker)
     queue = CleanupQueue()
     scheduler = scheduler_for(fs.ttl_registry, queue)
-    cleanup = TTLCleanupService(
-        service=SimpleNamespace(viking_fs=fs), service_loop=asyncio.get_running_loop()
-    )
+    cleanup = TTLCleanupService(service=SimpleNamespace(viking_fs=fs))
     messages = {}
     try:
         for _ in range(4):
@@ -145,8 +142,7 @@ async def test_backlog_strictly_drains_vectors_and_recovers_partial_failures(
             assert await fs.read_file(uri, ctx=ctx) == content
         assert await fs.read_file(live, ctx=ctx) == "Live control"
         for owner in uris:
-            files = await fs._async_agfs.ls(fs._uri_to_path(owner, ctx=ctx))
-            assert not any(entry["name"] == "event.txt" for entry in files)
+            assert not await fs.exists(owner, ctx=ctx)
     finally:
         set_task_tracker(None)
 
@@ -157,9 +153,9 @@ async def test_confirmation_lag_recovers_without_repeating_delete(indexed_fs, mo
     ctx = root_ctx()
     owner = "viking://user/default/memories/events/2026/09/28"
     uri = owner + "/confirmation.txt"
-    fields = {"expires_at": "2020-01-01T00:00:00.000Z", "ttl_generation": "confirmation"}
+    fields = {"expires_at": "2020-01-01T00:00:00.000Z"}
     await fs.write_file(uri, "Expired L2", ctx=ctx)
-    await fs.write_file(owner + "/.ttl.json", json.dumps(fields), ctx=ctx)
+    await fs.write_file(owner + "/.meta.json", json.dumps(fields), ctx=ctx)
     await vectors.upsert(
         {
             "id": vector_record_id(ctx.account_id, uri, 2),
@@ -184,9 +180,7 @@ async def test_confirmation_lag_recovers_without_repeating_delete(indexed_fs, mo
             raise RuntimeError("simulate lagging count replica")
 
     monkeypatch.setattr(fs, "_confirm_vector_scope_cleared", delayed_confirmation)
-    cleanup = TTLCleanupService(
-        service=SimpleNamespace(viking_fs=fs), service_loop=asyncio.get_running_loop()
-    )
+    cleanup = TTLCleanupService(service=SimpleNamespace(viking_fs=fs))
     set_task_tracker(TaskTracker(PersistentTaskStore(fs._async_agfs)))
     try:
         assert (

@@ -638,9 +638,15 @@ class _GrepMixin:
         access = await self._can_access_many(match_uris, real_ctx)
         ttl_visible: Dict[str, bool] = {}
         if apply_ttl_filter:
+            from openviking.storage.ttl_view import TTLView
+
+            ttl_view = TTLView(self, real_ctx)
             unique_uris = list(dict.fromkeys(match_uris))
             visible = await asyncio.gather(
-                *(self._ttl_uri_visible(match_uri, real_ctx) for match_uri in unique_uris)
+                *(
+                    self._ttl_uri_visible(match_uri, real_ctx, ttl_view=ttl_view)
+                    for match_uri in unique_uris
+                )
             )
             ttl_visible = dict(zip(unique_uris, visible, strict=True))
 
@@ -918,14 +924,12 @@ class _GrepMixin:
         if before_context > 0:
             start = max(0, line_index - before_context)
             match["before_context"] = [
-                {"line": index + 1, "content": lines[index]}
-                for index in range(start, line_index)
+                {"line": index + 1, "content": lines[index]} for index in range(start, line_index)
             ]
         if after_context > 0:
             end = min(len(lines), line_index + after_context + 1)
             match["after_context"] = [
-                {"line": index + 1, "content": lines[index]}
-                for index in range(line_index + 1, end)
+                {"line": index + 1, "content": lines[index]} for index in range(line_index + 1, end)
             ]
         return match
 

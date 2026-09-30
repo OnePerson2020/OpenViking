@@ -486,7 +486,6 @@ pub async fn handle_session(cmd: SessionCommands, ctx: CliContext) -> Result<()>
     match cmd {
         SessionCommands::New {
             session_id,
-            ttl_relative,
             event_tags,
             auto_commit_policy_json,
             no_auto_commit,
@@ -499,7 +498,6 @@ pub async fn handle_session(cmd: SessionCommands, ctx: CliContext) -> Result<()>
                 no_auto_commit,
                 ctx.output_format,
                 ctx.compact,
-                ttl_relative,
             )
             .await
         }
@@ -573,8 +571,6 @@ pub async fn handle_session(cmd: SessionCommands, ctx: CliContext) -> Result<()>
         SessionCommands::Config { action } => match action {
             crate::SessionConfigCommands::Set {
                 session_id,
-                ttl_relative,
-                inherit_ttl,
                 event_tags,
                 no_event_tags,
                 auto_commit_policy_json,
@@ -589,8 +585,6 @@ pub async fn handle_session(cmd: SessionCommands, ctx: CliContext) -> Result<()>
                     no_auto_commit,
                     ctx.output_format,
                     ctx.compact,
-                    ttl_relative,
-                    inherit_ttl,
                 )
                 .await
             }

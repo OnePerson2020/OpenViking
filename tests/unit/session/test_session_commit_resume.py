@@ -134,10 +134,9 @@ async def test_commit_retention_boundary_and_pending_tokens_after_reload(
 def test_phase2_auto_commit_policy_parameters_are_appended():
     signature = inspect.signature(Session._run_memory_extraction)
 
-    assert list(signature.parameters)[-2:] == ["auto_commit_policy", "ttl_generation"]
-    assert [item.name for item in fields(SessionCommitMsg)[-2:]] == [
+    assert list(signature.parameters)[-1:] == ["auto_commit_policy"]
+    assert [item.name for item in fields(SessionCommitMsg)[-1:]] == [
         "auto_commit_policy",
-        "ttl_generation",
     ]
 
 
@@ -201,7 +200,6 @@ async def test_phase1_does_not_renew_frozen_ttl(monkeypatch):
     session.meta.ttl_days = 7
     session.meta.received_at = "2999-01-01T00:00:00.000Z"
     session.meta.expires_at = "2999-01-08T00:00:00.000Z"
-    session.meta.ttl_generation = "generation-1"
 
     result = await session.commit_async()
 
@@ -241,7 +239,6 @@ async def test_phase2_completion_renews_from_one_persisted_timestamp():
         archive_index=1,
         memories_extracted={},
         telemetry_snapshot=None,
-        ttl_generation="generation-1",
     )
 
     assert completed_at == "2999-02-03T04:05:06.000Z"
@@ -256,15 +253,14 @@ async def test_phase2_final_meta_read_outage_is_not_stale(error_type):
     uri = "viking://user/default/sessions/session-1"
     metadata = json.dumps({"ttl_generation": "g1", "expires_at": "2999-01-01T00:00:00Z"})
     storage = _MemoryVikingFS({uri + "/.meta.json": metadata})
-    # The fence read succeeds; the subsequent merge read fails under the same lock.
-    storage.read_file = AsyncMock(side_effect=[metadata, error_type("endpoint not found")])
+    # The current metadata read must propagate storage errors.
+    storage.read_file = AsyncMock(side_effect=error_type("endpoint not found"))
     session = Session(viking_fs=storage, session_id="session-1", session_uri=uri)
     with pytest.raises(error_type, match="endpoint not found"):
         await session._merge_and_save_commit_meta(
             archive_index=1,
             memories_extracted={},
             telemetry_snapshot=None,
-            ttl_generation="g1",
         )
     assert storage.files == {uri + "/.meta.json": metadata}
 
@@ -303,7 +299,6 @@ async def test_done_recovery_repairs_ttl_with_original_completion_time():
         session_uri=session_uri,
         archive_uri=archive_uri,
         user={"account_id": "default", "user_id": "default"},
-        ttl_generation="generation-1",
     )
 
     try:
@@ -349,81 +344,6 @@ async def test_resume_queued_commit_fails_terminally_for_unreadable_archive(
     failed = json.loads(files[f"{archive_uri}/.failed.json"])
     assert failed["stage"] == "archive_read"
     session._run_memory_extraction.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("persistent", [False, True])
-@pytest.mark.parametrize(
-    "error_type,message",
-    [
-        (TimeoutError, "session metadata unavailable"),
-        (AGFSNetworkError, "endpoint not found"),
-        (AGFSTimeoutError, "backend not found before timeout"),
-        (ConnectionError, "DNS name not found"),
-    ],
-)
-async def test_phase2_metadata_outage_never_completes_as_stale(
-    monkeypatch, persistent, error_type, message
-):
-    uri = "viking://user/default/sessions/session-1"
-    archive = uri + "/history/archive_001"
-    storage = _MemoryVikingFS(
-        {
-            uri + "/.meta.json": json.dumps(
-                {"ttl_generation": "g1", "expires_at": "2999-01-01T00:00:00Z"}
-            )
-        }
-    )
-    read = storage.read_file
-    attempts = 0
-
-    async def unreliable_read(uri, **kwargs):
-        nonlocal attempts
-        attempts += 1
-        if persistent or attempts == 1:
-            raise error_type(message)
-        return await read(uri, **kwargs)
-
-    storage.read_file = unreliable_read
-    session = Session(viking_fs=storage, session_id="session-1", session_uri=uri)
-    tracker = TaskTracker(_TaskStore())
-    monkeypatch.setattr("openviking.service.task_tracker.get_task_tracker", lambda: tracker)
-    monkeypatch.setattr(session, "_prepare_phase2_archive_messages", AsyncMock())
-    task = await tracker.create(
-        "session_commit",
-        task_id="ttl-outage",
-        resource_id="session-1",
-        account_id=session.ctx.account_id,
-        user_id=session.ctx.user.user_id,
-    )
-
-    extraction = session._run_memory_extraction(
-        task_id=task.task_id,
-        archive_uri=archive,
-        messages=[],
-        first_message_id="first",
-        last_message_id="last",
-        memory_policy={},
-        ttl_generation="g1",
-    )
-    if persistent:
-        # Failure-marker fencing is also unavailable: raise so QueueFS cannot
-        # acknowledge this delivery and restart recovery can retry it.
-        with pytest.raises(error_type, match=message):
-            await extraction
-        assert archive + "/.failed.json" not in storage.files
-    else:
-        await extraction
-        failure = json.loads(storage.files[archive + "/.failed.json"])
-        assert failure["error"] == message
-    task = await tracker.get(
-        task.task_id, account_id=session.ctx.account_id, user_id=session.ctx.user.user_id
-    )
-    if not persistent:
-        assert task.status == TaskStatus.FAILED
-    assert task.status != TaskStatus.COMPLETED
-    assert archive + "/.done" not in storage.files
-    session._prepare_phase2_archive_messages.assert_not_awaited()
 
 
 @pytest.mark.asyncio

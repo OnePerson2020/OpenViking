@@ -204,12 +204,11 @@ async def test_append_file_holds_exact_lease_across_read_and_write(monkeypatch):
     assert fake.events[4] == ("release", {"lease_ref": "lease-1"})
 
 
-def _ttl_event(generation: str, expires_at: str) -> str:
+def _ttl_event(expires_at: str) -> str:
     fields = {
         "ttl_days": 30,
         "received_at": "2026-01-01T00:00:00.000Z",
         "expires_at": expires_at,
-        "ttl_generation": generation,
     }
     return json.dumps(fields)
 
@@ -224,7 +223,6 @@ def _ttl_write_fs(monkeypatch, *, write_error=None):
         account_id="default",
         user_id="default",
         expires_at="2040-01-01T00:00:00.000Z",
-        generation="old",
     )
     records = {("default", old.object_uri): old}
 
@@ -232,7 +230,7 @@ def _ttl_write_fs(monkeypatch, *, write_error=None):
         return records.get((account_id, object_uri))
 
     async def upsert(record):
-        events.append(("upsert", record.generation, record.expires_at))
+        events.append(("upsert", record.expires_at))
         records[(record.account_id, record.object_uri)] = record
 
     async def write(_path, _data, **_kwargs):
@@ -247,7 +245,7 @@ def _ttl_write_fs(monkeypatch, *, write_error=None):
         write=write,
     )
     fs.ttl_registry = SimpleNamespace(
-        get=get, upsert=upsert, remove_if_generation=AsyncMock(return_value=True)
+        get=get, upsert=upsert, remove_if_current=AsyncMock(return_value=True)
     )
     monkeypatch.setattr(fs, "_ensure_access", AsyncMock())
     monkeypatch.setattr(fs, "_uri_to_path", lambda _uri, **_kwargs: path)
@@ -256,17 +254,17 @@ def _ttl_write_fs(monkeypatch, *, write_error=None):
 
 
 @pytest.mark.asyncio
-async def test_ttl_overwrite_keeps_old_generation_until_write_succeeds(monkeypatch):
+async def test_ttl_overwrite_keeps_earlier_deadline_until_write_succeeds(monkeypatch):
     fs, records, events, _, uri = _ttl_write_fs(monkeypatch)
 
-    await fs.write(uri, _ttl_event("new", "2030-01-01T00:00:00.000Z"), ctx=_default_ctx())
+    await fs.write(uri, _ttl_event("2030-01-01T00:00:00.000Z"), ctx=_default_ctx())
 
     assert events == [
-        ("upsert", "old", "2030-01-01T00:00:00.000Z"),
+        ("upsert", "2030-01-01T00:00:00.000Z"),
         ("write",),
-        ("upsert", "new", "2030-01-01T00:00:00.000Z"),
+        ("upsert", "2030-01-01T00:00:00.000Z"),
     ]
-    assert records[("default", uri.rsplit("/", 1)[0])].generation == "new"
+    assert records[("default", uri.rsplit("/", 1)[0])].expires_at == "2030-01-01T00:00:00.000Z"
 
 
 @pytest.mark.asyncio
@@ -278,7 +276,7 @@ async def test_failed_ttl_overwrite_restores_old_projection(monkeypatch):
     with pytest.raises(RuntimeError, match="injected write failure"):
         await fs.write(
             uri,
-            _ttl_event("new", "2050-01-01T00:00:00.000Z"),
+            _ttl_event("2050-01-01T00:00:00.000Z"),
             ctx=_default_ctx(),
         )
 

@@ -829,21 +829,8 @@ GET /api/v1/tasks?task_type=admin_reindex&resource_id=viking://resources
 
 ## 文档到期时间
 
-`GET /api/v1/content/ttl?uri=...` 查询 events 或 Session 路径实际生效的保留策略。日期目录（`events/YYYY/MM/DD`）或 Session 根目录拥有期限；下属 L2 文件和子目录回显同一份 `expires_at`、`ttl_days`。没有期限时明确返回 `expires_at: null`，摘要文件没有期限。上层策略容器返回自身 `policy` 和解析后的 `effective_policy`，没有共同到期时间。
+`GET /api/v1/content/ttl?uri=...` 查询所属日期目录或 Session 的 `expires_at`、`ttl_days`。未开启时 `expires_at` 为 `null`。子目录及 L0/L1/L2 继承 owner 的期限，根目录另回显 `policy`、`effective_policy`。
 
-`PATCH /api/v1/content/ttl` 只修改仍存活的 **events 日期目录或 Session 根目录**。文件、内部子目录、摘要和 resources 均被拒绝。必须且只能提供 `ttl_relative`（1–365000 的整数天数）或 `expires_at`（带时区的未来 ISO 8601 时间）。Session 只接受 `ttl_relative`。
+SDK/MCP 使用 `get_ttl`，CLI 使用 `ov ttl get <uri>`。期限只读；配置通过[库和根目录策略](../configuration/01-server.md#ttl)修改，只影响新生命周期目录。原 `PATCH /api/v1/content/ttl`、`update_ttl` 和 `ov ttl set` 已移除。
 
-```json
-{"uri": "viking://user/alice/memories/events/2026/09/28", "expires_at": "2027-01-01T00:00:00Z"}
-```
-
-相对时长从最近一次成功内容更新时间起算。仅修改有效期不会重置时间基准，缩短时长可能令目录立即过期。此前未纳管的目录使用已有的存储修改时间。后续内容变更按保存的 `ttl_days` 续期整个目录。设置 `expires_at` 固定到期时间并清空 `ttl_days`。两种方式均保留已有 generation 和内容，不重写摘要、不重新向量化。已过期目录不能恢复。
-
-```bash
-ov ttl get viking://user/alice/memories/events/2026/09/28
-ov ttl set viking://user/alice/memories/events/2026/09/28 --ttl-relative 30
-ov ttl set viking://user/alice/memories/events/2026/09/28 --expires-at 2027-01-01T00:00:00Z
-ov ttl set viking://user/alice/sessions/chat-1 --ttl-relative 30
-```
-
-Python HTTP SDK 和 MCP 使用 `get_ttl`、`update_ttl`，例如 `await client.update_ttl(uri, ttl_relative=30)`。未来目录的默认策略通过 [TTL 配置](../configuration/01-server.md#ttl) 修改。清理仅移除 L2，所有 L0/L1 摘要及向量原样保留。完整语义见 [目录 TTL](../concepts/17-ttl.md)。
+完整语义见[目录 TTL](../concepts/17-ttl.md)。

@@ -4,9 +4,9 @@
 
 Visibility is enforced synchronously by the read barriers.  This service only
 does the slower physical half: it walks the small TTL registry, schedules due
-records on QueueFS, and removes one exact object incarnation under its path
-lock. A task completes only after L2 content, its vectors, and its registry
-record are gone. L0/L1 summaries and their directory scaffolding are retained.
+records on QueueFS, and removes a complete lifecycle directory using file
+locks. Completion requires all content, vectors, Meta and expiry registration
+to be gone. Parent directories and their summaries are untouched.
 """
 
 from __future__ import annotations
@@ -23,14 +23,15 @@ from openviking.core.ttl import (
     OBJECT_TYPE_EVENT,
     OBJECT_TYPE_SESSION,
     hidden_by_ttl,
+    ttl_metadata_uri,
 )
 from openviking.pyagfs.exceptions import AGFSConfigError, AGFSPermissionDeniedError
 from openviking.server.identity import RequestContext, Role
 from openviking.service.periodic_task import PeriodicTask
 from openviking.service.task_store import SYSTEM_TASK_ACCOUNT_ID, SYSTEM_TASK_USER_ID
 from openviking.service.task_tracker import TaskStatus, get_task_tracker
-from openviking.service.task_tracker_concurrency import OwnerLoopDispatcher, run_to_completion
-from openviking.session.ttl_fence import reconcile_session_ttl
+from openviking.service.task_tracker_concurrency import run_to_completion
+from openviking.session.ttl_renewal import reconcile_session_ttl
 from openviking.storage.errors import StorageException, VikingDBException
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
 from openviking.storage.queuefs.process_result import ProcessResult
@@ -57,13 +58,11 @@ def _cleanup_settings():
 def _cleanup_task_id(record: TTLRecord, *, attempt: int = 0) -> str:
     """Return a stable task id for one scheduled expiry revision.
 
-    Session renewal keeps the incarnation generation but advances expires_at.
-    Including both prevents a completed pre-renewal no-op from suppressing the
-    next legitimate cleanup while still deduplicating duplicate scan passes.
+    A renewal advances expires_at, so the next deadline receives a new task.
     """
     key = (
         f"openviking:ttl:{record.account_id}:{record.object_uri}:"
-        f"{record.generation}:{record.expires_at}:{max(0, attempt)}"
+        f"{record.expires_at}:{max(0, attempt)}"
     )
     return str(uuid5(NAMESPACE_URL, key))
 
@@ -94,18 +93,16 @@ class TTLCleanupService:
         self,
         *,
         service: Any,
-        service_loop: asyncio.AbstractEventLoop,
         check_interval: Optional[float] = None,
     ) -> None:
         self._service = service
-        self._service_loop = service_loop
         self._closed = False
         self._scheduler = TTLCleanupScheduler(service, check_interval=check_interval)
 
     async def initialize(self) -> None:
         queue_manager = self._service._queue_manager
         queue = queue_manager.get_queue(queue_manager.TTL_CLEANUP)
-        queue.set_dequeue_handler(_TTLCleanupProcessor(self, self._service_loop))
+        queue.set_dequeue_handler(_TTLCleanupProcessor(self))
         await self._scheduler.start()
 
     async def close(self) -> None:
@@ -155,12 +152,14 @@ class TTLCleanupService:
             task_id=task_id,
             **owner,
         )
-        # Only a completed cleanup proves that physical data and the registry
-        # projection are both gone. A persisted FAILED/CANCELLED task from an
-        # older process must not make a recovered QueueFS delivery ACK without
-        # retrying the strict delete.
+        # The durable deadline index is authoritative even after task history
+        # expires or an older delivery was marked complete.
         if task.status is TaskStatus.COMPLETED:
-            return ProcessResult.success()
+            current = await self._service.viking_fs.ttl_registry.get(
+                record.account_id, record.object_uri
+            )
+            if current != record:
+                return ProcessResult.success()
         if task.status in (TaskStatus.FAILED, TaskStatus.CANCELLED):
             # TaskTracker terminal states are immutable.  A delivery restored
             # from an older implementation therefore needs a fresh task id;
@@ -265,9 +264,7 @@ class TTLCleanupService:
             scheduled.object_type,
             scheduled.object_uri,
         ):
-            await registry.remove_if_generation(
-                scheduled.account_id, scheduled.object_uri, scheduled.generation
-            )
+            await registry.remove_if_current(scheduled)
             return {"deleted": False, "skipped": "out_of_scope"}
         try:
             ctx, lease = await self._acquire_object_lock(scheduled)
@@ -276,8 +273,8 @@ class TTLCleanupService:
             return None
         try:
             item = await registry.get_scheduled(scheduled.account_id, scheduled.object_uri)
-            if item is None or item["payload"]["record"] != asdict(scheduled):
-                return {"deleted": False, "skipped": "stale_registry_generation"}
+            if item is None or TTLRecord.from_dict(item["payload"]["record"]) != scheduled:
+                return {"deleted": False, "skipped": "superseded"}
             if item["payload"].get("retry_count", 0) != message.get("retry_count", 0):
                 # Another delivery already persisted the next attempt. Do not
                 # reset its backoff or complete its still-running business task.
@@ -307,8 +304,17 @@ class TTLCleanupService:
             user=UserIdentifier(scheduled.account_id, scheduled.user_id or SYSTEM_TASK_USER_ID),
             role=Role.ROOT,
         )
-        object_path = viking_fs._uri_to_path(scheduled.object_uri, ctx=ctx)
-        lease = await viking_fs._async_agfs.pathlock_acquire_tree(object_path)
+        metadata_path = viking_fs._uri_to_path(
+            ttl_metadata_uri(scheduled.object_type, scheduled.object_uri), ctx=ctx
+        )
+        requests = [{"path": metadata_path, "kind": "exact"}]
+        if scheduled.object_type == OBJECT_TYPE_SESSION:
+            # Reuse the existing session mutation mutex; exact acquisition does
+            # not traverse or block every child as a tree lock would.
+            requests.append(
+                {"path": viking_fs._uri_to_path(scheduled.object_uri, ctx=ctx), "kind": "exact"}
+            )
+        lease = await viking_fs._async_agfs.pathlock_acquire_batch(requests, timeout_secs=0.0)
         return ctx, lease
 
     async def _cleanup_record(
@@ -319,7 +325,7 @@ class TTLCleanupService:
         *,
         verify_only: bool = False,
     ) -> dict[str, Any]:
-        """Strictly delete one generation under the caller's object lock."""
+        """Delete one expired directory under its metadata lock."""
         if ctx is None and lease is None:
             owned_ctx, owned_lease = await self._acquire_object_lock(scheduled)
             try:
@@ -342,58 +348,44 @@ class TTLCleanupService:
             scheduled.object_type,
             scheduled.object_uri,
         ):
-            await registry.remove_if_generation(
-                scheduled.account_id, scheduled.object_uri, scheduled.generation
-            )
+            await registry.remove_if_current(scheduled)
             return {"deleted": False, "skipped": "out_of_scope"}
         self._check_running()
         registered = await registry.get(scheduled.account_id, scheduled.object_uri)
-        if registered is None or registered.generation != scheduled.generation:
-            return {"deleted": False, "skipped": "stale_registry_generation"}
+        if registered != scheduled:
+            return {"deleted": False, "skipped": "superseded"}
 
         if scheduled.object_type == OBJECT_TYPE_SESSION:
             await reconcile_session_ttl(
                 viking_fs,
                 ctx,
                 session_uri=scheduled.object_uri,
-                generation=scheduled.generation,
                 lease_ref=lease,
             )
         live = await self._read_live_record(scheduled, ctx)
-        if live is not None and live.generation != scheduled.generation:
-            # An import/restore may have replaced the source without going
-            # through the normal registry-first writer.  Repair the
-            # projection when the replacement has its own complete TTL
-            # snapshot; otherwise discard only the stale old projection.
-            if live.generation and live.expires_at:
-                await registry.upsert(live)
-            else:
-                await registry.remove_if_generation(
-                    scheduled.account_id, scheduled.object_uri, scheduled.generation
-                )
-            return {"deleted": False, "skipped": "stale_object_generation"}
         if live is not None and not hidden_by_ttl(live.expires_at):
-            if live.expires_at != registered.expires_at:
-                await registry.upsert(live)
-            return {"deleted": False, "skipped": "renewed"}
+            if live.expires_at:
+                if live != registered:
+                    await registry.upsert(live)
+            else:
+                await registry.remove_if_current(scheduled)
+            return {"deleted": False, "skipped": "renewed" if live.expires_at else "unmanaged"}
 
         run_at = cleanup_not_before(live or registered)
         if not hidden_by_ttl(run_at):
             raise _CleanupDeferred(run_at, "waiting_cleanup_window")
 
-        # One owner deadline covers every L2 descendant. Retain all L0/L1.
+        # One owner deadline covers every file and vector, including L0/L1.
         await viking_fs.rm(
             scheduled.object_uri,
             recursive=True,
             ctx=ctx,
             lease_ref=lease,
             strict=True,
-            preserve_summaries=True,
+            file_locks=True,
             **({"verify_only": True} if verify_only else {}),
         )
-        removed = await registry.remove_if_generation(
-            scheduled.account_id, scheduled.object_uri, scheduled.generation
-        )
+        removed = await registry.remove_if_current(scheduled)
         if (
             not removed
             and await registry.get(scheduled.account_id, scheduled.object_uri) is not None
@@ -424,7 +416,6 @@ class TTLCleanupService:
             account_id=scheduled.account_id,
             user_id=scheduled.user_id,
             expires_at=str(fields.get("expires_at") or ""),
-            generation=str(fields.get("ttl_generation") or ""),
         )
 
 
@@ -490,13 +481,10 @@ class TTLCleanupScheduler(PeriodicTask):
 
 
 class _TTLCleanupProcessor(DequeueHandlerBase):
-    """Single-consumer QueueFS bridge into the service owner loop."""
+    """Execute cleanup on the QueueFS worker, like SessionCommitProcessor."""
 
-    def __init__(
-        self, cleanup_service: TTLCleanupService, service_loop: asyncio.AbstractEventLoop
-    ) -> None:
+    def __init__(self, cleanup_service: TTLCleanupService) -> None:
         self._cleanup_service = cleanup_service
-        self._dispatcher = OwnerLoopDispatcher(service_loop)
 
     @staticmethod
     def _parse_message(data: dict[str, Any]) -> dict[str, Any]:
@@ -515,14 +503,13 @@ class _TTLCleanupProcessor(DequeueHandlerBase):
             raise ValueError("Invalid TTL cleanup owner")
         object_type = str(target.get("object_type") or "")
         object_uri = str(target.get("object_uri") or "")
-        generation = str(target.get("generation") or "")
         if object_type not in (
             OBJECT_TYPE_EVENT,
             OBJECT_TYPE_SESSION,
         ):
             raise ValueError("Invalid TTL cleanup object type")
-        if not object_uri or not generation:
-            raise ValueError("Invalid TTL cleanup object fence")
+        if not object_uri:
+            raise ValueError("Invalid TTL cleanup object URI")
         return {
             "task_id": str(payload["task_id"]),
             "account_id": str(payload["account_id"]),
@@ -535,7 +522,6 @@ class _TTLCleanupProcessor(DequeueHandlerBase):
                 "account_id": str(target.get("account_id") or ""),
                 "user_id": str(target.get("user_id") or ""),
                 "expires_at": str(target.get("expires_at") or ""),
-                "generation": generation,
             },
         }
 
@@ -546,7 +532,7 @@ class _TTLCleanupProcessor(DequeueHandlerBase):
             message = self._parse_message(data)
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             return ProcessResult.failed(str(exc))
-        return await self._dispatcher.run(lambda: self._cleanup_service._process(message))
+        return await self._cleanup_service._process(message)
 
     async def on_cancelled(self, data: Optional[dict[str, Any]]) -> ProcessResult:
         """Recover legacy terminal cleanup tasks instead of dropping work."""
@@ -558,7 +544,6 @@ async def setup_ttl_cleanup(*, service: Any) -> Optional[TTLCleanupService]:
         return None
     cleanup_service = TTLCleanupService(
         service=service,
-        service_loop=asyncio.get_running_loop(),
     )
     await cleanup_service.initialize()
     service._ttl_cleanup_service = cleanup_service

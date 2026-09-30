@@ -21,7 +21,6 @@ from openviking.core.ttl import (
     ttl_enabled,
     ttl_metadata_uri,
     ttl_object_for_uri,
-    ttl_scope_for_uri,
 )
 from openviking.pyagfs.exceptions import (
     AGFSClientError,
@@ -234,7 +233,7 @@ class _OpsMixin:
         auto_pathlock: bool = True,
         *,
         strict: bool = False,
-        preserve_summaries: bool = False,
+        file_locks: bool = False,
         verify_only: bool = False,
     ) -> Dict[str, Any]:
         """Delete file/directory + recursively update vector index.
@@ -260,8 +259,8 @@ class _OpsMixin:
         both removed. The default (False) keeps the historical
         best-effort semantics for the interactive delete path.
 
-        TTL uses ``preserve_summaries`` to delete only L2 vectors and content.
-        Summary files, directories, ACLs and lifecycle fences are retained.
+        TTL uses ``file_locks`` to remove each file under an exact lock.
+        Its caller holds the lifecycle metadata lock until cleanup completes.
         ``verify_only`` resumes strict confirmation under a caller-owned lease,
         without repeating vector or content deletion.
 
@@ -276,14 +275,11 @@ class _OpsMixin:
         await self._ensure_access(uri, ctx, action=AclAction.WRITE)
         path = self._uri_to_path(uri, ctx=ctx)
         target_uri = self._path_to_uri(path, ctx=ctx)
-        vector_options = {"level": ContextLevel.DETAIL} if preserve_summaries else {}
 
         async def confirm() -> None:
             try:
-                await self._confirm_vector_scope_cleared(target_uri, ctx=ctx, **vector_options)
-                await self._confirm_fs_scope_cleared(
-                    path, target_uri, preserve_summaries=preserve_summaries
-                )
+                await self._confirm_vector_scope_cleared(target_uri, ctx=ctx)
+                await self._confirm_fs_scope_cleared(path, target_uri)
             except Exception as exc:
                 # Preserve the cause for retry classification; callers can resume
                 # verification without parsing error text or replaying deletion.
@@ -292,6 +288,8 @@ class _OpsMixin:
         if verify_only:
             if not strict or lease_ref is None:
                 raise ValueError("verify_only requires strict deletion and an object lease")
+            if file_locks:
+                await self._remove_empty_lock_directory(path)
             await confirm()
             return {"estimated_deleted_count": 0}
 
@@ -329,7 +327,6 @@ class _OpsMixin:
                 uris_to_delete,
                 ctx=ctx,
                 recursive_uri=target_uri if strict and recursive else None,
-                **vector_options,
             )
             if strict:
                 await confirm()
@@ -380,17 +377,10 @@ class _OpsMixin:
                 uris_to_delete,
                 ctx=ctx,
                 recursive_uri=target_uri if strict and recursive else None,
-                **vector_options,
             )
             try:
-                if preserve_summaries and is_dir:
-                    for content_path in await self._ttl_content_paths(path, target_uri):
-                        await self._async_agfs.rm(
-                            content_path,
-                            recursive=False,
-                            fs_ctx=self._pathlock_fs_ctx(ctx, lease),
-                            auto_pathlock=auto_pathlock,
-                        )
+                if file_locks and is_dir:
+                    await self._remove_directory_files(path, ctx=ctx, lease_ref=lease)
                     result = {}
                 else:
                     result = await self._async_agfs.rm(
@@ -432,9 +422,7 @@ class _OpsMixin:
         for object_uri in sorted(object_uris):
             record = await self.ttl_registry.get(real_ctx.account_id, object_uri)
             if record is not None:
-                await self.ttl_registry.remove_if_generation(
-                    real_ctx.account_id, object_uri, record.generation
-                )
+                await self.ttl_registry.remove_if_current(record)
 
     async def remove_files(
         self,
@@ -664,8 +652,6 @@ class _OpsMixin:
         self, source: str, target: str, *, old_scope: str, new_scope: str, ctx: RequestContext
     ) -> None:
         """Reject moves/copies that would detach content from its TTL owner."""
-        if source.rsplit("/", 1)[-1] in ABSTRACT_OVERVIEW_FILENAMES:
-            return
         source_owner = ttl_object_for_uri(source)
         target_owner = ttl_object_for_uri(target)
         if source_owner is None or source_owner == target_owner:
@@ -1071,7 +1057,14 @@ class _OpsMixin:
             target_registration_uri = ttl_metadata_uri(object_type, object_uri)
             source_registration_uri = old_scope + target_registration_uri[len(new_scope) :]
             if source_registration_uri not in source_uri_set:
-                continue
+                source_registration_uri = (
+                    source_registration_uri.removesuffix(".meta.json") + ".ttl.json"
+                )
+                target_registration_uri = (
+                    target_registration_uri.removesuffix(".meta.json") + ".ttl.json"
+                )
+                if source_registration_uri not in source_uri_set:
+                    continue
             registrations.add((source_registration_uri, target_registration_uri))
 
         fs_ctx = self._pathlock_fs_ctx(ctx, lease_ref)
@@ -1133,9 +1126,7 @@ class _OpsMixin:
         for object_uri in sorted(object_uris):
             record = await self.ttl_registry.get(real_ctx.account_id, object_uri)
             if record is not None:
-                await self.ttl_registry.remove_if_generation(
-                    real_ctx.account_id, object_uri, record.generation
-                )
+                await self.ttl_registry.remove_if_current(record)
 
     async def _copy_for_mv(
         self,
@@ -2449,7 +2440,10 @@ class _OpsMixin:
     def _ttl_metadata_target(uri: str) -> Optional[tuple[str, str]]:
         """Identify the source file that owns an event or session's TTL snapshot."""
         target = ttl_object_for_uri(uri)
-        if target is None or uri.rstrip("/") != ttl_metadata_uri(*target):
+        if target is None or uri.rstrip("/") not in {
+            ttl_metadata_uri(*target),
+            target[1] + "/.ttl.json",
+        }:
             return None
         return target
 
@@ -2463,7 +2457,7 @@ class _OpsMixin:
         """Prepare a crash-safe projection before publishing TTL metadata.
 
         New objects publish their desired record first. Overwrites retain the
-        live generation and the earlier deadline until bytes are durable, so a
+        earlier deadline until bytes are durable, so a
         failed or interrupted write cannot postpone cleanup of the old object.
         """
         target = self._ttl_metadata_target(uri)
@@ -2501,17 +2495,12 @@ class _OpsMixin:
     ) -> None:
         if mutation is None:
             return
-        real_ctx = self._ctx_or_default(ctx)
         if mutation.desired is not None:
             if mutation.previous is not None:
                 await self.ttl_registry.upsert(mutation.desired)
             return
         if mutation.previous is not None:
-            await self.ttl_registry.remove_if_generation(
-                real_ctx.account_id,
-                mutation.object_uri,
-                mutation.previous.generation,
-            )
+            await self.ttl_registry.remove_if_current(mutation.previous)
 
     async def _rollback_ttl_write(
         self, mutation: Optional[_TTLWriteMutation], *, ctx: Optional[RequestContext]
@@ -2523,19 +2512,15 @@ class _OpsMixin:
             current = await self.ttl_registry.get(real_ctx.account_id, mutation.object_uri)
             # A multi-file transfer can fail after completing some projections.
             # Roll back either stage, but never an unrelated replacement.
-            expected = {mutation.desired.generation}
+            expected = {mutation.desired}
             if mutation.previous is not None:
-                expected.add(mutation.previous.generation)
-            if current is None or current.generation not in expected:
+                expected.add(mutation.previous)
+            if current is None or current not in expected:
                 return
             if mutation.previous is not None:
                 await self.ttl_registry.upsert(mutation.previous)
             else:
-                await self.ttl_registry.remove_if_generation(
-                    real_ctx.account_id,
-                    mutation.object_uri,
-                    mutation.desired.generation,
-                )
+                await self.ttl_registry.remove_if_current(mutation.desired)
         except Exception:
             logger.warning(
                 "Failed to roll back TTL write projection for %s",
@@ -2566,43 +2551,82 @@ class _OpsMixin:
             ctx=self._ctx_or_default(ctx),
         )
 
-    async def _ttl_content_paths(self, path: str, uri: str) -> List[str]:
-        """Raw L2 files under an owner, retaining summaries and its expiry fence."""
-        metadata = ".meta.json" if ttl_scope_for_uri(uri) == "sessions" else ".ttl.json"
-        retained = f"{path}/{metadata}"
-        paths = []
+    async def _remove_empty_lock_directory(self, path):
+        """Remove empty directories recreated by metadata lock acquisition.
 
-        async def collect(current):
+        The caller holds the owner metadata lease. Never remove residual payload.
+        """
+
+        async def empty(directory):
             try:
-                stat = await self._async_agfs.stat(current, bypass_cache=True)
+                entries = await self._ls_entries(directory)
             except Exception as exc:
                 if is_storage_not_found(exc):
-                    return
+                    return True
                 raise
-            if not stat.get("isDir", False):
-                paths.append(current)
-                return
-            for entry in await self._ls_entries(current):
+            for entry in entries:
                 name = entry.get("name", "")
-                child = f"{current}/{name}"
-                if name in {".", ".."} or is_storage_internal_name(name):
+                if not name or name in {".", ".."}:
                     continue
-                if entry.get("isDir"):
-                    await collect(child)
-                elif name not in ABSTRACT_OVERVIEW_FILENAMES and child != retained:
-                    paths.append(child)
+                if not entry.get("isDir") or not await empty(directory.rstrip("/") + "/" + name):
+                    return False
+            return True
 
-        await collect(path)
-        return paths
-
-    async def _confirm_fs_scope_cleared(
-        self, path: str, uri: str, *, preserve_summaries: bool = False
-    ) -> None:
-        """Strict-mode check: no content covered by this deletion remains."""
-        if preserve_summaries:
-            if await self._ttl_content_paths(path, uri):
-                raise RuntimeError(f"Filesystem content still present after delete: {uri}")
+        if not await empty(path):
             return
+        try:
+            await self._async_agfs.rm(path, recursive=True, auto_pathlock=False)
+        except Exception as exc:
+            if not is_storage_not_found(exc):
+                raise
+
+    async def _remove_directory_files(self, path, *, ctx, lease_ref):
+        """Delete a directory bottom-up with exact file locks, metadata last.
+
+        The owner metadata lease excludes scoped writes until removal completes.
+        Only empty directories and runtime lock artifacts remain at the final rm.
+        A busy file is retried; no tree lock or per-file TTL lookup is used.
+        """
+        try:
+            entries = await self._ls_entries(path)
+        except Exception as exc:
+            if is_storage_not_found(exc):
+                return
+            raise
+        for entry in sorted(entries, key=lambda item: item.get("name") == ".meta.json"):
+            name = entry.get("name", "")
+            if name in {"", ".", ".."} or is_storage_internal_name(name):
+                continue
+            child = path.rstrip("/") + "/" + name
+            if entry.get("isDir"):
+                await self._remove_directory_files(child, ctx=ctx, lease_ref=lease_ref)
+                continue
+            lease = await self._async_agfs.pathlock_acquire_exact(
+                child, owner_lease_ref=lease_ref, timeout_secs=0.0
+            )
+            try:
+                await self._async_agfs.rm(child, fs_ctx=self._pathlock_fs_ctx(ctx, lease))
+            except Exception as exc:
+                if not is_storage_not_found(exc):
+                    raise
+            finally:
+                await self._async_agfs.pathlock_release(lease)
+        # File-lock tokens live in the directory itself. Only after all data
+        # files are gone may the raw backend remove the remaining lock artifacts.
+        remaining = await self._ls_entries(path)
+        if any(
+            e.get("name") not in {".", ".."} and not is_storage_internal_name(e.get("name", ""))
+            for e in remaining
+        ):
+            raise RuntimeError(f"Directory changed during cleanup: {path}")
+        try:
+            await self._async_agfs.rm(path, recursive=True, auto_pathlock=False)
+        except Exception as exc:
+            if not is_storage_not_found(exc):
+                raise
+
+    async def _confirm_fs_scope_cleared(self, path: str, uri: str) -> None:
+        """Confirm that the entire directory has left the primary store."""
         try:
             await self._async_agfs.stat(path, bypass_cache=True)
         except Exception as exc:

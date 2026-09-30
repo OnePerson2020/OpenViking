@@ -435,18 +435,21 @@ async def test_grep_projects_tags_for_each_match(request_context):
     )
 
     assert result["matches"] == [
-        {
-            "uri": "viking://resources/a.md",
-            "line": 1,
-            "content": "needle",
-            "tags": ["team=search", "env=prod"],
-        },
-        {
-            "uri": "viking://resources/b.md",
-            "line": 2,
-            "content": "needle",
-            "tags": [],
-        },
+        {**item, "expires_at": None, "ttl_days": None}
+        for item in [
+            {
+                "uri": "viking://resources/a.md",
+                "line": 1,
+                "content": "needle",
+                "tags": ["team=search", "env=prod"],
+            },
+            {
+                "uri": "viking://resources/b.md",
+                "line": 2,
+                "content": "needle",
+                "tags": [],
+            },
+        ]
     ]
 
 
@@ -463,7 +466,7 @@ async def test_grep_skips_tag_projection_without_tags_or_include_tags(request_co
 
     result = await service.grep("viking://resources", "needle", ctx=request_context)
 
-    assert result["matches"] == matches
+    assert result["matches"] == [{**item, "expires_at": None, "ttl_days": None} for item in matches]
 
 
 @pytest.mark.asyncio
@@ -481,7 +484,10 @@ async def test_grep_projects_tags_when_include_tags_is_requested(request_context
         "viking://resources", "needle", ctx=request_context, include_tags=True
     )
 
-    assert result["matches"] == [{**matches[0], "tags": ["env=prod"]}]
+    assert result["matches"] == [
+        {**item, "expires_at": None, "ttl_days": None}
+        for item in [{**matches[0], "tags": ["env=prod"]}]
+    ]
 
 
 @pytest.mark.asyncio
@@ -503,7 +509,8 @@ async def test_ls_and_tree_skip_tag_projection_without_tags_or_include_tags(requ
         has_more=False,
     )
     assert await service.tree("viking://resources", ctx=request_context) == ListingPage(
-        entries=entries, has_more=False
+        entries=[{**entry, "expires_at": None, "ttl_days": None} for entry in entries],
+        has_more=False,
     )
 
 
@@ -538,8 +545,6 @@ async def test_ls_and_tree_detect_more_entries_with_n_plus_one(
 
     assert page.entries == (
         [{**entry, "expires_at": None, "ttl_days": None} for entry in entries[:2]]
-        if method_name == "ls"
-        else entries[:2]
     )
     assert page.has_more is expected_has_more
     fetch_mock = getattr(viking_fs, method_name)
@@ -599,6 +604,8 @@ async def test_glob_filters_and_projects_tags_before_applying_node_limit(request
             {
                 "uri": "viking://resources/b.md",
                 "isDir": False,
+                "expires_at": None,
+                "ttl_days": None,
                 "tags": ["team=search", "env=prod"],
             }
         ],
@@ -689,7 +696,7 @@ async def test_tagged_grep_reuses_tags_returned_by_viking_fs(request_context):
         tags=["team=search", "env=prod"],
     )
 
-    assert result["matches"] == matches
+    assert result["matches"] == [{**item, "expires_at": None, "ttl_days": None} for item in matches]
 
 
 @pytest.mark.asyncio
@@ -853,6 +860,8 @@ async def test_tree_projects_directory_tags_before_pagination_and_summaries(
                 "tags": ["team=search", "env=prod"],
                 "abstract": "L0 summary",
                 "overview": "L1 overview",
+                "expires_at": None,
+                "ttl_days": None,
             }
         ],
         has_more=False,
@@ -1557,54 +1566,3 @@ async def test_resource_rm_refreshes_memory_overview_for_cleaned_memories(
         }
     ]
     assert result["memory_cleanup"] == cleanup
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("removal", ["ttl", "ttl_confirmation"])
-async def test_cleanup_preserves_related_memories_and_watch(request_context, monkeypatch, removal):
-    uri = "viking://user/default/memories/events/2026/09/28"
-    memory = {"content": "Long-term preference referring to watched.txt"}
-    original = dict(memory)
-
-    class ResourceFS(_FakeVikingFS):
-        async def rm(self, target, **kwargs):
-            self.rm_calls.append(target)
-            return {"estimated_deleted_count": 1}
-
-    class MemoryLinks(_FakeResourceMemoryLinkService):
-        async def before_resource_delete(self, **kwargs):
-            memory["content"] = "Updated after resource deletion"
-            return await super().before_resource_delete(**kwargs)
-
-    fs = ResourceFS()
-    links = MemoryLinks({"memory_uris": [], "deleted_memory_uris": []})
-    watch = _FakeWatchManager()
-    service = FSService(
-        viking_fs=fs,
-        resource_memory_link_service=links,
-        watch_scheduler=_FakeWatchScheduler(watch),
-    )
-    refresh = AsyncMock()
-    monkeypatch.setattr(service, "_enqueue_delete_refresh", refresh)
-    ttl_cleanup = removal != "interactive"
-    result = await service.rm(
-        uri,
-        ctx=request_context,
-        strict=ttl_cleanup,
-        preserve_summaries=ttl_cleanup,
-        verify_only=removal == "ttl_confirmation",
-        lease_ref={"lease_ref": "ttl-object-lock"} if ttl_cleanup else None,
-    )
-
-    assert fs.rm_calls == [uri]
-    assert result["estimated_deleted_count"] == 1
-    if ttl_cleanup:
-        assert memory == original
-        assert watch.deactivate_calls == []
-        assert "memory_cleanup" not in result
-        refresh.assert_not_awaited()
-    else:
-        assert memory != original
-        assert len(watch.deactivate_calls) == 1
-        assert result["memory_cleanup"] == links.result
-        refresh.assert_awaited_once()

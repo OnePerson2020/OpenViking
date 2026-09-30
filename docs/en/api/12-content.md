@@ -829,38 +829,8 @@ Task records are persisted under `/local/{account_id}/_system/tasks/{user_id}/{t
 
 ## Document expiry
 
-`GET /api/v1/content/ttl?uri=...` returns an event or session path's effective
-retention. A date directory (`events/YYYY/MM/DD`) or session root owns the
-lifetime; its L2 files and nested directories expose the same `expires_at` and
-`ttl_days`. No deadline is explicitly returned as `expires_at: null`. Summary
-files have no expiry. Upper policy containers return their own `policy` and
-resolved `effective_policy`, without a shared deadline.
+`GET /api/v1/content/ttl?uri=...` returns the owning date directory or session deadline and saved `ttl_days`. `expires_at` is explicitly null without TTL. Descendants and L0/L1/L2 inherit the owner deadline; policy roots also return `policy` and `effective_policy`.
 
-`PATCH /api/v1/content/ttl` changes one live **event date directory or session
-root**. Files, internal subdirectories, summaries and resources are rejected.
-Provide exactly one of `ttl_relative` (1–365000 whole days) or `expires_at`
-(a future ISO 8601 timestamp with timezone). Sessions accept `ttl_relative` only.
+Use SDK/MCP `get_ttl` or CLI `ov ttl get <uri>`. Deadlines are read-only; configure [library and root policies](../configuration/01-server.md#ttl) for new lifecycle directories. `PATCH /api/v1/content/ttl`, `update_ttl` and `ov ttl set` have been removed.
 
-```json
-{"uri": "viking://user/alice/memories/events/2026/09/28", "expires_at": "2027-01-01T00:00:00Z"}
-```
-
-Relative retention starts from the latest successful content update. Editing
-retention alone does not reset that time; shortening it can expire the directory
-immediately. An unmanaged directory uses its existing modification time. Later
-content changes renew the whole directory using the saved `ttl_days`. Setting
-`expires_at` fixes the deadline and clears `ttl_days`. Both modes preserve the
-existing generation and content; they do not regenerate summaries or embeddings.
-Expired directories cannot be revived.
-
-```bash
-ov ttl get viking://user/alice/memories/events/2026/09/28
-ov ttl set viking://user/alice/memories/events/2026/09/28 --ttl-relative 30
-ov ttl set viking://user/alice/memories/events/2026/09/28 --expires-at 2027-01-01T00:00:00Z
-ov ttl set viking://user/alice/sessions/chat-1 --ttl-relative 30
-```
-
-Python HTTP SDK and MCP use `get_ttl` and `update_ttl`, for example
-`await client.update_ttl(uri, ttl_relative=30)`. Defaults for future directories
-use [TTL configuration](../configuration/01-server.md#ttl). Cleanup removes L2
-only; all L0/L1 summaries and vectors remain unchanged. See [directory TTL](../concepts/17-ttl.md).
+See [Directory TTL](../concepts/17-ttl.md).

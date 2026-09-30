@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""TTL identity adapter for scheduled tasks.
+"""TTL deadline index for scheduled tasks.
 
 Object metadata remains authoritative for visibility and expiry.  This index is
 a projection in PersistentTaskStore. Future and retry work use its bounded due
@@ -37,7 +37,6 @@ class TTLRecord:
     account_id: str
     user_id: str
     expires_at: str
-    generation: str
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "TTLRecord":
@@ -47,7 +46,6 @@ class TTLRecord:
             account_id=str(value["account_id"]),
             user_id=str(value.get("user_id") or ""),
             expires_at=str(value["expires_at"]),
-            generation=str(value["generation"]),
         )
 
 
@@ -62,7 +60,7 @@ def cleanup_not_before(record: TTLRecord, jitter_seconds: float | None = None) -
     if not jitter_seconds:
         return record.expires_at
     identity = json.dumps(
-        [record.account_id, record.object_uri, record.generation, record.expires_at],
+        [record.account_id, record.object_uri, record.expires_at],
         separators=(",", ":"),
     )
     fraction = int.from_bytes(hashlib.sha256(identity.encode()).digest()[:8], "big") / 2**64
@@ -119,7 +117,7 @@ class TTLRegistry:
             payload={"record": fields, "retry_count": 0},
             run_at=cleanup_not_before(record),
             # Ordinary writes must not erase a claim lease or retry backoff.
-            preserve=lambda item: item["payload"]["record"] == fields,
+            preserve=lambda item: TTLRecord.from_dict(item["payload"]["record"]) == record,
         )
         self._known_accounts.add(record.account_id)
 
@@ -135,11 +133,12 @@ class TTLRegistry:
     async def get_scheduled(self, account_id: str, uri: str) -> Optional[dict]:
         return await self._tasks.get_scheduled(_TASK_KIND, self._key(account_id, uri))
 
-    async def remove_if_generation(self, account_id: str, uri: str, generation: str) -> bool:
+    async def remove_if_current(self, record: TTLRecord) -> bool:
+        """Remove only the scheduled deadline that this operation completed."""
         return await self._tasks.cancel_scheduled(
             _TASK_KIND,
-            self._key(account_id, uri),
-            condition=lambda item: item["payload"]["record"]["generation"] == generation,
+            self._key(record.account_id, record.object_uri),
+            condition=lambda item: TTLRecord.from_dict(item["payload"]["record"]) == record,
         )
 
     async def defer_retry(
@@ -165,7 +164,7 @@ class TTLRegistry:
             run_at=next_retry_at,
             condition=lambda item: (
                 item is not None
-                and item["payload"]["record"] == fields
+                and TTLRecord.from_dict(item["payload"]["record"]) == record
                 and (
                     expected_retry_count is None
                     or item["payload"].get("retry_count", 0) == expected_retry_count
@@ -186,8 +185,7 @@ def record_from_fields(
     ctx: RequestContext,
 ) -> Optional[TTLRecord]:
     expires_at = str(fields.get("expires_at") or "")
-    generation = str(fields.get("ttl_generation") or "")
-    if not expires_at or not generation:
+    if not expires_at:
         return None
     return TTLRecord(
         object_uri=uri,
@@ -195,5 +193,4 @@ def record_from_fields(
         account_id=ctx.account_id,
         user_id=ctx.user.user_id,
         expires_at=expires_at,
-        generation=generation,
     )

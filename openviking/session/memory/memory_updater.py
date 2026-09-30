@@ -147,11 +147,9 @@ async def write_stored_links(
             if current_trace_id:
                 mf.extra_fields["last_update_trace_id"] = current_trace_id
             bump_memory_version(mf)
-            from openviking.core.ttl import apply_ttl_fields
+            from openviking.core.ttl import strip_ttl_fields
 
-            mf.extra_fields = apply_ttl_fields(
-                uri, mf.extra_fields, existing_fields=mf.extra_fields
-            )
+            mf.extra_fields = strip_ttl_fields(mf.extra_fields)
             await viking_fs.write_file(
                 uri,
                 MemoryFileUtils.write(mf),
@@ -1344,11 +1342,9 @@ class MemoryUpdater:
                     source=RESOURCE_REF_SOURCE_SESSION_COMMIT,
                 )
                 if changed:
-                    from openviking.core.ttl import apply_ttl_fields
+                    from openviking.core.ttl import strip_ttl_fields
 
-                    mf.extra_fields = apply_ttl_fields(
-                        uri, mf.extra_fields, existing_fields=mf.extra_fields
-                    )
+                    mf.extra_fields = strip_ttl_fields(mf.extra_fields)
                     await viking_fs.write_file(
                         uri,
                         MemoryFileUtils.write(mf),
@@ -1470,20 +1466,10 @@ class MemoryUpdater:
 
             metadata["version"] = next_memory_version(old_content)
 
-            # TTL is system-owned. The same helper is used by public content
-            # writes: creation freezes the current policy while updates retain
-            # the object's original snapshot and ignore LLM-supplied TTL fields.
-            from openviking.config.ttl import resolve_ttl_config
-            from openviking.core.ttl import apply_ttl_fields
+            # File metadata cannot override the owning directory's deadline.
+            from openviking.core.ttl import strip_ttl_fields
 
-            metadata = apply_ttl_fields(
-                uri,
-                metadata,
-                existing_fields=old_content.extra_fields if old_content is not None else None,
-                config=await resolve_ttl_config(viking_fs, ctx.account_id)
-                if old_content is None
-                else None,
-            )
+            metadata = strip_ttl_fields(metadata)
 
             # Handle links/backlinks fields: merge with existing
             incoming_links_by_uri = getattr(resolved_op, "_incoming_links_by_uri", {})
@@ -1728,11 +1714,9 @@ class MemoryUpdater:
                     mf.extra_fields["last_update_trace_id"] = current_trace_id
                 mf.content = plain_content
                 bump_memory_version(mf)
-                from openviking.core.ttl import apply_ttl_fields
+                from openviking.core.ttl import strip_ttl_fields
 
-                mf.extra_fields = apply_ttl_fields(
-                    uri, mf.extra_fields, existing_fields=mf.extra_fields
-                )
+                mf.extra_fields = strip_ttl_fields(mf.extra_fields)
                 await viking_fs.write_file(
                     uri,
                     MemoryFileUtils.write(mf),
@@ -1873,7 +1857,6 @@ class MemoryUpdater:
                     user=ctx.user,
                     account_id=ctx.account_id,
                     expires_at=mf.extra_fields.get("expires_at"),
-                    ttl_generation=mf.extra_fields.get("ttl_generation"),
                 )
                 memory_context.set_vectorize(Vectorize(text=embedding_text))
 

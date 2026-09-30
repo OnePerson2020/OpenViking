@@ -363,30 +363,16 @@ class FSService:
         ):
             raise InvalidArgumentError(f"cannot create storage internal name: {uri}")
 
+    async def lifetime_fields(self, uri: str, ctx: RequestContext) -> dict:
+        from openviking.storage.ttl_view import TTLView
+
+        return await TTLView(self._ensure_initialized(), ctx).fields(uri)
+
     async def get_ttl(self, uri: str, ctx: RequestContext) -> dict:
         from openviking.storage.document_ttl import get_document_ttl
 
         self._reject_storage_internal_target(uri)
         return await get_document_ttl(self._ensure_initialized(), uri, ctx=ctx)
-
-    async def update_ttl(
-        self,
-        uri: str,
-        expires_at: str | None,
-        ctx: RequestContext,
-        *,
-        ttl_relative: int | None = None,
-    ) -> dict:
-        from openviking.storage.document_ttl import update_document_expiry
-
-        self._reject_storage_internal_target(uri)
-        return await update_document_expiry(
-            self._ensure_initialized(),
-            uri,
-            expires_at,
-            ctx=ctx,
-            ttl_relative=ttl_relative,
-        )
 
     async def mkdir(
         self,
@@ -471,7 +457,6 @@ class FSService:
         *,
         strict: bool = False,
         lease_ref: Optional[Dict[str, Any]] = None,
-        preserve_summaries: bool = False,
         verify_only: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Remove resource."""
@@ -489,15 +474,9 @@ class FSService:
             recursive=recursive,
             ctx=ctx,
             strict=strict,
-            **({"preserve_summaries": True} if preserve_summaries else {}),
             **({"verify_only": True} if verify_only else {}),
             **({"lease_ref": lease_ref} if lease_ref is not None else {}),
         )
-        if preserve_summaries:
-            # TTL retires L2 only. Ordinary deletion hooks rewrite linked
-            # long-term memories and disable Watch, preventing changed sources
-            # from being imported later. Neither belongs to expiry cleanup.
-            return result
         await self._sync_watch_after_rm(uri, account_id=ctx.account_id, context_type=context_type)
         # A refresh on a parent that no longer exists would lock its sidecar
         # paths and thereby recreate the deleted directory. Nothing to
@@ -1013,7 +992,10 @@ class FSService:
         overview_limit: int = 4000,
     ) -> ListingPage:
         """Get directory tree."""
+        from openviking.storage.ttl_view import TTLView
+
         viking_fs = self._ensure_initialized()
+        ttl_view = TTLView(viking_fs, ctx)
 
         async def fetch_page(page_offset: int, page_limit: Optional[int]) -> List[Dict[str, Any]]:
             """Fetch and return one pre-tag tree page."""
@@ -1048,7 +1030,7 @@ class FSService:
                 or include_abstract is True
                 or include_overview is True
             ):
-                return ListingPage(
+                page = ListingPage(
                     entries=await viking_fs._finalize_listing_entries(
                         page.entries,
                         output,
@@ -1062,6 +1044,7 @@ class FSService:
                     ),
                     has_more=page.has_more,
                 )
+            page.entries = await ttl_view.attach_many(page.entries)
             return page
 
         fetch_limit = node_limit + 1 if node_limit > 0 else node_limit
@@ -1070,7 +1053,7 @@ class FSService:
             entries, ctx, None, include_tags or "tags" in (extra_fields or [])
         )
         return ListingPage(
-            entries=entries[:node_limit] if node_limit > 0 else entries,
+            entries=await ttl_view.attach_many(entries[:node_limit] if node_limit > 0 else entries),
             has_more=node_limit > 0 and len(entries) > node_limit,
         )
 
@@ -1206,7 +1189,9 @@ class FSService:
         matches = result.get("matches", [])
         if include_tags and not normalized_tags and any("tags" not in match for match in matches):
             matches = await self._attach_and_filter_tags(matches, ctx, None, include_tags=True)
-        result["matches"] = matches
+        from openviking.storage.ttl_view import TTLView
+
+        result["matches"] = await TTLView(viking_fs, ctx).attach_many(matches)
         result["count"] = len(matches)
         return result
 
@@ -1242,6 +1227,12 @@ class FSService:
             )
         )
         if not project_tags:
+            if extra_fields is not None:
+                from openviking.storage.ttl_view import TTLView
+
+                result["matches"] = await TTLView(viking_fs, ctx).attach_many(
+                    result.get("matches", [])
+                )
             return result
 
         matches = await self._attach_and_filter_tags(
@@ -1249,7 +1240,9 @@ class FSService:
         )
         if node_limit is not None and node_limit > 0:
             matches = matches[:node_limit]
-        result["matches"] = matches
+        from openviking.storage.ttl_view import TTLView
+
+        result["matches"] = await TTLView(viking_fs, ctx).attach_many(matches)
         result["count"] = len(matches)
         return result
 

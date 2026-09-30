@@ -644,6 +644,7 @@ class HierarchicalRetriever:
             results.append(
                 MatchedContext(
                     uri=display_uri,
+                    expires_at=c.get("expires_at"),
                     context_type=ContextType(c["context_type"])
                     if c.get("context_type")
                     else ContextType.RESOURCE,
@@ -651,9 +652,7 @@ class HierarchicalRetriever:
                     abstract=abstract,
                     category=c.get("category", ""),
                     score=final_score,
-                    search_tags=normalize_search_tags(
-                        c.get("search_tags"), discard_invalid=True
-                    ),
+                    search_tags=normalize_search_tags(c.get("search_tags"), discard_invalid=True),
                 )
             )
 

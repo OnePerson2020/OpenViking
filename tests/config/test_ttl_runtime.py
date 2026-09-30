@@ -92,8 +92,8 @@ async def test_account_policy_mode_replaces_incompatible_cluster_fields(scope, m
 @pytest.mark.parametrize("account", [False, True])
 async def test_policy_switches_are_atomic_and_keep_other_directories(account):
     original = get_openviking_config()
-    first = "viking://user/u1/memories/events/2026/09"
-    sibling = "viking://user/u1/memories/events/2026/10"
+    first = "viking://user/u1/memories/events"
+    sibling = "viking://user/u1/peers/p1/memories/events"
     manager = manager_over_source(
         MemoryConfigSource(), base_config=original.model_copy(update={"ttl": TTLConfig()})
     )

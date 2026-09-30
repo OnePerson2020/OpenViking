@@ -25,14 +25,13 @@ from openviking.server.auth import (
 from openviking.server.dependencies import get_service
 from openviking.server.error_mapping import map_exception
 from openviking.server.identity import RequestContext, Role
-from openviking.server.models import Response
+from openviking.server.models import ContentResponse, Response
 from openviking.server.telemetry import run_operation
 from openviking.storage.acl import AclSpec
 from openviking.storage.vector_ids import is_vector_record_id
 from openviking.telemetry import TelemetryRequest
 from openviking_cli.exceptions import InvalidArgumentError, NotFoundError, PermissionDeniedError
 from openviking_cli.utils import get_logger
-from openviking_cli.utils.config.ttl_config import DocumentTTL
 
 logger = get_logger(__name__)
 
@@ -106,33 +105,11 @@ class ReindexRequest(BaseModel):
 router = APIRouter(prefix="/api/v1/content", tags=["content"])
 
 
-class UpdateTTLRequest(DocumentTTL):
-    model_config = ConfigDict(extra="forbid")
-    uri: str
-
-
 @router.get("/ttl")
 async def get_ttl(uri: str = Query(...), _ctx: RequestContext = Depends(get_request_context)):
     """Read an event or session path's effective directory expiry."""
     uri = validate_request_viking_uri(resolve_path_variables(uri), _ctx)
     return Response(status="ok", result=await get_service().fs.get_ttl(uri, _ctx))
-
-
-@router.patch("/ttl")
-async def update_ttl(
-    request: UpdateTTLRequest, _ctx: RequestContext = Depends(get_request_context)
-):
-    """Change a live event date directory or session's retention."""
-    uri = validate_request_viking_uri(resolve_path_variables(request.uri), _ctx)
-    return Response(
-        status="ok",
-        result=await get_service().fs.update_ttl(
-            uri,
-            request.expires_at,
-            _ctx,
-            ttl_relative=request.ttl_relative,
-        ),
-    )
 
 
 def _authorize_reindex_uri(uri: str, ctx: RequestContext) -> str:
@@ -183,7 +160,11 @@ async def read(
             raise mapped from e
         raise
 
-    return Response(status="ok", result=result)
+    return ContentResponse(
+        status="ok",
+        result=result,
+        expires_at=(await service.fs.lifetime_fields(uri, _ctx))["expires_at"],
+    )
 
 
 @router.get("/abstract")
@@ -203,7 +184,11 @@ async def abstract(
         if mapped is not None:
             raise mapped from e
         raise
-    return Response(status="ok", result=result)
+    return ContentResponse(
+        status="ok",
+        result=result,
+        expires_at=(await service.fs.lifetime_fields(uri, _ctx))["expires_at"],
+    )
 
 
 @router.get("/overview")
@@ -223,7 +208,11 @@ async def overview(
         if mapped is not None:
             raise mapped from e
         raise
-    return Response(status="ok", result=result)
+    return ContentResponse(
+        status="ok",
+        result=result,
+        expires_at=(await service.fs.lifetime_fields(uri, _ctx))["expires_at"],
+    )
 
 
 @router.get("/download")

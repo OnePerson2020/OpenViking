@@ -287,6 +287,7 @@ class MatchedContext:
     match_reason: str = ""
 
     search_tags: List[str] = field(default_factory=list)
+    expires_at: Optional[str] = None
 
 
 @dataclass
@@ -376,6 +377,7 @@ class FindResult:
         return {
             "context_type": ctx.context_type.value,
             "uri": ctx.uri,
+            "expires_at": ctx.expires_at,
             "level": ctx.level,
             "score": ctx.score,
             "abstract": ctx.abstract,
@@ -399,6 +401,7 @@ class FindResult:
             "matched_contexts": [
                 {
                     "uri": ctx.uri,
+                    "expires_at": ctx.expires_at,
                     "tier": f"L{ctx.level}",
                     "context_type": ctx.context_type.value,
                     "score": ctx.score,

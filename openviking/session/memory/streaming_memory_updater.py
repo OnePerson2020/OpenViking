@@ -54,7 +54,6 @@ from openviking.session.memory.utils.streaming_batcher import (
     StreamingBatcher,
     StreamingBatcherConfig,
 )
-from openviking.session.ttl_fence import session_generation_fence
 from openviking.storage.viking_fs import get_viking_fs
 from openviking.telemetry import tracer
 from openviking.telemetry.tracer import get_trace_id
@@ -99,8 +98,6 @@ class MemoryMergeGroupKey:
 
     peer_id: str | None
     memory_type: str
-    source_session_uri: str = ""
-    source_ttl_generation: str = ""
 
 
 @dataclass(slots=True)
@@ -251,20 +248,11 @@ class StreamingMemoryUpdater:
         lock_paths = _uri_lock_paths(_link_endpoint_uri_set(links), viking_fs, request.ctx)
         async with self._apply_lock:
             lease = None
-            source_session_path = _source_session_lock_path(request, viking_fs)
-            if source_session_path:
-                lock_requests = [{"path": path, "kind": "exact"} for path in lock_paths]
-                lock_requests.append({"path": source_session_path, "kind": "tree"})
-                lease = await viking_fs._async_agfs.pathlock_acquire_batch(
-                    lock_requests, timeout_secs=_MEMORY_APPLY_LOCK_TIMEOUT_SECONDS
-                )
-            elif lock_paths:
+            if lock_paths:
                 lease = await viking_fs._async_agfs.pathlock_acquire_exact_batch(
                     lock_paths, timeout_secs=_MEMORY_APPLY_LOCK_TIMEOUT_SECONDS
                 )
             try:
-                if not await _source_session_is_current(request, viking_fs):
-                    return
                 valid_links = await filter_valid_links(
                     links,
                     upsert_operations=result.operations.upsert_operations,
@@ -516,13 +504,6 @@ class StreamingMemoryUpdater:
                 request=request,
             )
             try:
-                if not await _source_session_is_current(request, viking_fs):
-                    tracer.info(
-                        "StreamingMemoryUpdater skipped stale session writeback "
-                        f"session_uri={(request.metadata or {}).get('source_session_uri')}",
-                        console=self.config.trace_console,
-                    )
-                    return MemoryUpdateResult()
                 updater = MemoryUpdater(
                     registry=request.memory_registry or self.registry,
                     vikingdb=self.vikingdb,
@@ -687,7 +668,6 @@ def split_request_by_merge_group(
     and applied.
     """
     operations = request.operations
-    source_session_uri, source_ttl_generation = _source_session_fence(request)
     upsert_groups: dict[MemoryMergeGroupKey, list[ResolvedOperation]] = {}
     delete_groups: dict[MemoryMergeGroupKey, list[MemoryFile]] = {}
     passthrough_upserts: list[ResolvedOperation] = []
@@ -702,8 +682,6 @@ def split_request_by_merge_group(
             group_key = MemoryMergeGroupKey(
                 peer_id=peer_id,
                 memory_type=single_uri_op.memory_type,
-                source_session_uri=source_session_uri,
-                source_ttl_generation=source_ttl_generation,
             )
             upsert_groups.setdefault(group_key, []).append(single_uri_op)
 
@@ -711,8 +689,6 @@ def split_request_by_merge_group(
         group_key = MemoryMergeGroupKey(
             peer_id=_peer_id_for_memory_file(file),
             memory_type=file.memory_type or "",
-            source_session_uri=source_session_uri,
-            source_ttl_generation=source_ttl_generation,
         )
         delete_groups.setdefault(group_key, []).append(file)
 
@@ -753,8 +729,6 @@ def split_request_by_merge_group(
         group_key = MemoryMergeGroupKey(
             peer_id=None,
             memory_type="",
-            source_session_uri=source_session_uri,
-            source_ttl_generation=source_ttl_generation,
         )
         grouped_requests.append(
             (
@@ -2247,11 +2221,6 @@ async def acquire_memory_operation_lease(
     MemoryUpdater._materialize_uri_migrations(operations)
     exact_paths = set(_operation_lock_paths(operations, viking_fs, ctx))
     tree_paths = set(_operation_tree_lock_paths(operations, viking_fs, ctx))
-    source_session_path = (
-        _source_session_lock_path(request, viking_fs) if request is not None else None
-    )
-    if source_session_path:
-        tree_paths.add(source_session_path)
     exact_paths = _exclude_tree_covered_paths(exact_paths, tree_paths)
     if not exact_paths and not tree_paths:
         return None
@@ -2295,43 +2264,6 @@ async def acquire_memory_operation_lease(
             )
 
     raise AssertionError("unreachable")
-
-
-def _source_session_fence(request: MemoryUpdateRequest) -> tuple[str, str]:
-    metadata = request.metadata or {}
-    session_uri = str(metadata.get("source_session_uri") or "").rstrip("/")
-    generation = str(metadata.get("source_ttl_generation") or "")
-    if not session_uri or not generation:
-        return "", ""
-    return session_uri, generation
-
-
-def _source_session_lock_path(request: MemoryUpdateRequest, viking_fs: Any | None) -> str | None:
-    session_uri, generation = _source_session_fence(request)
-    if viking_fs is None:
-        return None
-    fence = session_generation_fence(
-        viking_fs,
-        request.ctx,
-        session_uri=session_uri,
-        generation=generation,
-    )
-    return fence.lock_path() or None
-
-
-async def _source_session_is_current(request: MemoryUpdateRequest, viking_fs: Any | None) -> bool:
-    """Validate a queued session incarnation immediately before writeback."""
-    session_uri, generation = _source_session_fence(request)
-    if not session_uri or not generation:
-        return True
-    if viking_fs is None:
-        return False
-    return await session_generation_fence(
-        viking_fs,
-        request.ctx,
-        session_uri=session_uri,
-        generation=generation,
-    ).is_current()
 
 
 def _uri_lock_paths(

@@ -24,7 +24,6 @@ from openviking.pyagfs.exceptions import (
 )
 from openviking.server.error_mapping import is_not_found_error, map_exception
 from openviking.server.identity import RequestContext, Role
-from openviking.storage.abstract_overview import is_abstract_overview_uri
 from openviking.storage.acl import AclAction
 from openviking.storage.ttl_registry import TTLRecord
 from openviking.storage.viking_fs._base import (
@@ -140,39 +139,25 @@ class _SnapshotMixin:
     def _restore_tree_path(tree_dir: Optional[str], relative_path: str) -> str:
         return f"{tree_dir or ''}/{relative_path}".strip("/")
 
-    @staticmethod
-    def _restore_ttl_target(uri: str) -> Optional[tuple[str, str]]:
-        if is_abstract_overview_uri(uri):
-            return None
-        target = ttl_object_for_uri(uri)
-        return target
-
     async def _ensure_restore_target_ttl(self, uri: str, *, ctx: RequestContext) -> None:
         """Reject raw overwrites that cannot preserve an existing lifecycle.
 
         Snapshot and package restore publish original bytes, bypassing content
         renewal. Call under their write lock before any write or removal.
         """
-        target = self._restore_ttl_target(uri)
+        target = ttl_object_for_uri(uri)
         if target is None:
             return
         kind, owner = target
-        metadata_uri = ttl_metadata_uri(kind, owner)
-        try:
-            stat = await self._async_agfs.stat(
-                self._uri_to_path(metadata_uri, ctx=ctx), bypass_cache=True
-            )
-            if stat.get("isDir"):
-                return
-            raw = self._handle_agfs_read(
-                await self._async_agfs.read(self._uri_to_path(metadata_uri, ctx=ctx))
-            )
-        except Exception as exc:
-            if not is_not_found_error(exc):
-                raise
-            current = None
-        else:
-            current = self._ttl_record_for_write(metadata_uri, raw, ctx=ctx)
+        from openviking.storage.directory_ttl import read_directory_fields
+        from openviking.storage.ttl_registry import record_from_fields
+
+        current = record_from_fields(
+            uri=owner,
+            object_type=kind,
+            fields=await read_directory_fields(self, owner, ctx=ctx),
+            ctx=ctx,
+        )
         registered = await self.ttl_registry.get(ctx.account_id, owner)
         record = current or registered
         if record is None:
@@ -194,22 +179,17 @@ class _SnapshotMixin:
         checked_sources: set[str] = set()
         for uri in sorted(writes):
             await self._ensure_restore_target_ttl(uri, ctx=real_ctx)
-            target = self._restore_ttl_target(uri)
+            target = ttl_object_for_uri(uri)
             if target is None:
                 continue
             metadata_uri = ttl_metadata_uri(*target)
             if metadata_uri in checked_sources:
                 continue
             checked_sources.add(metadata_uri)
-            try:
-                blob = await self._async_agfs.run(
-                    "git_show",
-                    account=real_ctx.account_id,
-                    target_ref=str(plan["source"]),
-                    path=self._uri_to_tree_path(metadata_uri, ctx=real_ctx),
-                )
-            except AGFSPathNotFoundError:
-                continue  # A source snapshot may predate TTL adoption.
+            metadata = await self._snapshot_ttl_metadata(target, str(plan["source"]), ctx=real_ctx)
+            if metadata is None:
+                continue
+            metadata_uri, blob = metadata
             record = self._ttl_record_for_write(metadata_uri, blob["bytes"], ctx=real_ctx)
             if record is not None:
                 if hidden_by_ttl(record.expires_at):
@@ -324,11 +304,7 @@ class _SnapshotMixin:
                 # cleaner will observe the missing metadata and strictly clear
                 # the complete session scope, including orphan vectors.
                 continue
-            await self.ttl_registry.remove_if_generation(
-                real_ctx.account_id,
-                previous.object_uri,
-                previous.generation,
-            )
+            await self.ttl_registry.remove_if_current(previous)
 
     async def system_sync_status(
         self, uri: str, ctx: Optional[RequestContext] = None
@@ -808,10 +784,28 @@ class _SnapshotMixin:
         background.add_done_callback(self._background_tasks.discard)
         return task.task_id
 
+    async def _snapshot_ttl_metadata(self, target, source_ref, *, ctx):
+        kind, owner = target
+        candidates = [ttl_metadata_uri(kind, owner)]
+        if kind == OBJECT_TYPE_EVENT:
+            candidates.append(owner + "/.ttl.json")
+        for metadata_uri in candidates:
+            try:
+                blob = await self._async_agfs.run(
+                    "git_show",
+                    account=ctx.account_id,
+                    target_ref=source_ref,
+                    path=self._uri_to_tree_path(metadata_uri, ctx=ctx),
+                )
+                return metadata_uri, blob
+            except AGFSPathNotFoundError:
+                continue
+        return None
+
     async def _ensure_snapshot_ttl_visible(self, uri, source_ref, content, *, ctx):
         """Check source expiry and the selected snapshot's own lifecycle metadata."""
         scope = ttl_scope_for_uri(uri)
-        if scope is None or is_abstract_overview_uri(uri):
+        if scope is None:
             return
         if not await self._ttl_uri_visible(uri, ctx):
             raise NotFoundError(uri, "git_blob")
@@ -819,29 +813,20 @@ class _SnapshotMixin:
         if target is None:
             return
         kind, owner = target
-        try:
-            metadata = await self._async_agfs.run(
-                "git_show",
-                account=ctx.account_id,
-                target_ref=source_ref,
-                path=self._uri_to_tree_path(ttl_metadata_uri(kind, owner), ctx=ctx),
-            )
-        except AGFSPathNotFoundError:
+        metadata = await self._snapshot_ttl_metadata(target, source_ref, ctx=ctx)
+        if metadata is None:
             return
-        fields = json.loads(metadata["bytes"])
-        # A live renewal of the same incarnation supersedes its historic deadline.
-        record = await self.ttl_registry.get(ctx.account_id, owner)
-        expiry = (
-            record.expires_at
-            if record is not None and record.generation == fields.get("ttl_generation")
-            else fields.get("expires_at")
-        )
+        fields = json.loads(metadata[1]["bytes"])
+        from openviking.storage.directory_ttl import read_directory_fields
+
+        live = await read_directory_fields(self, owner, ctx=ctx)
+        expiry = live.get("expires_at", fields.get("expires_at"))
         if hidden_by_ttl(expiry):
             raise NotFoundError(uri, "git_blob")
 
     async def _read_snapshot_blob(self, target_ref, *, path, ctx, max_blob_bytes=None):
         await self._ensure_access(path, ctx)
-        scoped = ttl_scope_for_uri(path) is not None and not is_abstract_overview_uri(path)
+        scoped = ttl_scope_for_uri(path) is not None
         if scoped:
             # Resolve moving refs once: content and sidecar must come from one commit.
             metadata = await self._async_agfs.run(
@@ -956,7 +941,7 @@ class _SnapshotMixin:
                 raise TypeError(
                     f"git_show returned unexpected blob response: {type(response).__name__}"
                 )
-            if ttl_scope_for_uri(path) is not None and not is_abstract_overview_uri(path):
+            if ttl_scope_for_uri(path) is not None:
                 await self._ensure_snapshot_ttl_visible(path, ref, response["bytes"], ctx=real_ctx)
             return response["bytes"]
 

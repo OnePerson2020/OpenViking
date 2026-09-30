@@ -273,8 +273,8 @@ async def test_batch_replace_memory_preserves_metadata(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_batch_event_create_freezes_ttl_and_replace_preserves_snapshot(monkeypatch):
-    root = "viking://user/default/memories/events/2026"
+async def test_batch_event_writes_strip_file_ttl_overrides(monkeypatch):
+    root = "viking://user/default/memories/events/2026/09/28"
     event_uri = f"{root}/note.md"
     vfs = _VFS(root)
     coordinator = ContentWriteCoordinator(vfs)
@@ -305,13 +305,8 @@ async def test_batch_event_create_freezes_ttl_and_replace_preserves_snapshot(mon
         wait=False,
     )
     created = MemoryFileUtils.read(vfs.files[event_uri], uri=event_uri)
-    frozen = {
-        field: created.extra_fields[field]
-        for field in ("ttl_days", "received_at", "expires_at", "ttl_generation")
-    }
-    assert frozen["ttl_days"] == 5
-    assert frozen["received_at"] != "2999-01-01T00:00:00.000Z"
-    assert frozen["expires_at"] != "2999-01-02T00:00:00.000Z"
+    ttl_fields = {"ttl_days", "received_at", "expires_at", "ttl_generation"}
+    assert ttl_fields.isdisjoint(created.extra_fields)
 
     config.user_events.ttl_days = 30
     await coordinator.batch_write(
@@ -322,7 +317,7 @@ async def test_batch_event_create_freezes_ttl_and_replace_preserves_snapshot(mon
     )
     updated = MemoryFileUtils.read(vfs.files[event_uri], uri=event_uri)
     assert updated.content == "updated"
-    assert {field: updated.extra_fields[field] for field in frozen} == frozen
+    assert ttl_fields.isdisjoint(updated.extra_fields)
 
 
 @pytest.mark.asyncio

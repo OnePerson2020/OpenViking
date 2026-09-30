@@ -361,23 +361,21 @@ async def test_diff_does_not_treat_missing_storage_object_as_absent():
         )
 
 
-def _ttl_event(generation: str, expires_at: str = "2030-01-02T00:00:00.000Z") -> bytes:
+def _ttl_event(expires_at: str = "2030-01-02T00:00:00.000Z") -> bytes:
     fields = {
         "ttl_days": 1,
         "received_at": "2030-01-01T00:00:00.000Z",
         "expires_at": expires_at,
-        "ttl_generation": generation,
     }
     return json.dumps(fields).encode()
 
 
-def _ttl_session(generation: str) -> bytes:
+def _ttl_session() -> bytes:
     return json.dumps(
         {
             "ttl_days": 1,
             "received_at": "2030-01-01T00:00:00.000Z",
             "expires_at": "2030-01-02T00:00:00.000Z",
-            "ttl_generation": generation,
         }
     ).encode()
 
@@ -394,15 +392,15 @@ class _MemoryTTLRegistry:
         return any(account == account_id for account, _uri in self.records)
 
     async def upsert(self, record):
-        self.mutations.append(("upsert", record.object_uri, record.generation))
+        self.mutations.append(("upsert", record.object_uri, record.expires_at))
         self.records[(record.account_id, record.object_uri)] = record
 
-    async def remove_if_generation(self, account_id, uri, generation):
-        current = self.records.get((account_id, uri))
-        self.mutations.append(("remove", uri, generation))
-        if current is None or current.generation != generation:
+    async def remove_if_current(self, record):
+        key = (record.account_id, record.object_uri)
+        self.mutations.append(("remove", record.object_uri, record.expires_at))
+        if self.records.get(key) != record:
             return False
-        del self.records[(account_id, uri)]
+        del self.records[key]
         return True
 
 
@@ -474,14 +472,13 @@ def _restore_plan(*, to_write=(), to_delete=()):
     }
 
 
-def _record(uri: str, generation: str) -> TTLRecord:
+def _record(uri: str) -> TTLRecord:
     return TTLRecord(
         object_uri=uri,
         object_type="session" if "/sessions/" in uri else "event",
         account_id="account",
         user_id="user",
         expires_at="2029-01-01T00:00:00.000Z",
-        generation=generation,
     )
 
 
@@ -491,7 +488,7 @@ async def test_restore_registers_ttl_event_and_session_before_writeback():
     plan = _restore_plan(to_write=(event_path, session_meta))
     agfs = _RestoreAGFS(
         plan=plan,
-        blobs={event_path: _ttl_event("event-new"), session_meta: _ttl_session("session-new")},
+        blobs={event_path: _ttl_event(), session_meta: _ttl_session()},
         result={
             "result": "applied",
             "written_paths": [event_path, session_meta],
@@ -505,16 +502,16 @@ async def test_restore_registers_ttl_event_and_session_before_writeback():
 
     event_uri = "viking://user/user/memories/events/2026/09/28/".rstrip("/")
     session_uri = "viking://user/user/sessions/s1"
-    assert registry.records[("account", event_uri)].generation == "event-new"
-    assert registry.records[("account", session_uri)].generation == "session-new"
+    assert registry.records[("account", event_uri)].expires_at == "2030-01-02T00:00:00.000Z"
+    assert registry.records[("account", session_uri)].expires_at == "2030-01-02T00:00:00.000Z"
     apply_index = next(
         index
         for index, call in enumerate(agfs.calls)
         if call[0] == "git_restore" and not call[1].get("dry_run")
     )
     assert registry.mutations == [
-        ("upsert", event_uri, "event-new"),
-        ("upsert", session_uri, "session-new"),
+        ("upsert", event_uri, "2030-01-02T00:00:00.000Z"),
+        ("upsert", session_uri, "2030-01-02T00:00:00.000Z"),
     ]
     assert all(call[0] == "git_show" for call in agfs.calls[2:apply_index])
     assert agfs.calls[apply_index][1]["source_commit"] == "a" * 40
@@ -525,9 +522,7 @@ async def test_restore_rejects_nonttl_overwrite_before_any_mutation():
     deleted_meta = "user/user/sessions/deleted/.meta.json"
     overwritten_uri = "viking://user/user/memories/events/2026/09/27/".rstrip("/")
     deleted_uri = "viking://user/user/sessions/deleted"
-    registry = _MemoryTTLRegistry(
-        [_record(overwritten_uri, "old-event"), _record(deleted_uri, "old-session")]
-    )
+    registry = _MemoryTTLRegistry([_record(overwritten_uri), _record(deleted_uri)])
     plan = _restore_plan(to_write=(overwritten_path,), to_delete=(deleted_meta,))
     agfs = _RestoreAGFS(
         plan=plan,
@@ -568,7 +563,7 @@ async def test_partial_restore_rolls_back_preregistration_for_failed_write():
     )
     agfs = _RestoreAGFS(
         plan=plan,
-        blobs={success_path: _ttl_event("success-new"), failed_path: _ttl_event("failed-new")},
+        blobs={success_path: _ttl_event(), failed_path: _ttl_event()},
         error=partial,
     )
     vfs = _restore_vfs(agfs, registry)
@@ -576,20 +571,20 @@ async def test_partial_restore_rolls_back_preregistration_for_failed_write():
     with pytest.raises(GitRestoreWritebackPartialError):
         await VikingFS.restore(vfs, source_commit="source", ctx=_request_context())
 
-    assert registry.records[("account", success_uri)].generation == "success-new"
+    assert registry.records[("account", success_uri)].expires_at == "2030-01-02T00:00:00.000Z"
     assert ("account", failed_uri) not in registry.records
 
 
-async def test_restore_rejects_replacing_a_live_generation():
+async def test_restore_rejects_replacing_a_live_deadline():
     path = "user/user/memories/events/2026/09/28/.ttl.json"
     uri = f"viking://{path}".removesuffix("/.ttl.json")
-    old = _record(uri, "old")
+    old = _record(uri)
     old = TTLRecord(**{**old.__dict__, "expires_at": "2040-01-01T00:00:00.000Z"})
     registry = _MemoryTTLRegistry([old])
     plan = _restore_plan(to_write=(path,))
     agfs = _RestoreAGFS(
         plan=plan,
-        blobs={path: _ttl_event("new", "2030-01-02T00:00:00.000Z")},
+        blobs={path: _ttl_event("2030-01-02T00:00:00.000Z")},
         result={"result": "applied", "written_paths": [path], "deleted_paths": []},
     )
     vfs = _restore_vfs(agfs, registry)
@@ -604,7 +599,7 @@ async def test_restore_rejects_removing_managed_session_metadata():
     session_uri = "viking://user/user/sessions/s1"
     session_meta = "user/user/sessions/s1/.meta.json"
     session_child = "user/user/sessions/s1/messages.jsonl"
-    old = _record(session_uri, "session-old")
+    old = _record(session_uri)
     registry = _MemoryTTLRegistry([old])
     plan = _restore_plan(to_delete=(session_meta, session_child))
     partial = GitRestoreWritebackPartialError(
@@ -630,7 +625,7 @@ async def test_restore_dry_run_does_not_touch_ttl_registry():
     registry = _MemoryTTLRegistry()
     agfs = _RestoreAGFS(
         plan=_restore_plan(to_write=(path,)),
-        blobs={path: _ttl_event("new")},
+        blobs={path: _ttl_event()},
     )
     vfs = _restore_vfs(agfs, registry)
 
@@ -659,9 +654,9 @@ async def test_restore_old_content_preserves_current_lifecycle(scope, expires_at
     owner = uri.rsplit("/", 1)[0]
     metadata_uri = ttl_metadata_uri(kind, owner)
     metadata = (
-        _ttl_event("current", expires_at)
+        _ttl_event(expires_at)
         if scope == "event"
-        else json.dumps({"expires_at": expires_at, "ttl_generation": "current"}).encode()
+        else json.dumps({"expires_at": expires_at}).encode()
     )
     current = {"/local/account/" + metadata_uri.removeprefix("viking://"): metadata}
     agfs = _RestoreAGFS(
@@ -711,7 +706,7 @@ async def test_snapshot_reads_enforce_historical_and_current_expiry(
     kind = scope
     owner = uri.rsplit("/", 1)[0]
     meta_uri = ttl.ttl_metadata_uri(kind, owner)
-    fields = {"expires_at": "2000-01-01T00:00:00Z", "ttl_generation": "old"}
+    fields = {"expires_at": "2000-01-01T00:00:00Z"}
     metadata = json.dumps(fields).encode()
     blobs = {
         uri.removeprefix("viking://"): b"expired body",

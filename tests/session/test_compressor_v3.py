@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import inspect
-from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -48,7 +47,6 @@ from openviking.session.train import (
     Trajectory,
 )
 from openviking.session.train.components.session_commit import _case_spec_message_to_request
-from openviking.session.ttl_fence import StaleSessionGenerationError
 from openviking.telemetry import OperationTelemetry, bind_telemetry
 from openviking_cli.exceptions import ConflictError
 from openviking_cli.session.user_id import UserIdentifier
@@ -838,7 +836,9 @@ async def test_v3_extract_uses_patch_merge_without_directory_lock(monkeypatch):
             return SimpleNamespace(operations=request.operations, apply_result=result)
 
     registry = DummyRegistry()
-    compressor = SessionCompressorV3(vikingdb=None)
+    compressor = SessionCompressorV3(
+        vikingdb=None, vlm_resolver=SimpleNamespace(get_vlm=AsyncMock(return_value=None))
+    )
     compressor._get_or_create_react = lambda **kwargs: DummyOrchestrator()
 
     async def fake_train_from_extracted_cases(**kwargs):
@@ -958,7 +958,9 @@ async def test_v3_extract_trains_only_canonical_case_after_patch_merge(monkeypat
             )
 
     registry = DummyRegistry()
-    compressor = SessionCompressorV3(vikingdb=None)
+    compressor = SessionCompressorV3(
+        vikingdb=None, vlm_resolver=SimpleNamespace(get_vlm=AsyncMock(return_value=None))
+    )
     compressor._get_or_create_react = lambda **kwargs: DummyOrchestrator()
 
     async def fake_train_from_extracted_cases(**kwargs):
@@ -1665,28 +1667,6 @@ async def test_commit_experience_snapshot_skips_when_no_visible_content_changed(
         experience_uris=[],
         archive_uri="viking://user/u/sessions/session-1/history/archive_001",
     )
-
-    viking_fs.commit.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_commit_experience_snapshot_propagates_stale_session_generation():
-    class StaleFence:
-        @asynccontextmanager
-        async def lock(self):
-            raise StaleSessionGenerationError("stale session incarnation")
-            yield
-
-    viking_fs = SimpleNamespace(commit=AsyncMock())
-
-    with pytest.raises(StaleSessionGenerationError, match="stale session incarnation"):
-        await _commit_experience_snapshot(
-            viking_fs,
-            ctx=_ctx(),
-            experience_uris=["viking://user/u/memories/experiences/booking.md"],
-            archive_uri="viking://user/u/sessions/session-1/history/archive_001",
-            write_fence=StaleFence(),
-        )
 
     viking_fs.commit.assert_not_awaited()
 

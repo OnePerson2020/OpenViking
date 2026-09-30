@@ -445,7 +445,6 @@ async def vectorize_directory_meta(
         queue_manager = get_queue_manager()
         embedding_queue = queue_manager.get_queue(queue_manager.EMBEDDING)
 
-        source_ttl = {}
         parent_uri = VikingURI(uri).parent.uri
         owner_space = owner_space_for_uri(uri)
 
@@ -486,10 +485,6 @@ async def vectorize_directory_meta(
                 telemetry_id=telemetry_id,
             )
             level_overrides = (scalar_overrides or {}).get(int(ContextLevel.ABSTRACT.value))
-            if msg_abstract is not None:
-                msg_abstract.context_data.update(
-                    {k: v for k, v in source_ttl.items() if k in TTL_FIELD_NAMES}
-                )
             if msg_abstract is not None and context_type in {"memory", "resource"}:
                 msg_abstract.context_data["_source_sidecar_uri"] = f"{uri}/.abstract.md"
                 msg_abstract.context_data["_source_sidecar_digest"] = semantic_body_digest(abstract)
@@ -554,10 +549,6 @@ async def vectorize_directory_meta(
                 telemetry_id=telemetry_id,
             )
             level_overrides = (scalar_overrides or {}).get(int(ContextLevel.OVERVIEW.value))
-            if msg_overview is not None:
-                msg_overview.context_data.update(
-                    {k: v for k, v in source_ttl.items() if k in TTL_FIELD_NAMES}
-                )
             if msg_overview is not None and context_type in {"memory", "resource"}:
                 msg_overview.context_data["_source_sidecar_uri"] = f"{uri}/.overview.md"
                 msg_overview.context_data["_source_sidecar_digest"] = semantic_body_digest(overview)
@@ -633,12 +624,6 @@ async def vectorize_file(
         queue_manager = get_queue_manager()
         embedding_queue = queue_manager.get_queue(queue_manager.EMBEDDING)
         viking_fs = get_viking_fs()
-
-        # Capture the incarnation before reading/vectorizing content. A source
-        # replacement during this operation must invalidate the queued write.
-        from openviking.storage.directory_ttl import read_directory_fields
-
-        source_ttl = await read_directory_fields(viking_fs, file_path, ctx=ctx)
 
         file_name = summary_dict.get("name") or os.path.basename(file_path)
         summary = summary_dict.get("summary", "")
@@ -770,13 +755,6 @@ async def vectorize_file(
         _apply_ingest_options(embedding_msg, ingest_options)
         _apply_scalar_overrides(embedding_msg, scalar_override)
         _apply_planned_field_patch(embedding_msg, field_patch)
-        # OVPack/reindex must take the incarnation fence from the restored
-        # source, never from vector scalars (cloud schemas have no TTL fields).
-        if source_ttl is not None:
-            for field in TTL_FIELD_NAMES:
-                embedding_msg.context_data.pop(field, None)
-                if source_ttl.get(field) is not None:
-                    embedding_msg.context_data[field] = source_ttl[field]
         enqueued = await _enqueue_embedding_message(
             embedding_queue,
             embedding_msg,

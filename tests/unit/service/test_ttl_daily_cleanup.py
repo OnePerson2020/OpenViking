@@ -11,7 +11,7 @@ import pytest
 
 from openviking.core.ttl import hidden_by_ttl
 from openviking.service import ttl_cleanup
-from openviking.storage.ttl_registry import TTLRegistry
+from openviking.storage.ttl_registry import TTLRecord, TTLRegistry
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 from tests.unit.storage.test_ttl_registry import _MemoryAGFS, _record
 
@@ -155,9 +155,7 @@ async def test_daily_backlog_drains_multiple_pages_with_backpressure_and_restart
     async def consume(count):
         for _ in range(count):
             item = queue.items.popleft()["target"]
-            assert await registry.remove_if_generation(
-                item["account_id"], item["object_uri"], item["generation"]
-            )
+            assert await registry.remove_if_current(TTLRecord.from_dict(item))
             removed.append(item["object_uri"])
 
     # Even after partial consumption/restart, finish the durable page first.
@@ -176,9 +174,7 @@ async def test_daily_backlog_drains_multiple_pages_with_backpressure_and_restart
 
     expected = [
         record.object_uri
-        for record in sorted(
-            records, key=lambda item: ttl_cleanup.cleanup_not_before(item)
-        )
+        for record in sorted(records, key=lambda item: ttl_cleanup.cleanup_not_before(item))
     ]
     assert removed == expected
     assert queue.peak == 100
