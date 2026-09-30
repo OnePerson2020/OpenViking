@@ -89,8 +89,6 @@ class AutoCommitPolicyRequest(BaseModel):
     keep_recent_count: Optional[int] = None
     min_commit_interval_seconds: Optional[int] = None
 
-    model_config = {"extra": "forbid"}
-
     @model_validator(mode="after")
     def reject_explicit_null_fields(self) -> "AutoCommitPolicyRequest":
         null_fields = [field for field in self.model_fields_set if getattr(self, field) is None]
@@ -175,7 +173,17 @@ class CreateSessionRequest(BaseModel):
     memory_extraction_config: Optional[MemoryExtractionConfigRequest] = None
     telemetry: TelemetryRequest = False
 
-    model_config = {"extra": "forbid"}
+    @model_validator(mode="before")
+    @classmethod
+    def reject_object_ttl_fields(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            unsupported = sorted(
+                set(value)
+                & {"ttl_relative", "ttl_absolute", "ttl_days", "ttl_per_file", "expires_at"}
+            )
+            if unsupported:
+                raise ValueError(f"Session TTL is configured on the sessions root: {unsupported}")
+        return value
 
 
 def _event_tags_from_extraction_config(

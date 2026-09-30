@@ -19,7 +19,7 @@ from openviking.core.namespace import (
     is_session_uri,
     owner_space_for_uri,
 )
-from openviking.core.ttl import TTL_FIELD_NAMES
+from openviking.core.ttl import TTL_FIELD_NAMES, ttl_object_for_uri
 from openviking.parse.parsers.media.utils import (
     MPEG_TS_PROBE_BYTES,
     is_mpeg_ts,
@@ -317,6 +317,7 @@ async def _build_image_data_uri(
     file_name: str,
     viking_fs,
     ctx: Optional[RequestContext],
+    content: Optional[bytes] = None,
 ) -> Optional[str]:
     """Read an image file and encode it as a base64 ``data:`` URI.
 
@@ -325,7 +326,8 @@ async def _build_image_data_uri(
     Returns None if the image cannot be read.
     """
     try:
-        content = await viking_fs.read_file_bytes(file_path, ctx=ctx)
+        if content is None:
+            content = await viking_fs.read_file_bytes(file_path, ctx=ctx)
         image_config = getattr(get_openviking_config(), "image", None)
         return image_bytes_to_model_data_uri(content, file_name, config=image_config)
     except Exception as e:
@@ -421,6 +423,7 @@ async def vectorize_directory_meta(
     actions: Optional[Dict[int, IndexAction | str]] = None,
     field_patches: Optional[Dict[int, FieldPatch]] = None,
     telemetry_id: str | None = None,
+    md5s: Optional[Dict[int, str]] = None,
 ) -> set[int]:
     """
     Vectorize directory metadata (.abstract.md and .overview.md).
@@ -470,6 +473,7 @@ async def vectorize_directory_meta(
                 account_id=ctx.account_id,
                 owner_space=owner_space,
                 meta=meta,
+                md5=(md5s or {}).get(int(ContextLevel.ABSTRACT.value)),
             )
             context_abstract.set_vectorize(
                 Vectorize(text=embedding_text_for_body(ContextLevel.ABSTRACT, uri, abstract))
@@ -485,7 +489,7 @@ async def vectorize_directory_meta(
                 telemetry_id=telemetry_id,
             )
             level_overrides = (scalar_overrides or {}).get(int(ContextLevel.ABSTRACT.value))
-            if msg_abstract is not None and context_type in {"memory", "resource"}:
+            if msg_abstract is not None and ttl_object_for_uri(uri) is not None:
                 msg_abstract.context_data["_source_sidecar_uri"] = f"{uri}/.abstract.md"
                 msg_abstract.context_data["_source_sidecar_digest"] = semantic_body_digest(abstract)
             _apply_scalar_overrides(
@@ -534,6 +538,7 @@ async def vectorize_directory_meta(
                 account_id=ctx.account_id,
                 owner_space=owner_space,
                 meta=meta,
+                md5=(md5s or {}).get(int(ContextLevel.OVERVIEW.value)),
             )
             context_overview.set_vectorize(
                 Vectorize(text=embedding_text_for_body(ContextLevel.OVERVIEW, uri, overview))
@@ -549,7 +554,7 @@ async def vectorize_directory_meta(
                 telemetry_id=telemetry_id,
             )
             level_overrides = (scalar_overrides or {}).get(int(ContextLevel.OVERVIEW.value))
-            if msg_overview is not None and context_type in {"memory", "resource"}:
+            if msg_overview is not None and ttl_object_for_uri(uri) is not None:
                 msg_overview.context_data["_source_sidecar_uri"] = f"{uri}/.overview.md"
                 msg_overview.context_data["_source_sidecar_digest"] = semantic_body_digest(overview)
             _apply_scalar_overrides(
@@ -605,6 +610,7 @@ async def vectorize_file(
     ingest_options: IngestOptions | None = None,
     file_md5: Optional[str] = None,
     file_content: Optional[bytes] = None,
+    materialize_content: bool = False,
     action: str = "merge",
     telemetry_id: str | None = None,
 ) -> bool:
@@ -716,7 +722,9 @@ async def vectorize_file(
                     context.set_vectorize(Vectorize(text=embedding_text))
         elif content_type == ResourceContentType.IMAGE:
             # Multimodal embedders consume both parts; text-only embedders fall back to summary.
-            image_uri = await _build_image_data_uri(file_path, file_name, viking_fs, ctx)
+            image_uri = await _build_image_data_uri(
+                file_path, file_name, viking_fs, ctx, content=file_content
+            )
             if image_uri:
                 context.set_vectorize(Vectorize(text=summary, images=[image_uri]))
             elif summary:
@@ -754,6 +762,21 @@ async def vectorize_file(
 
         _apply_ingest_options(embedding_msg, ingest_options)
         _apply_scalar_overrides(embedding_msg, scalar_override)
+        if (
+            materialize_content
+            and file_content is not None
+            and (
+                content_type is ResourceContentType.TEXT
+                or (content_type is None and is_text_file(file_name))
+            )
+        ):
+            from openviking.storage.viking_vector_index_backend import (
+                VIKINGDB_CONTENT_MAX_SIZE,
+            )
+
+            embedding_msg.context_data["_materialized_content"] = _coerce_text_file_content(
+                file_content
+            )[:VIKINGDB_CONTENT_MAX_SIZE]
         _apply_planned_field_patch(embedding_msg, field_patch)
         enqueued = await _enqueue_embedding_message(
             embedding_queue,

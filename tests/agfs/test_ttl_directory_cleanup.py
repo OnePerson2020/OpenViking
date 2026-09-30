@@ -14,7 +14,8 @@ from openviking.core import ttl
 from openviking.service.ttl_cleanup import TTLCleanupService
 from openviking.storage.abstract_overview import render_abstract_overview
 from openviking.storage.directory_ttl import read_directory_fields
-from openviking.storage.errors import StorageException
+from openviking.storage.errors import LockAcquisitionError, StorageException
+from openviking.storage.ttl_registry import TTLRegistry
 from openviking.storage.vector_ids import vector_record_id
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 from openviking_cli.exceptions import NotFoundError
@@ -167,6 +168,28 @@ async def test_busy_file_defers_cleanup_without_tree_lock(binding_fs, monkeypatc
         assert await fs.ttl_registry.get(ctx.account_id, root) == record
     finally:
         await fs._async_agfs.pathlock_release(lock)
+    assert (await _cleanup_once(cleanup, record))["deleted"]
+
+
+@pytest.mark.asyncio
+async def test_active_embedding_defers_cleanup_until_vector_write_finishes(binding_fs):
+    fs, ctx = binding_fs, root_ctx()
+    owner = "viking://user/default/memories/events/2026/09/28"
+    await fs.write_file(owner + "/event.txt", "body", ctx=ctx)
+    await fs.write_file(
+        owner + "/.meta.json", json.dumps({"expires_at": "2000-01-01T00:00:00Z"}), ctx=ctx
+    )
+    record = await fs.ttl_registry.get(ctx.account_id, owner)
+    cleanup = TTLCleanupService(service=SimpleNamespace(viking_fs=fs))
+    guard = await fs._async_agfs.pathlock_acquire_exact(
+        TTLRegistry.vector_lock_path(ctx.account_id, owner)
+    )
+    try:
+        with pytest.raises(LockAcquisitionError):
+            await _cleanup_once(cleanup, record)
+        assert await fs.ttl_registry.get(ctx.account_id, owner) == record
+    finally:
+        await fs._async_agfs.pathlock_release(guard)
     assert (await _cleanup_once(cleanup, record))["deleted"]
 
 

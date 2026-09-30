@@ -85,6 +85,11 @@ class TTLRegistry:
     def record_path(cls, account_id: str, uri: str) -> str:
         return PersistentTaskStore.schedule_path(_TASK_KIND, cls._key(account_id, uri))
 
+    @classmethod
+    def vector_lock_path(cls, account_id: str, uri: str) -> str:
+        """Stable lock outside the object, so late embeddings cannot recreate it."""
+        return cls.record_path(account_id, uri) + ".vector_lock"
+
     @staticmethod
     def marker_path(account_id: str) -> str:
         return f"{_ROOT}/{account_id}/{_MARKER}"

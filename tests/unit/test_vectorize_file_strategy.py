@@ -326,6 +326,33 @@ async def test_vectorize_image_downsamples_large_embedding_input(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_vectorize_image_uses_supplied_bytes_without_second_read(monkeypatch):
+    queue = DummyQueue()
+    original = _jpeg_bytes(20, 20)
+    fs = DummyFS(b"must not be read")
+    monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
+    monkeypatch.setattr(embedding_utils, "get_viking_fs", lambda: fs)
+    monkeypatch.setattr(
+        embedding_utils,
+        "get_openviking_config",
+        lambda: types.SimpleNamespace(
+            embedding=types.SimpleNamespace(text_source="content_only", max_input_tokens=1000),
+            image=ImageConfig(preview_max_dimension=64, max_file_size_mb=100.0),
+        ),
+    )
+
+    await embedding_utils.vectorize_file(
+        file_path="viking://resources/docs/image.jpg",
+        summary_dict={"name": "image.jpg", "summary": "image"},
+        parent_uri="viking://resources/docs",
+        ctx=DummyReq(),
+        file_content=original,
+    )
+
+    assert fs.read_file_bytes_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_vectorize_file_registers_request_wait_with_embedding_msg_id(monkeypatch):
     queue = DummyQueueWithId()
     registered = []
@@ -633,31 +660,41 @@ async def test_vectorize_directory_meta_writes_search_tags_into_embedding_contex
 
 
 @pytest.mark.asyncio
-async def test_memory_directory_vectors_are_fenced_by_source_sidecars(monkeypatch):
+@pytest.mark.parametrize(
+    ("uri", "fenced"),
+    [
+        ("viking://user/default/memories/events/2026/09/30", True),
+        ("viking://user/default/memories/events/2026", False),
+        ("viking://user/default/resources/demo", False),
+    ],
+)
+async def test_only_ttl_directory_vectors_acquire_source_sidecar_locks(monkeypatch, uri, fenced):
     from openviking.storage.abstract_overview import semantic_body_digest
 
     queue = DummyQueue()
     monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
     monkeypatch.setattr(embedding_utils, "get_viking_fs", lambda: DummyFS("ignored"))
-    uri = "viking://user/default/memories/events/2026"
-
     await embedding_utils.vectorize_directory_meta(
         uri=uri,
         abstract="event abstract",
         overview="event overview",
-        context_type="memory",
+        context_type="memory" if "/memories/" in uri else "resource",
         ctx=DummyReq(),
         content_is_body=True,
     )
 
-    assert queue.items[0].context_data["_source_sidecar_uri"] == f"{uri}/.abstract.md"
-    assert queue.items[0].context_data["_source_sidecar_digest"] == semantic_body_digest(
-        "event abstract"
-    )
-    assert queue.items[1].context_data["_source_sidecar_uri"] == f"{uri}/.overview.md"
-    assert queue.items[1].context_data["_source_sidecar_digest"] == semantic_body_digest(
-        "event overview"
-    )
+    for msg, name, body in zip(
+        queue.items,
+        (".abstract.md", ".overview.md"),
+        ("event abstract", "event overview"),
+        strict=True,
+    ):
+        if fenced:
+            assert msg.context_data["_source_sidecar_uri"] == f"{uri}/{name}"
+            assert msg.context_data["_source_sidecar_digest"] == semantic_body_digest(body)
+        else:
+            assert "_source_sidecar_uri" not in msg.context_data
+            assert "_source_sidecar_digest" not in msg.context_data
 
 
 @pytest.mark.asyncio
@@ -704,6 +741,26 @@ async def test_vectorize_directory_meta_applies_merge_per_level(monkeypatch):
     assert "_upsert_options" not in queue.items[0].context_data
     assert queue.items[0].action.value == "merge"
     assert queue.items[1].action.value == "upsert"
+
+
+@pytest.mark.asyncio
+async def test_vectorize_directory_meta_writes_per_level_source_md5(monkeypatch):
+    queue = DummyQueue()
+    monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
+    monkeypatch.setattr(embedding_utils, "get_viking_fs", lambda: DummyFS("ignored"))
+
+    await embedding_utils.vectorize_directory_meta(
+        uri="viking://user/default/resources/demo",
+        abstract="demo abstract",
+        overview="demo overview",
+        ctx=DummyReq(),
+        md5s={0: "abstract-md5", 1: "overview-md5"},
+    )
+
+    assert [item.context_data["md5"] for item in queue.items] == [
+        "abstract-md5",
+        "overview-md5",
+    ]
 
 
 @pytest.mark.asyncio

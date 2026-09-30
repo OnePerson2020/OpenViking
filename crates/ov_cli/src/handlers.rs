@@ -1478,7 +1478,7 @@ pub async fn handle_reindex(
     uri: String,
     mode: String,
     wait: bool,
-    dry_run: bool,
+    force: bool,
     tags: Vec<String>,
     tag_mode: String,
     recursive: bool,
@@ -1490,7 +1490,7 @@ pub async fn handle_reindex(
         &uri,
         &mode,
         wait,
-        dry_run,
+        force,
         tags,
         &tag_mode,
         recursive,
@@ -1517,6 +1517,7 @@ pub async fn handle_find(
     context_type: Option<Vec<String>>,
     tags: Option<Vec<String>>,
     read_content: bool,
+    events_time_decay_protection: Option<String>,
     ctx: CliContext,
 ) -> Result<()> {
     let query = query.unwrap_or_default();
@@ -1551,6 +1552,9 @@ pub async fn handle_find(
     if read_content {
         params.push("--read-content".to_string());
     }
+    if let Some(ref protection) = events_time_decay_protection {
+        params.push(format!("--events-time-decay-protection {}", protection));
+    }
     params.push(format!("\"{}\"", query));
     print_command_echo("ov find", &params.join(" "), ctx.config.echo_command);
     let client = ctx.get_client();
@@ -1568,6 +1572,7 @@ pub async fn handle_find(
         context_type,
         tags,
         read_content,
+        events_time_decay_protection,
         ctx.output_format,
         ctx.compact,
     )
@@ -1578,6 +1583,7 @@ pub async fn handle_search(
     query: Option<String>,
     uri: String,
     image: Option<String>,
+    search_type: String,
     session_id: Option<String>,
     node_limit: i32,
     threshold: Option<f64>,
@@ -1587,6 +1593,7 @@ pub async fn handle_search(
     context_type: Option<Vec<String>>,
     tags: Option<Vec<String>>,
     read_content: bool,
+    events_time_decay_protection: Option<String>,
     ctx: CliContext,
 ) -> Result<()> {
     let query = query.unwrap_or_default();
@@ -1595,7 +1602,15 @@ pub async fn handle_search(
             "Search query or --image must not be empty.".to_string(),
         ));
     }
+    if search_type == "keywords" && image.is_some() {
+        return Err(Error::Client(
+            "--image is not supported with --search-type keywords.".to_string(),
+        ));
+    }
     let mut params = vec![format!("--uri={}", uri), format!("-n {}", node_limit)];
+    if search_type != "semantic" {
+        params.push(format!("--search-type {}", search_type));
+    }
     if let Some(ref img) = image {
         params.push(format!("--image {}", img));
     }
@@ -1624,6 +1639,9 @@ pub async fn handle_search(
     if read_content {
         params.push("--read-content".to_string());
     }
+    if let Some(ref protection) = events_time_decay_protection {
+        params.push(format!("--events-time-decay-protection {}", protection));
+    }
     params.push(format!("\"{}\"", query));
     print_command_echo("ov search", &params.join(" "), ctx.config.echo_command);
     let client = ctx.get_client();
@@ -1632,6 +1650,7 @@ pub async fn handle_search(
         &query,
         &uri,
         image,
+        &search_type,
         session_id,
         node_limit,
         threshold,
@@ -1642,6 +1661,7 @@ pub async fn handle_search(
         context_type,
         tags,
         read_content,
+        events_time_decay_protection,
         ctx.output_format,
         ctx.compact,
     )
@@ -1673,6 +1693,9 @@ pub async fn handle_ls(
     simple: bool,
     recursive: bool,
     abs_limit: i32,
+    include_abstract: Option<bool>,
+    include_overview: Option<bool>,
+    overview_limit: i32,
     show_all_hidden: bool,
     node_limit: i32,
     offset: i32,
@@ -1693,6 +1716,15 @@ pub async fn handle_ls(
     }
     if recursive {
         params.push("-r".to_string());
+    }
+    if let Some(value) = include_abstract {
+        params.push(format!("--include-abstract={value}"));
+    }
+    if let Some(value) = include_overview {
+        params.push(format!("--include-overview={value}"));
+    }
+    if include_overview == Some(true) {
+        params.push(format!("--overview-limit {overview_limit}"));
     }
     if show_all_hidden {
         params.push("-a".to_string());
@@ -1723,6 +1755,18 @@ pub async fn handle_ls(
     } else {
         "agent"
     };
+    let include_abstract = include_abstract.or_else(|| {
+        fields
+            .as_ref()
+            .is_some_and(|items| items.iter().any(|item| item == "abstract"))
+            .then_some(true)
+    });
+    let include_overview = include_overview.or_else(|| {
+        fields
+            .as_ref()
+            .is_some_and(|items| items.iter().any(|item| item == "overview"))
+            .then_some(true)
+    });
     commands::filesystem::ls(
         &client,
         &uri,
@@ -1730,6 +1774,9 @@ pub async fn handle_ls(
         recursive,
         api_output,
         abs_limit,
+        include_abstract,
+        include_overview,
+        overview_limit,
         show_all_hidden,
         node_limit,
         offset,

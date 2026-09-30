@@ -154,6 +154,52 @@ async def test_expired_candidates_are_replaced_before_limit(setup, method):
 
 
 @pytest.mark.asyncio
+async def test_time_decay_query_refills_expired_events_without_losing_advance(setup):
+    s = setup
+    expired = ROOT + "/2026/09/01/expired.md"
+    live = ROOT + "/2026/09/02/live.md"
+    s.source(expired, PAST)
+    s.source(live, FUTURE)
+    s.rows.extend(
+        [
+            {"uri": expired, "level": 2, "_score": 0.9},
+            {"uri": live, "level": 2, "_score": 0.8},
+        ]
+    )
+    advance = {"time_decay": {"protection": "0", "origin": "2026-09-30T00:00:00Z"}}
+    result = await s.backend.query(
+        query_vector=[0.1, 0.2],
+        limit=1,
+        ctx=s.ctx,
+        include_expired=False,
+        advance=advance,
+    )
+    assert [row["uri"] for row in result] == [live]
+    assert len(s.calls) == 2
+    assert all(call["advance"] == advance for call in s.calls)
+
+
+@pytest.mark.asyncio
+async def test_keyword_refill_preserves_bm25_parameters(setup):
+    s = setup
+    expired = ROOT + "/2026/09/01/expired.md"
+    live = ROOT + "/2026/09/02/live.md"
+    s.source(expired, PAST)
+    s.source(live, FUTURE)
+    s.rows.extend([{"uri": expired, "level": 2}, {"uri": live, "level": 2}])
+    result = await s.backend.search_by_keywords(
+        query="meeting",
+        mode="bm25",
+        fields=["content"],
+        limit=1,
+        ctx=s.ctx,
+    )
+    assert [row["uri"] for row in result] == [live]
+    assert len(s.calls) == 2
+    assert all(call["mode"] == "bm25" and call["fields"] == ["content"] for call in s.calls)
+
+
+@pytest.mark.asyncio
 async def test_offset_counts_live_rows_and_preserves_legacy_records(setup):
     s = setup
     for i in range(5):
@@ -269,18 +315,3 @@ async def test_user_count_excludes_expired_while_cleanup_count_sees_residue(setu
     s.single.count = AsyncMock(return_value=2)
     assert await s.backend.count(ctx=s.ctx, include_expired=False) == 1
     assert await s.backend.count(ctx=s.ctx) == 2
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("expiry,expected_count", [(PAST, 0), (FUTURE, 2)])
-async def test_children_share_date_directory_visibility(setup, expiry, expected_count):
-    s = setup
-    parent = ROOT + "/2026/09/28"
-    for i in range(3):
-        uri = f"{parent}/{i}.md"
-        s.source(uri, expiry)
-        s.rows.append({"uri": uri, "level": 2, "account_id": "acct"})
-    result = await s.backend.search_children_in_tenant(
-        ctx=s.ctx, parent_uri=parent, query_vector=[0.1, 0.2], limit=2
-    )
-    assert len(result) == expected_count

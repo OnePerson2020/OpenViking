@@ -54,6 +54,7 @@ from openviking.utils.model_retry import (
     ERROR_CLASS_INPUT_TOO_LARGE,
     ERROR_CLASS_PERMANENT,
 )
+from openviking.utils.tags import merge_search_tags
 from openviking.utils.time_utils import get_current_timestamp
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils import get_logger
@@ -589,6 +590,9 @@ class TextEmbeddingHandler(DequeueHandlerBase):
         ctx: RequestContext,
     ) -> str:
         inserted_data = embedding_msg.context_data
+        materialized = inserted_data.pop("_materialized_content", None)
+        if isinstance(materialized, str):
+            return materialized[:VIKINGDB_CONTENT_MAX_SIZE]
         if inserted_data.get("is_leaf") and inserted_data.get("context_type") in (
             ContextType.RESOURCE.value,
             ContextType.SKILL.value,
@@ -882,6 +886,7 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                     source_sidecar_digest = str(
                         inserted_data.pop("_source_sidecar_digest", "") or ""
                     )
+                    extracted_memory_type = raw_upsert_options.pop("extracted_memory_type", None)
                     # Reuse the actual vector-store ID when a semantic plan
                     # rebuilds an existing same-level record. Only genuinely new
                     # records derive an ID locally from (account, uri, level).
@@ -902,6 +907,7 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                                 embedding_msg,
                                 ctx,
                             )
+                        write_data.pop("_materialized_content", None)
                         if embedding_msg.action is IndexAction.MERGE:
                             field_patch = embedding_msg.field_patch
                             merge_fields = (
@@ -932,6 +938,11 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                             write_data = FieldPatch(merge_fields, merge_modes).apply(
                                 {**base, **write_data}
                             )
+                            if extracted_memory_type:
+                                write_data["search_tags"] = merge_search_tags(
+                                    write_data.get("search_tags"),
+                                    [f"memory_type={extracted_memory_type}"],
+                                )
                             if not existing_records:
                                 missing_fields = missing_initial_record_fields(write_data)
                                 if missing_fields:
@@ -958,12 +969,18 @@ class TextEmbeddingHandler(DequeueHandlerBase):
                             options=upsert_options,
                         )
 
-                    if source_sidecar_uri and source_sidecar_digest:
-                        result = await self._write_directory_vector_if_current(
-                            source_sidecar_uri,
-                            source_sidecar_digest,
-                            ctx,
-                            _write_vector,
+                    from openviking.core.ttl import ttl_object_for_uri
+
+                    if uri and ttl_object_for_uri(str(uri)) is not None:
+                        level = int(inserted_data.get("level", 2))
+                        if level == 0:
+                            source_uri = source_sidecar_uri or f"{uri}/.abstract.md"
+                        elif level == 1:
+                            source_uri = source_sidecar_uri or f"{uri}/.overview.md"
+                        else:
+                            source_uri = str(uri)
+                        result = await self._write_ttl_vector_if_current(
+                            source_uri, source_sidecar_digest, ctx, _write_vector
                         )
                         if result is None:
                             self._merge_request_stats(embedding_msg.telemetry_id, processed=1)
@@ -1069,31 +1086,40 @@ class TextEmbeddingHandler(DequeueHandlerBase):
             if embedding_msg is not None and request_failed_message is not None:
                 self._record_request_failure(embedding_msg, request_failed_message)
 
-    async def _write_directory_vector_if_current(
+    async def _write_ttl_vector_if_current(
         self,
-        sidecar_uri: str,
+        source_uri: str,
         expected_digest: str,
         ctx: RequestContext,
         write_vector,
     ) -> Any:
-        """Fence delayed directory embeddings with their source sidecar."""
+        """Fence late vectors with cleanup, then validate their source."""
+        from openviking.core.ttl import ttl_object_for_uri
         from openviking.storage.abstract_overview import (
             body_for_preview,
             semantic_body_digest,
         )
+        from openviking.storage.ttl_registry import TTLRegistry
         from openviking.storage.viking_fs import get_viking_fs
 
+        owner = ttl_object_for_uri(source_uri)
+        if owner is None:
+            raise ValueError(f"No TTL owner for vector source: {source_uri}")
         viking_fs = get_viking_fs()
-        path = viking_fs._uri_to_path(sidecar_uri, ctx=ctx)
-        lease = await viking_fs._async_agfs.pathlock_acquire_exact(path, timeout_secs=300.0)
+        lease = await viking_fs._async_agfs.pathlock_acquire_exact(
+            TTLRegistry.vector_lock_path(ctx.account_id, owner[1]), timeout_secs=300.0
+        )
         try:
             try:
-                raw = await viking_fs.read_file(sidecar_uri, ctx=ctx)
+                if expected_digest:
+                    raw = await viking_fs.read_file(source_uri, ctx=ctx)
+                else:
+                    await viking_fs.stat(source_uri, ctx=ctx, skip_count=True)
             except Exception as exc:
                 if is_storage_not_found(exc):
                     return None
                 raise
-            if semantic_body_digest(body_for_preview(raw)) != expected_digest:
+            if expected_digest and semantic_body_digest(body_for_preview(raw)) != expected_digest:
                 return None
             return await write_vector()
         finally:

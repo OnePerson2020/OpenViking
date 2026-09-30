@@ -35,7 +35,7 @@ from openviking.session.ttl_renewal import reconcile_session_ttl
 from openviking.storage.errors import StorageException, VikingDBException
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
 from openviking.storage.queuefs.process_result import ProcessResult
-from openviking.storage.ttl_registry import TTLRecord, cleanup_not_before
+from openviking.storage.ttl_registry import TTLRecord, TTLRegistry, cleanup_not_before
 from openviking.utils.time_utils import format_iso8601
 from openviking_cli.exceptions import InvalidArgumentError, PermissionDeniedError
 from openviking_cli.session.user_id import UserIdentifier
@@ -308,6 +308,12 @@ class TTLCleanupService:
             ttl_metadata_uri(scheduled.object_type, scheduled.object_uri), ctx=ctx
         )
         requests = [{"path": metadata_path, "kind": "exact"}]
+        requests.append(
+            {
+                "path": TTLRegistry.vector_lock_path(scheduled.account_id, scheduled.object_uri),
+                "kind": "exact",
+            }
+        )
         if scheduled.object_type == OBJECT_TYPE_SESSION:
             # Reuse the existing session mutation mutex; exact acquisition does
             # not traverse or block every child as a tree lock would.

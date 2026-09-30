@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import openviking.storage.viking_fs._access as access_module
 from openviking.server.identity import RequestContext, Role
 from openviking.storage import viking_fs as viking_fs_module
 from openviking.storage.ttl_registry import TTLRecord
@@ -117,7 +116,6 @@ async def test_read_hides_partial_cleanup_session_when_metadata_is_already_gone(
             account_id=ctx.account_id,
             user_id=ctx.user.user_id,
             expires_at="2000-01-01T00:00:00.000Z",
-            generation="generation-1",
         )
     )
 
@@ -127,67 +125,64 @@ async def test_read_hides_partial_cleanup_session_when_metadata_is_already_gone(
 
 
 @pytest.mark.asyncio
-async def test_default_off_account_skips_object_metadata_read(monkeypatch, fs):
+async def test_unmanaged_event_without_metadata_remains_visible(monkeypatch, fs):
     ctx = _default_ctx()
-    uri = "viking://user/default/memories/events/legacy.md"
+    uri = "viking://user/default/memories/events/2026/06/11/legacy.md"
     path = fs._uri_to_path(uri, ctx=ctx)
-    marker_check = AsyncMock(return_value=False)
-    metadata_read = AsyncMock(side_effect=AssertionError("TTL metadata must not be parsed"))
+    metadata_read = AsyncMock(side_effect=FileNotFoundError)
 
-    monkeypatch.setattr(fs.ttl_registry, "account_may_have_records", marker_check)
-    monkeypatch.setattr(access_module, "ttl_enabled", lambda: False)
+    monkeypatch.setattr(fs.ttl_registry, "get", AsyncMock(return_value=None))
     monkeypatch.setattr(fs._async_agfs, "read", metadata_read)
 
     assert await fs._ttl_uri_visible(uri, ctx, path=path) is True
-    marker_check.assert_awaited_once_with(ctx.account_id)
-    metadata_read.assert_not_awaited()
+    metadata_read.assert_awaited()
 
 
 @pytest.mark.asyncio
 async def test_ls_and_tree_apply_node_limit_after_ttl_filter(monkeypatch, fs):
     ctx = _default_ctx()
-    root_uri = "viking://user/default/memories/events/2026/09/28"
+    root_uri = "viking://user/default/memories/events/2026/09"
     root_path = fs._uri_to_path(root_uri, ctx=ctx)
-    expired_path = f"{root_path}/expired.md"
-    live_path = f"{root_path}/.abstract.md"
+    expired_path = f"{root_path}/28"
+    live_path = f"{root_path}/29"
     contents = {
-        expired_path: b"expired body",
-        root_path + "/.ttl.json": _event_with_expiry("2000-01-01T00:00:00.000Z"),
-        live_path: _event_with_expiry("2999-01-01T00:00:00.000Z"),
+        expired_path + "/.meta.json": _event_with_expiry("2000-01-01T00:00:00.000Z"),
+        live_path + "/.meta.json": _event_with_expiry("2999-01-01T00:00:00.000Z"),
     }
-    monkeypatch.setattr(fs.ttl_registry, "account_may_have_records", AsyncMock(return_value=True))
 
     async def stat(path, **kwargs):
-        if path == root_path:
+        if path in {root_path, expired_path, live_path}:
             return {"name": "events", "isDir": True}
         if path in contents:
-            return {"name": path.rsplit("/", 1)[-1], "isDir": False}
+            return {"name": ".meta.json", "isDir": False}
         raise FileNotFoundError(path)
 
     entries = [
         {
-            "name": "expired.md",
+            "name": "28",
             "size": 1,
-            "mode": 0o644,
+            "mode": 0o755,
             "modTime": "2026-01-01T00:00:00Z",
-            "isDir": False,
+            "isDir": True,
         },
         {
-            "name": ".abstract.md",
+            "name": "29",
             "size": 1,
-            "mode": 0o644,
+            "mode": 0o755,
             "modTime": "2026-01-01T00:00:00Z",
-            "isDir": False,
+            "isDir": True,
         },
     ]
 
     async def ls(_path, **_kwargs):
-        return entries
+        offset = _kwargs.get("offset", 0)
+        limit = _kwargs.get("limit")
+        return entries[offset : offset + limit] if limit is not None else entries[offset:]
 
     async def tree_directory(_path, **_kwargs):
         return [
-            make_entry(expired_path, "expired.md", is_dir=False),
-            make_entry(live_path, ".abstract.md", is_dir=False),
+            make_entry(expired_path, "28", is_dir=True),
+            make_entry(live_path, "29", is_dir=True),
         ]
 
     monkeypatch.setattr(fs._async_agfs, "stat", stat)
@@ -198,8 +193,8 @@ async def test_ls_and_tree_apply_node_limit_after_ttl_filter(monkeypatch, fs):
     listed = await fs.ls(root_uri, node_limit=1, ctx=ctx, show_all_hidden=True)
     tree = await fs.tree(root_uri, node_limit=1, ctx=ctx, show_all_hidden=True)
 
-    assert [entry["uri"] for entry in listed] == [f"{root_uri}/.abstract.md"]
-    assert [entry["uri"] for entry in tree] == [f"{root_uri}/.abstract.md"]
+    assert [entry["uri"] for entry in listed] == [f"{root_uri}/29"]
+    assert [entry["uri"] for entry in tree] == [f"{root_uri}/29"]
 
 
 @pytest.mark.asyncio
@@ -906,7 +901,7 @@ async def test_tree_agent_normalizes_modtime_to_utc(monkeypatch, fs):
 
 
 @pytest.mark.asyncio
-async def test_ls_agent_modtime_is_raw_utc_iso(monkeypatch, fs):
+async def test_ls_agent_preserves_metadata_acl_and_summary_controls(monkeypatch, fs):
     async def fake_ls_entries(_path, **_kwargs):
         return [
             {
@@ -923,6 +918,7 @@ async def test_ls_agent_modtime_is_raw_utc_iso(monkeypatch, fs):
                 "modTime": "2026-06-11T00:30:18+08:00",
                 "isDir": True,
             },
+            {"name": "docs", "size": 4096, "mode": 0o755, "modTime": "", "isDir": True},
         ]
 
     monkeypatch.setattr(fs, "_uri_to_path", lambda _uri, **_kwargs: "/local/test_account/resources")
@@ -936,13 +932,18 @@ async def test_ls_agent_modtime_is_raw_utc_iso(monkeypatch, fs):
 
     fs.acl_manager = SimpleNamespace(is_enabled=acl_enabled)
 
-    async def fake_can_access_many(uris, _ctx):
+    async def fake_can_access_many(uris, _ctx, **_kwargs):
         return {uri: not uri.endswith("/restricted") for uri in uris}
 
     monkeypatch.setattr(fs, "_can_access_many", fake_can_access_many)
+    abstract = AsyncMock(return_value="L0 summary")
+    overview = AsyncMock(return_value="L1 overview")
+    monkeypatch.setattr(fs, "_read_abstract_for_known_dir", abstract)
+    monkeypatch.setattr(fs, "overview", overview)
 
-    result = await fs._ls_agent(
+    result = await fs.ls(
         "viking://resources",
+        output="agent",
         abs_limit=256,
         show_all_hidden=False,
         ctx=_default_ctx(),
@@ -956,6 +957,25 @@ async def test_ls_agent_modtime_is_raw_utc_iso(monkeypatch, fs):
         "isDir": True,
         "access": "denied",
     }
+    assert result[2]["abstract"] == "L0 summary"
+    abstract.assert_awaited_once_with("viking://resources/docs", ctx=_default_ctx())
+    overview.assert_not_awaited()
+    abstract.reset_mock()
+
+    result = await fs.ls(
+        "viking://resources",
+        output="agent",
+        include_abstract=False,
+        include_overview=True,
+        ctx=_default_ctx(),
+    )
+    assert all("abstract" not in entry for entry in result)
+    assert result[0]["overview"] == ""
+    assert "overview" not in result[1]
+    assert result[2]["overview"] == "L1 overview"
+    abstract.assert_not_awaited()
+    overview.assert_awaited_once_with("viking://resources/docs", ctx=_default_ctx())
+
     tied = [
         ({"name": name, "isDir": False, "modTime": "2026-01-01T00:00:00Z"}, name)
         for name in ["b.md", "a.md"]
