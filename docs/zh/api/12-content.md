@@ -803,6 +803,6 @@ GET /api/v1/tasks?task_type=admin_reindex&resource_id=viking://resources
 
 `GET /api/v1/content/ttl?uri=...` 查询所属日期目录或 Session 的 `expires_at`、`ttl_days`。未开启时 `expires_at` 为 `null`。子目录及 L0/L1/L2 继承 owner 的期限，根目录另回显 `policy`、`effective_policy`。
 
-SDK/MCP 使用 `get_ttl`，CLI 使用 `ov ttl get <uri>`。期限只读；配置通过[库和根目录策略](../configuration/01-server.md#ttl)修改，只影响新生命周期目录。原 `PATCH /api/v1/content/ttl`、`update_ttl` 和 `ov ttl set` 已移除。
+SDK/MCP 使用 `get_ttl`，CLI 使用 `ov ttl get <uri>`。期限只读；配置通过[库和根目录策略](../configuration/01-server.md#ttl)修改，只影响新生命周期目录。原逐对象 TTL 修改接口、`update_ttl` 和 `ov ttl set` 已移除。
 
 完整语义见[目录 TTL](../concepts/17-ttl.md)。
