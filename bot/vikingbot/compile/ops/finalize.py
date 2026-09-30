@@ -9,6 +9,7 @@ from openviking.core.namespace import relative_uri_path
 from openviking.utils.path_safety import safe_join_viking_uri
 from openviking_cli.exceptions import OpenVikingError
 from vikingbot.compile import file_ops
+from vikingbot.compile.models import CompileFailure
 from vikingbot.compile.plan import content_hash
 from vikingbot.compile.renderer import (
     RenderedBundle,
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
     from vikingbot.compile.pipeline import Pipeline
 
 
-async def run(runtime: Pipeline, references: list[str], *, partial=False) -> RenderedBundle:
+async def run(runtime: Pipeline, references: list[str]) -> RenderedBundle:
     """Validate one writer per path and prepare revision-bound publication operations.
 
     References name accepted task artifacts validated during generation or checkpoint
@@ -30,10 +31,19 @@ async def run(runtime: Pipeline, references: list[str], *, partial=False) -> Ren
     With wiki_links enabled, directory listings and submitted Markdown paths define
     complete runtime-owned indexes. Only retained index bodies are read or rewritten;
     retained knowledge pages supply paths without body reads. Otherwise contents stay unchanged.
-    Partial recovery retains the same write guards. Resource recovery permits missing
-    prescribed outputs; Skill packages require all declared files before publication.
+    Partial recovery retains the same write guards. Skill packages are checked together
+    and may use a task-wide budget of three repair submissions before publication.
     Navigation does not invoke models or Skill scripts, including during recovery.
     """
+    if runtime.skill_target:
+        artifacts = [await runtime.files.get(ref) for ref in references]
+        try:
+            file_ops.validate_skill_output({a["path"]: a["content"] for a in artifacts})
+        except ValueError as error:
+            try:
+                references = await file_ops.repair_skill_output(runtime, artifacts, str(error))
+            except Exception as exc:
+                raise CompileFailure("SKILL_REPAIR_FAILED", str(exc), stage="skill_repair") from exc
     files, owners, revisions, source_uris, origins, outputs = {}, {}, {}, {}, {}, {}
     relocations = {}
     for reference in references:
@@ -174,10 +184,6 @@ async def run(runtime: Pipeline, references: list[str], *, partial=False) -> Ren
             )
     else:
         finalized = None
-    if set(runtime.contract.required_paths) - set(files):
-        if not partial or runtime.skill_target:
-            raise ValueError("Missing contract-required output paths")
-        runtime.warnings.append("Partial output is missing contract-required paths.")
     rendered = RenderedBundle()
     for path, payload in files.items():
         owners.setdefault(path, "runtime:navigation")

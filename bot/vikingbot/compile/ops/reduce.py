@@ -1,7 +1,7 @@
 """Reduce candidate work sets into records or revision-bound files.
 
 Automatic overflow aggregation and same-path candidate synthesis belong to Reduce;
-Finalize prepares the accepted file collection for publication without model calls.
+Finalize prepares accepted files for publication and repairs invalid Skill packages.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from openviking.core.namespace import relative_uri_path
 from openviking.utils.model_retry import ERROR_CLASS_INPUT_TOO_LARGE, classify_api_error
 from vikingbot.compile import file_ops
 from vikingbot.compile.ops import common
-from vikingbot.compile.ops.common import _RECORDS
 from vikingbot.compile.pipeline_io import ModelCallError, bounded_jobs, retry_allowed
 from vikingbot.compile.plan import (
     CombineResponse,
@@ -23,7 +22,6 @@ from vikingbot.compile.plan import (
     Group,
     Node,
     Record,
-    RecordResponse,
     Transform,
     content_hash,
     digest,
@@ -32,6 +30,34 @@ from vikingbot.compile.plan import (
 if TYPE_CHECKING:
     from vikingbot.compile.pipeline import Pipeline
 
+
+# Reduce guidance is independent of Map, including intermediate record output.
+_RECORDS = """Do not add plausible business consequences, instructions or definitions that the
+sources do not establish. Do not turn examples into rules. Retain ambiguity in the actor of a
+condition, conjunctions, slash notation and missing units; quote an unclear clause instead of
+selecting a plausible interpretation or inventing an obligation.
+Transform supplied inputs into the declared record fields, preserving the Skill.
+Use record_fields names and descriptions as a guide for payload facts, which may contain structured JSON.
+Use short scope keys with evidence-based values; scope_fields explains each suggested field.
+Omit unavailable fields and add useful fields when the evidence calls for them.
+Each record.inputs lists ONLY supplied input IDs supporting its payload; runtime assigns IDs,
+stores complete source evidence and propagates provenance. Return records; runtime tracks
+unreferenced inputs. References establish provenance, not semantic completeness.
+Source text uses shard-local 1-based line numbers; source_range is the raw input ID. Optional top-level
+evidence_spans use inclusive start_line/end_line. Include relevant conditions, exceptions, headings
+and table headers/notes; omit uncertain locations.
+Read all supplied text; preserve required detail, citations, exceptions and applicability conditions.
+Include a short routing_text for each record; never group just by title.
+Ready drafts are allowed.
+If ready_content is non-null, ready_path MUST be a non-empty relative file
+path under the compile target.
+Put both fields at the record's top level, never inside payload.
+Before calling emit, check this pairing for every record.
+Independent finished files use ready_content with
+ready_path and concise identity/scope/relationship payloads. Evidence details already in the body
+need not be repeated in payload. Check finished content against originals and every Skill rule.
+Fragments requiring joint synthesis retain full necessary evidence in payload and no ready content.
+"""
 
 _FILES = """# File generation
 Follow the Skill, user instruction and assigned stage task for file count, paths, format and
@@ -181,8 +207,13 @@ async def ready_file(runtime: Pipeline, group):
     return await runtime.files.get(group.records[0].ready_ref)
 
 
-async def reduce_group(runtime: Pipeline, node, group: Group, *, stage="reduce"):
-    """Generate a work set, combining only after provider input overflow, at most three times."""
+async def reduce_group(
+    runtime: Pipeline, node, group: Group, *, stage="reduce", file_prompt: str = _FILES
+):
+    """Generate a work set using the caller's file prompt or Reduce record guidance.
+
+    Reduce combines after provider input overflow, at most three times; Map propagates overflow.
+    """
     transform = getattr(runtime.contract, node.task)
     records, old = group.records, {}
     if transform.output == "files":
@@ -244,28 +275,23 @@ async def reduce_group(runtime: Pipeline, node, group: Group, *, stage="reduce")
             {"path": path, "content": content, "base_hash": content_hash(content)}
             for path, content in old.items()
         ]
-    schema = RecordResponse if transform.output == "records" else FileResponse
     if transform.output == "records":
         extra.update(record_fields=transform.fields, scope_fields=runtime.contract.distinguish)
-    system = (
-        runtime.system
-        + "\n\n# Stage task\n"
-        + transform.instructions
-        + "\n\n"
-        + (_RECORDS if transform.output == "records" else _FILES)
-    )
+    system = runtime.system + "\n\n# Stage task\n" + transform.instructions + "\n\n" + file_prompt
     if old:
         system += _EXISTING_FILES
     for depth in range(4):
         data = {**extra, "inputs": [await common.payload(runtime, r) for r in records]}
         try:
             if transform.output == "records":
-                return await common.transform(runtime, "reduce", transform, records, extra)
+                return await common.transform(
+                    runtime, "reduce", transform, records, extra, prompt=_RECORDS
+                )
             response = await runtime.model.ask(
                 stage,
                 system,
                 data,
-                schema,
+                FileResponse,
                 lambda value, records=records: file_ops.validate_files(
                     runtime, value, group, records, old
                 ),
@@ -287,7 +313,9 @@ async def reduce_group(runtime: Pipeline, node, group: Group, *, stage="reduce")
         )
         reduced = []
         for chunk in chunks:
-            reduced.extend(await common.transform(runtime, "combine", None, chunk))
+            reduced.extend(
+                await common.transform(runtime, "combine", None, chunk, prompt=common._COMBINE)
+            )
         if not reduced:
             raise ValueError("Overflow aggregation cannot discard all required contributions")
         records = reduced

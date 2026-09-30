@@ -110,8 +110,6 @@ async def run(pipeline):
         + pipeline.skill
         + "\nInstruction:\n"
         + pipeline.request.instruction
-        + "\nShared requirements:\n"
-        + pipeline.contract.model_dump_json(include={"preserve", "required_paths"})
         + "\n"
         + pipeline.output_instructions
         + "\nRuntime: "
@@ -155,7 +153,7 @@ async def run(pipeline):
             pipeline.warnings.append(
                 "Partial output; source-stage failures retained during recovery."
             )
-        result = await finalize_op.run(pipeline, refs, partial=bool(pipeline.failures))
+        result = await finalize_op.run(pipeline, refs)
         prepared = not pipeline.failures
         return result
     finally:

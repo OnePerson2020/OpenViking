@@ -333,7 +333,7 @@ class JsonModel:
             raise ModelCallError(f"{stage}: wall-clock budget exhausted ({seconds:g}s)") from exc
 
     async def _ask(self, stage, system, data, schema, validate, *, agent):
-        if schema is FileResponse:
+        if schema is FileResponse and stage != "skill_repair":
             # Inline original excerpts when located; unlocated records retain full shards.
             # The scoped reader can expand partial evidence without catalog access.
             evidence = EvidenceReader(self.files, data)
@@ -386,7 +386,7 @@ class JsonModel:
         return result
 
     async def direct(self, stage, system, data, schema, validate, key):
-        """Allow scoped reads and three repairs for each distinct output failure."""
+        """Allow scoped reads; Skill package repair gets three submissions total."""
         tools = [
             {
                 "type": "function",
@@ -417,8 +417,10 @@ class JsonModel:
             )
         if stage not in {"plan", "route", "combine"}:
             system += (
-                "\nSupplied complete attachments fulfill the Skill's reading requirements. "
-                "Only read additional resources whose contents are missing; never reread supplied text."
+                "\n\n## Tool use\n\n"
+                "Use the source text and Skill attachments provided in the input.\n"
+                "Call reading tools only when you need source or attachment content\n"
+                "that is missing from the input.\n"
             )
         messages = [
             {
@@ -517,13 +519,16 @@ class JsonModel:
                 )
                 self.metrics["validation_failures"] += 1
                 # Routing owns retries per primary record, including malformed responses.
-                if schema is RouteBatchResponse or not retry_allowed(retries, error):
+                if schema is RouteBatchResponse or (
+                    failures >= 3 if stage == "skill_repair" else not retry_allowed(retries, error)
+                ):
                     raise ValueError(f"{stage}: {category}: {error}") from exc
                 self.metrics["repairs"] += 1
                 messages.append(
                     {
                         "role": "user",
-                        "content": "Correct this rejected result while preserving valid content. "
+                        "content": "Correct this rejected result according to the original Skill and user instruction, "
+                        "preserving valid content. "
                         "Rejected candidate:\n"
                         + candidate
                         + "\nError: "

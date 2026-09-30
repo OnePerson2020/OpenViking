@@ -14,7 +14,14 @@ import yaml
 from openviking.core.skill_loader import validate_skill_format
 from openviking.utils.path_safety import safe_join_viking_uri
 from openviking_cli.exceptions import OpenVikingError
-from vikingbot.compile.plan import FileDraft, InputReferenceError, content_hash, digest
+from vikingbot.compile.plan import (
+    FileDraft,
+    FileResponse,
+    Group,
+    InputReferenceError,
+    content_hash,
+    digest,
+)
 from vikingbot.compile.renderer import (
     _split_frontmatter,
     validate_relative_file_path,
@@ -104,15 +111,6 @@ def validate_files(runtime: Pipeline, response, group, records, old):
                 "File references require execution=agent and validated scratch resolution"
             )
         value = apply_file(draft, current)
-        if runtime.skill_target:
-            if not draft.path.startswith(runtime.skill_name + "/"):
-                raise ValueError(f"Skill files must be under {runtime.skill_name}/")
-            if draft.path == f"{runtime.skill_name}/SKILL.md":
-                validation = validate_skill_format(
-                    value, strict=True, skill_dir_name=runtime.skill_name, source_path=draft.path
-                )
-                if not validation["valid"]:
-                    raise ValueError("; ".join(issue["message"] for issue in validation["errors"]))
         if draft.content_sha256 and content_hash(value) != draft.content_sha256:
             raise ValueError("Artifact content hash mismatch")
         if len(value.encode()) > 8 * 1024 * 1024:
@@ -217,3 +215,72 @@ async def accept_files(runtime: Pipeline, references):
             "description": metadata.get("description", ""),
             "source_refs": artifact["source_refs"],
         }
+
+
+def validate_skill_output(files: dict[str, str]) -> None:
+    """Check one Skill directory and its SKILL.md using the shared format validator.
+
+    Paths are already checked by file validation. Raise ValueError for structural
+    errors; content quality and task-specific attachments remain the Skill's concern.
+    """
+    directories = {path.split("/")[0] for path in files}
+    if len(directories) != 1 or any("/" not in path for path in files):
+        raise ValueError("Output must contain one <skill-name>/ directory with SKILL.md")
+    name = directories.pop()
+    main = f"{name}/SKILL.md"
+    if main not in files:
+        raise ValueError(f"Missing {main}")
+    result = validate_skill_format(files[main], strict=True, skill_dir_name=name, source_path=main)
+    if not result["valid"]:
+        raise ValueError("; ".join(issue["message"] for issue in result["errors"]))
+
+
+async def repair_skill_output(runtime: Pipeline, artifacts: list[dict], error: str) -> list[str]:
+    """Repair rejected files and return saved references, without publishing them.
+
+    The model receives the current files, diagnostic and source handles. Its existing
+    validation loop permits three submissions total. Accepted replacements retain
+    source lineage and target revision guards; failures propagate to the caller.
+    """
+    ids = {i for a in artifacts for i in a["inputs"]} or set(runtime.evidence)
+    records = [runtime.records[i] for i in sorted(ids)]
+    group = Group("skill-repair", records)
+    old = {}
+    for artifact in artifacts:
+        if artifact["base_hash"] is not None:
+            previous = runtime.old.get(artifact["path"])
+            if previous is None or content_hash(previous) != artifact["base_hash"]:
+                raise ValueError(f"Stale prepared artifact: {artifact['path']}")
+            old[artifact["path"]] = previous
+
+    def validate(response):
+        """Accept complete files only when provenance, revisions and package format agree."""
+        validate_files(runtime, response, group, records, old)
+        validate_skill_output(
+            {draft.path: apply_file(draft, old.get(draft.path)) for draft in response.files}
+        )
+
+    response = await runtime.model.ask(
+        "skill_repair",
+        runtime.system
+        + "\nFix the reported errors according to the original Skill and user instruction. "
+        "Preserve valid content. Submit all files, including unchanged ones, with supporting "
+        "input IDs. Read assigned evidence if needed. Keep existing base_hash values.",
+        {
+            "error": error,
+            "files": [
+                {k: a[k] for k in ("path", "content", "inputs", "base_hash")} for a in artifacts
+            ],
+            "inputs": [
+                {"id": r.record_id, "payload": {"source_ranges": r.source_refs}} for r in records
+            ],
+        },
+        FileResponse,
+        validate,
+    )
+    repaired = await save_files(runtime, response, group, records, old)
+    runtime.artifacts.clear()
+    runtime.owners.clear()
+    runtime.catalog.clear()
+    await accept_files(runtime, repaired)
+    return repaired

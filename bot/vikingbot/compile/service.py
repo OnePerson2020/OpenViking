@@ -1031,14 +1031,14 @@ class BotCompileService:
                 else:
                     rendered = await pipeline.run(source_batches())
             except (CompileFailure, TimeoutError) as exc:
-                if not pipeline.artifacts:
+                if not pipeline.artifacts or getattr(exc, "code", None) == "SKILL_REPAIR_FAILED":
                     raise
                 pipeline.warnings.append(
                     f"Partial output; Compile did not finish: {str(exc)[:500]}"
                 )
                 async with asyncio.timeout(self.limits.salvage_grace_seconds):
                     rendered = await finalize_op.run(
-                        pipeline, list(dict.fromkeys(pipeline.artifacts)), partial=True
+                        pipeline, list(dict.fromkeys(pipeline.artifacts))
                     )
             # Cancellation must stop recovery before any write, including a queued cancel.
             current = await self.store.get(task_id)

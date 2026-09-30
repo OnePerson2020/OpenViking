@@ -34,44 +34,6 @@ if TYPE_CHECKING:
     from vikingbot.compile.pipeline import Pipeline
 
 
-_FIDELITY = """Do not add plausible business consequences, instructions or definitions that the
-sources do not establish. Do not turn examples into rules. Retain ambiguity in the actor of a
-condition, conjunctions, slash notation and missing units; quote an unclear clause instead of
-selecting a plausible interpretation or inventing an obligation.
-"""
-
-# Shared record guidance for extraction and synthesis stages.
-_EVIDENCE_RECORDS = (
-    _FIDELITY
-    + """Transform supplied inputs into the declared record fields, preserving the Skill.
-Use record_fields names and descriptions as a guide for payload facts, which may contain structured JSON.
-Use short scope keys with evidence-based values; scope_fields explains each suggested field.
-Omit unavailable fields and add useful fields when the evidence calls for them.
-Each record.inputs lists ONLY supplied input IDs supporting its payload; runtime assigns IDs,
-stores complete source evidence and propagates provenance. Return records; runtime tracks
-unreferenced inputs. References establish provenance, not semantic completeness.
-Source text uses shard-local 1-based line numbers; source_range is the raw input ID. Optional top-level
-evidence_spans use inclusive start_line/end_line. Include relevant conditions, exceptions, headings
-and table headers/notes; omit uncertain locations.
-Read all supplied text; preserve required detail, citations, exceptions and applicability conditions.
-Include a short routing_text for each record; never group just by title.
-"""
-)
-
-_RECORDS = (
-    _EVIDENCE_RECORDS
-    + """Ready drafts are allowed.
-If ready_content is non-null, ready_path MUST be a non-empty relative file
-path under the compile target.
-Put both fields at the record's top level, never inside payload.
-Before calling emit, check this pairing for every record.
-Independent finished files use ready_content with
-ready_path and concise identity/scope/relationship payloads. Evidence details already in the body
-need not be repeated in payload. Check finished content against originals and every Skill rule.
-Fragments requiring joint synthesis retain full necessary evidence in payload and no ready content.
-"""
-)
-
 # Combine receives only its batch and this evidence-consolidation contract.
 _COMBINE = """Consolidate the supplied evidence records for later synthesis.
 Merge duplicate facts only when they concern the same subject and applicability; use concise wording.
@@ -167,12 +129,18 @@ def validate_input_refs(inputs, included) -> None:
         )
 
 
-async def transform(runtime: Pipeline, label, transform, records, extra=None) -> list[Record]:
-    """Produce records with runtime provenance; Combine uses no configurable transform."""
-    system = _COMBINE
+async def transform(
+    runtime: Pipeline, label, transform, records, extra=None, *, prompt: str
+) -> list[Record]:
+    """Produce records with provenance using the calling operator's prompt.
+
+    Map/Reduce add task context and field definitions; Combine uses only its supplied prompt.
+    Invalid lineage, evidence locations or ready files reject the model submission.
+    """
+    system = prompt
     data = {"inputs": [await payload(runtime, r, combine=label == "combine") for r in records]}
     if label != "combine":
-        system = runtime.system + _RECORDS + "\nTask: " + transform.instructions
+        system = runtime.system + prompt + "\n## Stage task\n\n" + transform.instructions
         data.update(
             {
                 **(extra or {}),

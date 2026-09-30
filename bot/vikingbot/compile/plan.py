@@ -73,7 +73,7 @@ class Transform(PlanModel):
     )
     fields: dict[str, str] = Field(
         default_factory=lambda: {"text": "Facts extracted from the source."},
-        description='Record content field names mapped to instructions for producing their values; '
+        description="Record content field names mapped to instructions for producing their values; "
         'e.g. {"facts": "Facts, conditions and exceptions to retain"}. Omit for files output.',
     )
 
@@ -151,23 +151,13 @@ class Contract(PlanModel):
     )
     distinguish: dict[str, str] = Field(
         default_factory=dict,
-        description='Record applicability field names mapped to extraction instructions, not actual values; '
+        description="Record applicability field names mapped to extraction instructions, not actual values; "
         'e.g. {"version": "Product version these facts apply to"}. These are not exact-match grouping keys.',
-    )
-    preserve: list[str] = Field(
-        default_factory=list,
-        description="Extra requirements shared with Map/Reduce, e.g. details to preserve. "
-        "Omit if covered by the Skill or user instruction.",
     )
     output_format: Literal["wiki", "files"] = Field(
         default="files",
         description="Use files for ordinary text or Markdown outputs. Choose wiki when the task "
         "requires OpenViking Knowledge Format (OKF) wiki pages with its page metadata and link rules.",
-    )
-    required_paths: list[str] = Field(
-        default_factory=list,
-        description="Prescribed output paths relative to request.to; no wildcards or guessed filenames. "
-        "Omit if none are required.",
     )
 
     @field_validator("distinguish", mode="before")
@@ -428,8 +418,6 @@ def result_schema(schema, data):
         transform["properties"]["output"].pop("default")
         transform["required"] = ["instructions", "output"]
         properties = result["$defs"]["Contract"]["properties"]
-        # Shared requirements remain readable from saved contracts; planners use stage instructions.
-        properties.pop("preserve")
         # Model output uses objects for referenced configurations, omitting unused optional entries.
         for name, definition in (
             ("reduce", "Transform"),

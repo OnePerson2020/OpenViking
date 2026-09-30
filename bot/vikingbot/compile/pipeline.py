@@ -10,8 +10,6 @@ from typing import Any
 
 from openviking.core.namespace import classify_uri
 from openviking.utils.path_safety import safe_join_viking_uri
-from openviking.utils.skill_processor import validate_skill_name
-from openviking_cli.exceptions import OpenVikingError
 from vikingbot.compile.models import CompileFailure, utc_now
 from vikingbot.compile.ops import finalize as finalize_op
 from vikingbot.compile.ops import map as map_op
@@ -135,9 +133,8 @@ networks or run arbitrary scratch scripts.
 
 _SKILL_OUTPUT = """The target is a Skill namespace. The whole task must deliver one complete Skill package.
 
-Keep all package files under one <skill-name>/ directory.
-Set contract.output_format=files and include <skill-name>/SKILL.md in
-contract.required_paths, using the same package directory for every output file.
+Keep all package files under one <skill-name>/ directory and include
+<skill-name>/SKILL.md in the final output.
 
 The final SKILL.md must have YAML frontmatter with name matching the package directory
 and a nonempty description. Preserve attachments in their native formats.
@@ -159,7 +156,6 @@ class Pipeline:
         self.client, self.limits, self.request = client, limits, request
         self.target, self.skill = request.to, skill
         self.skill_target = classify_uri(self.target).context_type == "skill"
-        self.skill_name = ""  # One package directory, selected by the validated contract.
         self.files = TaskFiles(sandbox)
         self.metrics: Counter = Counter()
         self.model = JsonModel(
@@ -229,26 +225,15 @@ class Pipeline:
 
             def validate_plan(proposal):
                 parse_plan(proposal.plan, proposal.contract)
-                if self.skill_target:
-                    paths = [
-                        p
-                        for p in proposal.contract.required_paths
-                        if p.count("/") == 1 and p.endswith("/SKILL.md")
-                    ]
-                    if len(paths) != 1 or proposal.contract.output_format != "files":
-                        raise ValueError(
-                            "Skill output requires files and one required <skill-name>/SKILL.md"
-                        )
-                    try:
-                        name = validate_skill_name(paths[0].split("/")[0])
-                    except OpenVikingError as exc:
-                        raise ValueError(str(exc)) from exc
-                    if any(not p.startswith(name + "/") for p in proposal.contract.required_paths):
-                        raise ValueError("Required Skill outputs must share the package directory")
+                if self.skill_target and proposal.contract.output_format != "files":
+                    raise ValueError("Skill output requires output_format=files")
 
+            planner_prompt = _PLANNER + self.output_instructions
+            if self.skill_target:
+                planner_prompt += "\nSet contract.output_format=files.\n"
             proposal = await self.model.ask(
                 "plan",
-                _PLANNER + self.output_instructions,
+                planner_prompt,
                 {
                     "skill": self.skill,
                     "runtime": {"time": runtime["time"]},
@@ -263,22 +248,12 @@ class Pipeline:
                 validate_plan,
             )
             self.contract = proposal.contract
-            if self.skill_target:
-                self.skill_name = next(
-                    p.split("/")[0]
-                    for p in self.contract.required_paths
-                    if p.count("/") == 1 and p.endswith("/SKILL.md")
-                )
             nodes = parse_plan(proposal.plan, self.contract)
             self.system = (
                 "# Original Skill (authoritative)\n"
                 + self.skill
                 + "\n\n# User instruction\n"
                 + self.request.instruction
-                + "\n\n# Shared requirements\n"
-                + self.contract.model_dump_json(
-                    include={"preserve", "required_paths"}
-                )
                 + "\n\n# Output rules\n"
                 + self.output_instructions
                 + "\n# Runtime\n"
@@ -319,7 +294,7 @@ class Pipeline:
                         self.warnings.append(
                             "Partial output; unfinished jobs: " + self.failures[0][:500]
                         )
-                    result = await finalize_op.run(self, inputs, partial=bool(self.failures))
+                    result = await finalize_op.run(self, inputs)
                     complete = not self.failures
                 self.metrics[f"{node.name}_milliseconds"] = round(
                     (time.monotonic() - stage_start) * 1000
@@ -328,7 +303,7 @@ class Pipeline:
             return result
         except BaseException as exc:
             self.failures.append(str(exc)[:800] or type(exc).__name__)
-            if isinstance(exc, Exception):
+            if isinstance(exc, Exception) and not isinstance(exc, CompileFailure):
                 raise CompileFailure(
                     "COMPILE_INCOMPLETE", self.failures[-1], stage="pipeline"
                 ) from exc
