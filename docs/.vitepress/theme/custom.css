@@ -12,8 +12,11 @@
   --vp-c-bg-soft: #eeefeb;
   --vp-c-text-1: #202723;
   --vp-c-text-2: #5c665f;
-  --vp-font-family-base: "Space Grotesk", sans-serif;
-  --vp-font-family-display: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+  /* Match blog.openviking.ai body and display typography. */
+  --ov-font-latin-serif: Charter, Georgia, Palatino, "Times New Roman", "TsangerJinKai02", "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", serif;
+  --ov-font-cjk-serif: "TsangerJinKai02", "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", "STSong", Georgia, serif;
+  --vp-font-family-base: var(--ov-font-latin-serif);
+  --vp-font-family-display: var(--vp-font-family-base);
   --vp-font-family-mono: "JetBrains Mono", monospace;
 
   /* Embed-widget theming. The widget renders in a shadow root whose :host does
@@ -512,4 +515,9 @@ html.ov-assistant-pill .VPContent {
 .vp-doc .module-table th:nth-child(-n + 2),
 .vp-doc .module-table td:nth-child(-n + 2) {
   white-space: nowrap;
+}
+
+/* LocaleSwitch updates html[lang] during client-side navigation too. */
+:root:lang(zh) {
+  --vp-font-family-base: var(--ov-font-cjk-serif);
 }
