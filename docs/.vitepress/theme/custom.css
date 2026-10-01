@@ -12,12 +12,10 @@
   --vp-c-bg-soft: #eeefeb;
   --vp-c-text-1: #202723;
   --vp-c-text-2: #5c665f;
-  /* Match blog.openviking.ai body and display typography. */
-  --ov-font-latin-serif: Charter, Georgia, Palatino, "Times New Roman", "TsangerJinKai02", "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", serif;
-  --ov-font-cjk-serif: "TsangerJinKai02", "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", "STSong", Georgia, serif;
-  --vp-font-family-base: var(--ov-font-latin-serif);
+  /* Blog Chinese typography, with Maple Mono for Latin text and code. */
+  --vp-font-family-base: "Maple Mono NF CN Latin", "TsangerJinKai02", "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", serif;
   --vp-font-family-display: var(--vp-font-family-base);
-  --vp-font-family-mono: "JetBrains Mono", monospace;
+  --vp-font-family-mono: "Maple Mono NF CN", ui-monospace, monospace;
 
   /* Embed-widget theming. The widget renders in a shadow root whose :host does
      `all: initial` — that resets inherited properties but NOT custom
@@ -515,9 +513,4 @@ html.ov-assistant-pill .VPContent {
 .vp-doc .module-table th:nth-child(-n + 2),
 .vp-doc .module-table td:nth-child(-n + 2) {
   white-space: nowrap;
-}
-
-/* LocaleSwitch updates html[lang] during client-side navigation too. */
-:root:lang(zh) {
-  --vp-font-family-base: var(--ov-font-cjk-serif);
 }
