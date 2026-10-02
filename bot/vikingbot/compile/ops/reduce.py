@@ -131,6 +131,7 @@ async def resolve_files(runtime: Pipeline, references: list[str]) -> list[str]:
         try:
             transform = Transform(
                 output="files",
+                execution="direct",
                 instructions=(
                     "Resolve candidate path collisions following the Skill and instruction. "
                     "Combine compatible contributions, deduplicate equivalents, or rename independent "

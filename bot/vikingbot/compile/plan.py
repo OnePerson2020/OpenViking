@@ -80,12 +80,10 @@ Each call describes a processing step over a collection of data.
 The runtime assigns files, text ranges or records to individual jobs within
 that step; do not write a separate call for each source file or job.
 
-## Execution Capabilities
+## Access Boundaries
 
-Map/Reduce can read their assigned evidence and files referenced by the Skill.
-A work configuration with execution=agent also permits private scratch files and
-Skill-supplied Python scripts. Execution steps cannot scan all history, access external
-networks or run arbitrary scratch scripts.
+Execution steps cannot access unassigned materials, scan all history, access external
+networks or run arbitrary scripts.
 
 """
 
@@ -122,13 +120,15 @@ class Transform(PlanModel):
         description="records carries evidence to later steps; files produces output files.",
     )
     execution: Literal["direct", "agent"] = Field(
-        default="direct",
-        description="direct: model calls reading assigned evidence and Skill attachments. "
-        "agent: also uses scratch files and Skill scripts.",
+        description="Use direct for straightforward tasks with small results. "
+        "Prefer agent for detailed knowledge compilation or large results. "
+        "Both modes can read assigned materials and Skill references. "
+        "Agent can also write and revise temporary files and run Skill-supplied scripts.",
     )
     input_unit: Literal["range", "file"] = Field(
         default="range",
-        description="When Map reads source files: file keeps each file's text ranges together; "
+        description="When Map reads source files: use file when processing needs context across "
+        "sections of the same document; otherwise use range. file keeps each file's ranges together; "
         "range permits separate or batched ranges. Map over records handles each record separately.",
     )
     fields: dict[str, str] = Field(

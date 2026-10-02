@@ -33,7 +33,7 @@ def result_schema(schema, data):
             result["required"] = ["contract", "plan"]
         transform = result["$defs"]["Transform"]
         transform["properties"]["output"].pop("default")
-        transform["required"] = ["instructions", "output"]
+        transform["required"] = ["instructions", "output", "execution"]
         properties = result["$defs"]["Contract"]["properties"]
         # Model output uses objects for referenced configurations, omitting unused optional entries.
         for name, definition in (
