@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from vikingbot.compile.plan import PlanProposal
+from vikingbot.compile.plan import PlanProposal, ReviewDecision
 from vikingbot.compile.results import (
     FileResponse,
     RecordResponse,
@@ -20,7 +20,7 @@ def result_schema(schema, data):
     # The model receives strict routing instructions; malformed individual decisions
     # remain available to Shuffle so valid neighbours survive a partial response.
     result = (RouteResponse if schema is RouteBatchResponse else schema).model_json_schema()
-    if schema is PlanProposal:
+    if schema in (PlanProposal, ReviewDecision):
         # Planner-facing fields carry their meaning; class docstrings and generated titles do not.
         for definition in [result, *result["$defs"].values()]:
             definition.pop("title", None)
@@ -28,8 +28,9 @@ def result_schema(schema, data):
             for property_schema in definition.get("properties", {}).values():
                 property_schema.pop("title", None)
         # Explicit plans are required from the model; stored contracts retain parsing defaults.
-        result["properties"]["plan"].pop("default")
-        result["required"] = ["contract", "plan"]
+        if schema is PlanProposal:
+            result["properties"]["plan"].pop("default")
+            result["required"] = ["contract", "plan"]
         transform = result["$defs"]["Transform"]
         transform["properties"]["output"].pop("default")
         transform["required"] = ["instructions", "output"]

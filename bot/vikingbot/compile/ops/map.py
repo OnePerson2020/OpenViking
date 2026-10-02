@@ -68,7 +68,9 @@ Skill attachments need not be reread.
 For records, preserve what later steps need in payload. Use record_fields
 names when supplied; omit unavailable information and add fields only for relevant
 content otherwise unrepresented. scope describes evidence-supported applicability;
-routing_text describes the subject and content.
+routing_text briefly describes the subject, key information and relevant relationships.
+The Shuffle stage uses it with scope and source URIs for grouping and historical recall;
+the full payload or finished-file body is not included in that input.
 
 A record may also include a finished file when appropriate to the processing
 task and supported by these inputs. Check it against the evidence and Skill

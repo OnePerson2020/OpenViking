@@ -39,7 +39,8 @@ Source text uses shard-local 1-based line numbers; source_range is the raw input
 evidence_spans use inclusive start_line/end_line. Include relevant conditions, exceptions, headings
 and table headers/notes; omit uncertain locations.
 Read all supplied text; preserve required detail, citations, exceptions and applicability conditions.
-Include a short routing_text for each record; never group just by title.
+Include a short routing_text describing subject, contribution and relationships for later
+grouping or historical recall; it must remain understandable without opening payload or a draft.
 Ready drafts are allowed.
 If ready_content is non-null, ready_path MUST be a non-empty relative file
 path under the compile target.

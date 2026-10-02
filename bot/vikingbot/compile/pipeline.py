@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import time
 from collections import Counter
@@ -17,9 +18,11 @@ from vikingbot.compile.ops import map as map_op
 from vikingbot.compile.ops import reduce as reduce_op
 from vikingbot.compile.ops.shuffle import Shuffle
 from vikingbot.compile.pipeline_io import JsonModel, TaskFiles
-from vikingbot.compile.plan import Contract, PlanProposal, parse_plan
+from vikingbot.compile.plan import PLANNING_RULES, Contract, PlanProposal, parse_plan
 from vikingbot.compile.renderer import RenderedBundle
 from vikingbot.compile.results import Record
+from vikingbot.compile.review import REVIEW_PROMPT
+from vikingbot.compile.review import run as review_stage
 from vikingbot.compile.skill_resources import SkillResources
 
 _PLANNER = """## Task Description
@@ -54,81 +57,10 @@ referenced by the Skill are not included. Plan from the supplied requirements an
 statistics; the execution steps inspect those contents.
 Before execution, the runtime divides large source files into text segments called ranges.
 
-## Available Operators
-
-Operators are the processing steps supported by the runtime. Select and combine
-those needed for the task. You may use an operator more than once; the four operators
-below are not a required sequence.
-
-### Map
-
-Processes assigned source text. It can produce final files directly or return
-structured intermediate items called records. Each record contains information
-needed by later steps, such as facts extracted from a document.
-Map can also process records produced by an earlier step.
-
-### Shuffle
-
-Collects records into groups according to a grouping rule.
-Each group is a collection of records that Reduce will process together.
-
-### Reduce
-
-Processes all records in a group together, combining their information.
-It can produce final files or new records for further processing.
-One group may produce multiple output files.
-
-### Finalize
-
-Publishes the generated files to the requested destination and ends the flow.
-
-## Plan Syntax
-
-Write plan as a string of assignments and operator calls. The runtime provides
-p for calling the operators, sources for the prepared source materials, and target
-for the output destination request.to. Other variables name results of earlier steps.
-
-These are examples of individual calls, not a complete plan or a prescribed sequence:
-
-- Map: mapped = p.map(sources, task=contract.extract)
-  mapped names the result; sources is the input; task selects the work configuration.
-  A previous records result can replace sources.
-- Shuffle: grouped = p.shuffle(records, by=contract.routing)
-  records is a previous records result; by selects the grouping rule.
-  Add against=target only when target_has_content is true and the task requires
-  comparing, updating or integrating existing target content.
-  Otherwise grouping uses only the current inputs.
-- Reduce: combined = p.reduce(groups, task=contract.reduce)
-  groups is a previous Shuffle result; task selects the work configuration.
-- Finalize: p.finalize(files, into=target)
-  files is a previous Map or Reduce result containing output files.
-
-The task argument can reference contract.extract, contract.reduce or contract.synthesize.
-Each contains instructions and settings for the work to perform. Any of them can be used
-by Map or Reduce; their names suggest common uses rather than operator types or positions.
-The by argument can reference contract.routing or contract.final_routing.
-Use these configuration names; reuse a configuration when multiple steps need the same work.
-Define optional work configurations and grouping rules only when referenced by the plan.
-
-## Plan Rules
-
-Write a single sequence of the operator calls shown above. Do not include
-Python control flow, imports or other function calls.
-Give each intermediate result a new variable name and pass it to exactly
-one subsequent call. End the sequence with one Finalize call.
-
-Each call describes a processing step over a collection of data.
-The runtime assigns files, text ranges or records to individual jobs within
-that step; do not write a separate call for each source file or job.
-
-## Execution Capabilities
-
-Map/Reduce can read their assigned evidence and files referenced by the Skill.
-A work configuration with execution=agent also permits private scratch files and
-Skill-supplied Python scripts. Execution steps cannot scan all history, access external
-networks or run arbitrary scratch scripts.
-
-"""
+""" + PLANNING_RULES.format(
+    input_binding="p for calling the operators, sources for the prepared source materials, and target\n"
+    "for the output destination request.to. Other variables name results of earlier steps."
+)
 
 
 _SKILL_OUTPUT = """The target is a Skill namespace. The whole task must deliver one complete Skill package.
@@ -231,19 +163,17 @@ class Pipeline:
             planner_prompt = _PLANNER + self.output_instructions
             if self.skill_target:
                 planner_prompt += "\nSet contract.output_format=files.\n"
+            planning_context = {
+                "skill": self.skill,
+                "runtime": {"time": runtime["time"]},
+                "request": {"to": self.target, "instruction": self.request.instruction},
+                "source_summary": source_summary,
+                "target_has_content": target_has_content,
+            }
             proposal = await self.model.ask(
                 "plan",
                 planner_prompt,
-                {
-                    "skill": self.skill,
-                    "runtime": {"time": runtime["time"]},
-                    "request": {
-                        "to": self.target,
-                        "instruction": self.request.instruction,
-                    },
-                    "source_summary": source_summary,
-                    "target_has_content": target_has_content,
-                },
+                planning_context,
                 PlanProposal,
                 validate_plan,
             )
@@ -277,9 +207,13 @@ class Pipeline:
             )
             data: dict[str, Any] = {"sources": sources}
             shuffler = Shuffle(self)
-            for node in nodes:
+            program, position, revisions = proposal.plan, 0, 0
+            completed_names = set()
+            while position < len(nodes):
+                node = nodes[position]
                 active_stage = node.name
                 stage_start = time.monotonic()
+                configuration = getattr(self.contract, node.task) if node.task else None
                 inputs = data.pop(node.source)
                 if node.op == "map":
                     data[node.name] = await map_op.run(self, node, inputs)
@@ -299,6 +233,59 @@ class Pipeline:
                 self.metrics[f"{node.name}_milliseconds"] = round(
                     (time.monotonic() - stage_start) * 1000
                 )
+                position += 1
+                completed_names.add(node.name)
+                if node.op != "finalize":
+                    outputs = data[node.name]
+                    await self.files.put(
+                        f"stages/{node.name}",
+                        {
+                            "node": asdict(node),
+                            "configuration": configuration.model_dump()
+                            if hasattr(configuration, "model_dump")
+                            else configuration,
+                            "outputs": [
+                                item.record_id if node.op != "shuffle" else item.group_id
+                                for item in outputs
+                            ]
+                            if node.op == "shuffle" or configuration.output == "records"
+                            else outputs,
+                            "revisions": revisions,
+                        },
+                    )
+                    statements = ast.parse(program).body
+                    remaining_plan = "\n".join(ast.unparse(s) for s in statements[position:])
+                    active_stage, stage_start = f"review-{node.name}", time.monotonic()
+                    accepted = await review_stage(
+                        self,
+                        node,
+                        outputs,
+                        remaining_plan,
+                        completed_names,
+                        revisions,
+                        REVIEW_PROMPT + self.output_instructions,
+                        planning_context,
+                    )
+                    if accepted:
+                        decision, suffix = accepted
+                        nodes = nodes[:position] + suffix
+                        program = "\n".join(ast.unparse(s) for s in statements[:position])
+                        program += "\n" + decision.plan
+                        await self.files.put(
+                            "plan",
+                            {
+                                "program": program,
+                                "nodes": [asdict(n) for n in nodes],
+                                "contract": decision.contract.model_dump(),
+                                "revisions": revisions + 1,
+                            },
+                        )
+                        self.contract = decision.contract
+                        revisions += 1
+                        self.metrics["plan_revisions"] = revisions
+                    self.metrics[f"review-{node.name}_milliseconds"] = round(
+                        (time.monotonic() - stage_start) * 1000
+                    )
                 active_stage = None
             return result
         except BaseException as exc:

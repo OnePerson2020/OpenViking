@@ -10,6 +10,86 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from vikingbot.compile.results import RecordDraft
 
+# Shared operator and DSL rules; input_binding describes the collection available to each role.
+PLANNING_RULES = """## Available Operators
+
+Operators are the processing steps supported by the runtime. Select and combine
+those needed for the task. You may use an operator more than once; the four operators
+below are not a required sequence.
+
+### Map
+
+Processes assigned source text. It can produce final files directly or return
+structured intermediate items called records. Each record contains information
+needed by later steps, such as facts extracted from a document.
+Map can also process records produced by an earlier step.
+
+### Shuffle
+
+Collects records into groups according to a grouping rule.
+Each group is a collection of records that Reduce will process together.
+
+### Reduce
+
+Processes all records in a group together, combining their information.
+It can produce final files or new records for further processing.
+One group may produce multiple output files.
+
+### Finalize
+
+Publishes the generated files to the requested destination and ends the flow.
+
+## Plan Syntax
+
+Write plan as a string of assignments and operator calls. The runtime provides
+{input_binding}
+
+These are examples of individual calls, not a complete plan or a prescribed sequence:
+
+- Map: mapped = p.map(sources, task=contract.extract)
+  mapped names the result; sources is the input; task selects the work configuration.
+  A previous records result can replace sources.
+- Shuffle: grouped = p.shuffle(records, by=contract.routing)
+  records is a previous records result; by selects the grouping rule.
+  Add against=target only when target_has_content is true and the task requires
+  comparing, updating or integrating existing target content.
+  Its consuming Reduce must produce files.
+  Otherwise grouping uses only the current inputs.
+- Reduce: combined = p.reduce(groups, task=contract.reduce)
+  groups is a previous Shuffle result; task selects the work configuration.
+- Finalize: p.finalize(files, into=target)
+  files is a previous Map or Reduce result containing output files.
+
+The task argument can reference contract.extract, contract.reduce or contract.synthesize.
+Each contains instructions and settings for the work to perform. Any of them can be used
+by Map or Reduce; their names suggest common uses rather than operator types or positions.
+The by argument can reference contract.routing or contract.final_routing.
+Use these configuration names; reuse a configuration when multiple steps need the same work.
+Define optional work configurations and grouping rules only when referenced by the plan.
+
+## Plan Rules
+
+Write a single sequence of the operator calls shown above. Do not include
+Python control flow, imports or other function calls.
+Give each intermediate result a new variable name and pass it to exactly
+one subsequent call. End the sequence with one Finalize call.
+Map accepts sources or records; Shuffle accepts records; Reduce accepts groups;
+Finalize accepts files. Other input types are unsupported.
+
+Each call describes a processing step over a collection of data.
+The runtime assigns files, text ranges or records to individual jobs within
+that step; do not write a separate call for each source file or job.
+
+## Execution Capabilities
+
+Map/Reduce can read their assigned evidence and files referenced by the Skill.
+A work configuration with execution=agent also permits private scratch files and
+Skill-supplied Python scripts. Execution steps cannot scan all history, access external
+networks or run arbitrary scratch scripts.
+
+"""
+
+
 # Common tasks share one collection flow; explicit plans still pass the AST whitelist.
 DEFAULT_PLAN = (
     "records = p.map(sources, task=contract.extract)\n"
@@ -92,6 +172,7 @@ class Routing(PlanModel):
     instructions: str = Field(
         default="",
         description="Which records belong together and why; required for semantic mode. "
+        "Specify the purpose of joint processing and criteria for keeping records separate. "
         "Must stand alone: Shuffle does not receive the Skill or user instruction.",
     )
 
@@ -173,6 +254,32 @@ class PlanProposal(PlanModel):
     )
 
 
+class ReviewDecision(PlanModel):
+    """A future-plan proposal; acceptance never changes completed outputs or task failures."""
+
+    action: Literal["continue", "revise"]
+    reason: str = Field(
+        default="", max_length=600, description="Brief observed basis for the decision."
+    )
+    contract: Contract | None = Field(default=None, description="Complete contract for a revision.")
+    plan: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=8000,
+        description="Complete remaining DSL starting from current.handle and ending with Finalize.",
+    )
+
+    @model_validator(mode="after")
+    def check_revision(self) -> ReviewDecision:
+        """Require both revision fields, or neither for continuation; reject ambiguous decisions."""
+        if self.action == "revise":
+            if self.contract is None or self.plan is None:
+                raise ValueError("A revision requires contract and plan")
+        elif self.contract is not None or self.plan is not None:
+            raise ValueError("Continue must not include contract or plan")
+        return self
+
+
 @dataclass(frozen=True)
 class Node:
     """A validated operation over an already-bound dataset; order is topological."""
@@ -184,12 +291,22 @@ class Node:
     against_target: bool = False
 
 
-def parse_plan(program: str, contract: Contract) -> list[Node]:
+def parse_plan(
+    program: str,
+    contract: Contract,
+    *,
+    input_handle: str = "sources",
+    input_type: str = "sources",
+    completed_names: set[str] | None = None,
+    input_against_target: bool = False,
+) -> list[Node]:
     """Compile a small AST whitelist into typed nodes; no Python objects are evaluated.
 
     Plan text is limited to 8,000 characters before parsing. Plans have a single terminal
     finalize, no unused datasets, rebinding, implicit fan-out or literals.
-    Each Shuffle record belongs to one work set. Invalid plans raise ValueError.
+    input_handle/type bind the sole available collection; completed_names cannot be
+    rebound. input_against_target retains historical comparison requirements for a
+    groups input. Each Shuffle record belongs to one work set. Invalid plans raise ValueError.
     """
     if len(program) > 8000:
         raise ValueError("Plan exceeds 8000 characters")
@@ -199,7 +316,10 @@ def parse_plan(program: str, contract: Contract) -> list[Node]:
         raise ValueError("Invalid plan syntax") from exc
     if not tree.body:
         raise ValueError("Plan must contain at least one operation")
-    handles = {"sources": "sources"}
+    if input_type not in {"sources", "records", "groups", "files"}:
+        raise ValueError(f"Invalid input type: {input_type}")
+    handles = {input_handle: input_type}
+    historical = {input_handle} if input_against_target else set()
     used: set[str] = set()
     nodes = []
 
@@ -229,7 +349,11 @@ def parse_plan(program: str, contract: Contract) -> list[Node]:
             name, call = "result", statement.value
         else:
             raise ValueError("Only dataset assignments and a final p.finalize are allowed")
-        if name in handles or name in {"p", "contract", "target", "sources"}:
+        if (
+            name in handles
+            or name in {"p", "contract", "target", "sources"}
+            or name in (completed_names or ())
+        ):
             raise ValueError(f"Rebinding forbidden: {name}")
         if not isinstance(call, ast.Call):
             raise ValueError("Expected pipeline call")
@@ -259,6 +383,8 @@ def parse_plan(program: str, contract: Contract) -> list[Node]:
                 raise ValueError(f"Missing transform: {task}")
             if op == "reduce":
                 valid = handles[source] == "groups"
+                if source in historical and transform.output != "files":
+                    raise ValueError("against=target requires a Reduce with output=files")
             else:
                 valid = handles[source] in {"sources", "records"}
             output_type = transform.output
@@ -285,6 +411,8 @@ def parse_plan(program: str, contract: Contract) -> list[Node]:
             raise ValueError(f"Invalid dataset type for {op}: {handles[source]}")
         used.add(source)
         handles[name] = output_type
+        if against:
+            historical.add(name)
         nodes.append(Node(name, op, source, task, against))
     if nodes[-1].op != "finalize" or set(handles) - used != {nodes[-1].name}:
         raise ValueError("Every dataset must reach finalize")

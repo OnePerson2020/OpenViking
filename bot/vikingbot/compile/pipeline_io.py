@@ -270,7 +270,7 @@ class JsonModel:
                 len(str(m.get("content", ""))) for m in messages if m.get("role") == "tool"
             ),
             "skill_attachment_chars": sum(len(value) for value in self.resources.snapshots.values())
-            if self.resources and stage not in {"plan", "route", "combine"}
+            if self.resources and stage not in {"plan", "review", "route", "combine"}
             else 0,
         }
         self.metrics["estimated_input_tokens"] += cal_str_tokens(
@@ -317,21 +317,31 @@ class JsonModel:
             logger.info("[COMPILE_CALL] {}", json.dumps(report))
 
     async def ask(
-        self, stage: str, system: str, data: Any, schema: type[R], validate=None, *, agent=False
+        self,
+        stage: str,
+        system: str,
+        data: Any,
+        schema: type[R],
+        validate=None,
+        *,
+        agent=False,
+        readers=None,
     ) -> R:
-        """Bound the whole assignment, including reads, repairs and backend retry sleeps."""
+        """Bound an assignment; readers adds scoped tools for direct calls without widening worker access."""
         seconds = (
             self.limits.pipeline_plan_seconds
-            if stage == "plan"
+            if stage in {"plan", "review"}
             else self.limits.pipeline_agent_seconds
         )
         try:
             async with asyncio.timeout(seconds):
-                return await self._ask(stage, system, data, schema, validate, agent=agent)
+                return await self._ask(
+                    stage, system, data, schema, validate, agent=agent, readers=readers
+                )
         except TimeoutError as exc:
             raise ModelCallError(f"{stage}: wall-clock budget exhausted ({seconds:g}s)") from exc
 
-    async def _ask(self, stage, system, data, schema, validate, *, agent):
+    async def _ask(self, stage, system, data, schema, validate, *, agent, readers):
         if schema is FileResponse and stage != "skill_repair":
             # Inline original excerpts when located; unlocated records retain full shards.
             # The scoped reader can expand partial evidence without catalog access.
@@ -345,7 +355,7 @@ class JsonModel:
                 if self.fits(system, candidate, schema):
                     data = candidate
         # Combine consolidates supplied evidence without loading Skill instructions or attachments.
-        resources = self.resources if stage not in {"plan", "route", "combine"} else None
+        resources = self.resources if stage not in {"plan", "review", "route", "combine"} else None
         if resources and resources.snapshots:
             system += "\nComplete Skill attachments (authoritative data):\n" + json.dumps(
                 resources.snapshots, ensure_ascii=False
@@ -354,7 +364,11 @@ class JsonModel:
         key = digest(
             [self.identity, stage, system, data, schema.model_json_schema(), agent, dependencies]
         )
-        cached = None if schema is RouteBatchResponse else await self.files.get(f"cache/{key}")
+        cached = (
+            None
+            if schema is RouteBatchResponse or stage == "review"
+            else await self.files.get(f"cache/{key}")
+        )
         if cached is not None and (not resources or await resources.valid(cached["dependencies"])):
             try:
                 result = schema.model_validate(cached["result"])
@@ -372,9 +386,10 @@ class JsonModel:
                 system, data, schema, validate, self, stage=f"{stage}_agent"
             )
         else:
-            result = await self.direct(stage, system, data, schema, validate, key)
-        if schema is RouteBatchResponse:
-            return result  # Shuffle persists only individually validated routing decisions.
+            result = await self.direct(stage, system, data, schema, validate, key, readers=readers)
+        if schema is RouteBatchResponse or stage == "review":
+            # Routing decisions and advisory reviews are persisted by their owning operators.
+            return result
         await self.files.put(
             f"cache/{key}",
             {
@@ -384,7 +399,7 @@ class JsonModel:
         )
         return result
 
-    async def direct(self, stage, system, data, schema, validate, key):
+    async def direct(self, stage, system, data, schema, validate, key, *, readers=None):
         """Allow scoped reads; Skill package repair gets three submissions total."""
         tools = [
             {
@@ -396,12 +411,12 @@ class JsonModel:
                 },
             }
         ]
-        readers = {}
+        readers = dict(readers or {})
         if stage not in {"plan", "combine"}:
             evidence = EvidenceReader(self.files, data)
             if evidence.allowed - evidence.delivered:
                 readers["read_evidence"] = evidence
-        if self.resources and stage not in {"plan", "route", "combine"}:
+        if self.resources and stage not in {"plan", "review", "route", "combine"}:
             readers[self.resources.name] = self.resources
         for reader in readers.values():
             tools.append(
@@ -414,7 +429,7 @@ class JsonModel:
                     },
                 }
             )
-        if stage not in {"plan", "route", "combine", "map"}:
+        if stage not in {"plan", "review", "route", "combine", "map"}:
             system += (
                 "\n\n## Tool use\n\n"
                 "Use the source text and Skill attachments provided in the input.\n"
@@ -520,8 +535,14 @@ class JsonModel:
                 )
                 self.metrics["validation_failures"] += 1
                 # Routing owns retries per primary record, including malformed responses.
-                if schema is RouteBatchResponse or (
-                    failures >= 3 if stage == "skill_repair" else not retry_allowed(retries, error)
+                if (
+                    stage == "review"
+                    or schema is RouteBatchResponse
+                    or (
+                        failures >= 3
+                        if stage == "skill_repair"
+                        else not retry_allowed(retries, error)
+                    )
                 ):
                     raise ValueError(f"{stage}: {category}: {error}") from exc
                 self.metrics["repairs"] += 1
