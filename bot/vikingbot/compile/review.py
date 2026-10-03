@@ -172,8 +172,8 @@ async def run(runtime, node, outputs, remaining_plan, completed_names, revisions
     """Return an accepted decision and parsed suffix, or None to retain the existing plan.
 
     Only future configurations may change; output format and scope meanings remain fixed.
-    Invalid decisions and model/read failures are recorded without a repair loop. Cancellation
-    and diagnostic-write failures propagate. This function never changes the active contract.
+    Invalid decisions get up to three repairs per review; exhausted or model/read failures
+    are recorded. Cancellation and diagnostic-write failures propagate; the contract stays fixed.
     """
     record = {}
     accepted = None
@@ -210,25 +210,34 @@ async def run(runtime, node, outputs, remaining_plan, completed_names, revisions
         }
         readers = {reader.name: reader, reader.evidence.name: reader.evidence}
         readers[runtime.resources.name] = runtime.resources
-        decision = await runtime.model.ask("review", prompt, data, ReviewDecision, readers=readers)
+
+        def validate_decision(decision):
+            """Accept only a parsed future revision; invalid decisions leave the contract fixed."""
+            nonlocal accepted
+            if decision.action == "revise":
+                if revisions >= MAX_REVISIONS:
+                    raise ValueError("Plan revision allowance exhausted")
+                if (
+                    decision.contract.output_format != runtime.contract.output_format
+                    or decision.contract.distinguish != runtime.contract.distinguish
+                ):
+                    raise ValueError(
+                        "A revision cannot change output format or scope field meanings"
+                    )
+                nodes = parse_plan(
+                    decision.plan,
+                    decision.contract,
+                    input_handle=node.name,
+                    input_type=output_type,
+                    completed_names=completed_names,
+                    input_against_target=node.against_target,
+                )
+                accepted = (decision, nodes)
+
+        decision = await runtime.model.ask(
+            "review", prompt, data, ReviewDecision, validate_decision, readers=readers
+        )
         record["decision"] = decision.model_dump(exclude_none=True)
-        if decision.action == "revise":
-            if revisions >= MAX_REVISIONS:
-                raise ValueError("Plan revision allowance exhausted")
-            if (
-                decision.contract.output_format != runtime.contract.output_format
-                or decision.contract.distinguish != runtime.contract.distinguish
-            ):
-                raise ValueError("A revision cannot change output format or scope field meanings")
-            nodes = parse_plan(
-                decision.plan,
-                decision.contract,
-                input_handle=node.name,
-                input_type=output_type,
-                completed_names=completed_names,
-                input_against_target=node.against_target,
-            )
-            accepted = (decision, nodes)
         record["status"] = "accepted" if accepted else "continued"
     except (OSError, ValueError, TypeError) as exc:
         record.update(status="rejected", error=str(exc)[:800])

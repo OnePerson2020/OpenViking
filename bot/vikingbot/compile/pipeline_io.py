@@ -209,8 +209,8 @@ class JsonModel:
     Character estimates guide batching and evidence inlining, never reject requests. Usage
     estimates reuse AgentLoop's mixed-text estimator; provider usage is authoritative.
     Cache identity includes model settings, Skill/contract and processing version.
-    Only validated responses enter the cache. Each distinct validation failure
-    receives the shared per-error retry allowance.
+    Only validated responses enter the cache. Validation retries are counted per
+    diagnostic unless the stage imposes a total submission limit.
     """
 
     def __init__(self, provider, model, temperature, files, limits, usage, metrics):
@@ -400,7 +400,7 @@ class JsonModel:
         return result
 
     async def direct(self, stage, system, data, schema, validate, key, *, readers=None):
-        """Allow scoped reads; Skill package repair gets three submissions total."""
+        """Allow scoped reads; each Review gets three repairs, Skill repair three submissions."""
         tools = [
             {
                 "type": "function",
@@ -535,14 +535,12 @@ class JsonModel:
                 )
                 self.metrics["validation_failures"] += 1
                 # Routing owns retries per primary record, including malformed responses.
-                if (
-                    stage == "review"
-                    or schema is RouteBatchResponse
-                    or (
-                        failures >= 3
-                        if stage == "skill_repair"
-                        else not retry_allowed(retries, error)
-                    )
+                if schema is RouteBatchResponse or (
+                    failures > 3
+                    if stage == "review"
+                    else failures >= 3
+                    if stage == "skill_repair"
+                    else not retry_allowed(retries, error)
                 ):
                     raise ValueError(f"{stage}: {category}: {error}") from exc
                 self.metrics["repairs"] += 1
