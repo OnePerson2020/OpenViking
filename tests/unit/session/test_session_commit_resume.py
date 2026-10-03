@@ -304,3 +304,32 @@ def test_session_commit_message_ignores_unknown_fields():
     assert message.auto_commit_policy == {}
     assert "actor_peer_id" not in message.to_dict()
     assert "usage_uris" not in message.to_dict()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_cancelled", [False, True])
+async def test_phase2_shutdown_keeps_archive_recoverable(monkeypatch, user_cancelled):
+    import asyncio
+
+    session = Session(viking_fs=_MemoryVikingFS({}), session_id="session-1")
+    tracker = SimpleNamespace(is_cancellation_requested=lambda task_id: user_cancelled)
+    monkeypatch.setattr("openviking.service.task_tracker.get_task_tracker", lambda: tracker)
+    monkeypatch.setattr(
+        session, "_prepare_phase2_archive_messages", AsyncMock(side_effect=asyncio.CancelledError)
+    )
+    marker = AsyncMock()
+    monkeypatch.setattr(session, "_write_failed_marker", marker)
+
+    with pytest.raises(asyncio.CancelledError):
+        await session._run_memory_extraction(
+            task_id="task-1",
+            archive_uri="viking://user/default/sessions/session-1/history/archive_001",
+            messages=[],
+            first_message_id="first",
+            last_message_id="last",
+            memory_policy=None,
+        )
+
+    assert marker.await_count == int(user_cancelled)
+    if user_cancelled:
+        assert marker.await_args.kwargs["stage"] == "cancelled"

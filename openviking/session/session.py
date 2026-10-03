@@ -2403,11 +2403,14 @@ class Session:
             telemetry.set_error("session.commit.phase2", "CANCELLED", "session commit cancelled")
             snapshot = telemetry.finish("cancelled")
             _publish_telemetry_summary_best_effort(snapshot)
-            await self._write_failed_marker(
-                archive_uri,
-                stage="cancelled",
-                error="session commit cancelled",
-            )
+            # A worker stopped during shutdown leaves its delivery durable for
+            # recovery. Only an explicit task cancellation is terminal.
+            if tracker.is_cancellation_requested(task_id):
+                await self._write_failed_marker(
+                    archive_uri,
+                    stage="cancelled",
+                    error="session commit cancelled",
+                )
             raise
         except Exception as e:
             telemetry.set_error("session.commit.phase2", type(e).__name__, str(e))
