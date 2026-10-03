@@ -187,7 +187,6 @@ function PostCard({ post, lang, navigate, S, formatDate, featured }) {
 
 export function PostView({ slug, lang, theme, navigate, S, formatDate, t }) {
   const post = getPostBySlug(slug);
-  if (!post) return <NotFound S={S} navigate={navigate} />;
   const m = post.meta;
   const bodyRef = useRef(null);
   const supported = m.languages || ['en'];
@@ -306,25 +305,58 @@ function NavCard({ post, dir, lang, S, navigate }) {
   );
 }
 
-function NotFound({ S, navigate }) {
+function NotFound({ S, lang }) {
+  const latest = getAllPosts()[0];
+  useEffect(() => {
+    const previousTitle = document.title;
+    const stale = [...document.head.querySelectorAll('link[rel="canonical"], meta[name="robots"], meta[property="og:url"], script[type="application/ld+json"]')];
+    stale.forEach(node => node.remove());
+    document.title = `404 — ${S.notFoundLabel} | ${S.siteName}`;
+    const robots = document.createElement('meta');
+    robots.name = 'robots';
+    robots.content = 'noindex, follow';
+    document.head.append(robots);
+    return () => {
+      document.title = previousTitle;
+      robots.remove();
+      stale.forEach(node => document.head.append(node));
+    };
+  }, [S]);
+
+  // Native links also work in the static error document without JavaScript,
+  // and load the destination's own metadata instead of retaining noindex.
   return (
-    <main className="b-shell__main">
-      <section className="b-hero">
-        <div className="b-hero__eyebrow">404</div>
-        <h1 className="b-hero__title">{S.notFoundTitle}</h1>
-        <p className="b-hero__lede">{S.notFoundBody}</p>
-        <a className="b-a" href="/" onClick={(e) => { e.preventDefault(); navigate('/'); }}>{S.backToIndex}</a>
+    <main className="b-shell__main b-not-found" aria-labelledby="not-found-title">
+      <section className="b-not-found__spread">
+        <div className="b-not-found__art" aria-hidden="true">
+          <span className="b-not-found__folio">OPENVIKING / FIELD NOTES</span>
+          <div className="b-not-found__number">4<span className="b-not-found__missing">0</span>4</div>
+          <div className="b-not-found__rule"><span>—</span><span>404</span></div>
+        </div>
+        <div className="b-not-found__copy">
+          <p className="b-not-found__eyebrow">404 / {S.notFoundLabel}</p>
+          <h1 id="not-found-title">{S.notFoundTitle}</h1>
+          <p className="b-not-found__body">{S.notFoundBody}</p>
+          <a className="b-not-found__home" href="/">{S.notFoundHome}<span aria-hidden="true">↗</span></a>
+          <a className="b-not-found__docs" href={`https://docs.openviking.ai/${lang}/`}>{S.notFoundDocs}<span aria-hidden="true"> ↗</span></a>
+        </div>
       </section>
+      {latest && <aside className="b-not-found__reading" aria-label={S.notFoundRead}>
+        <div><p className="b-not-found__eyebrow">{S.notFoundRead}</p><p className="b-not-found__note">{S.notFoundNote}</p></div>
+        <a href={postPath(latest.id)} className="b-not-found__essay">
+          <span>{pickLocale(latest.meta.title, lang)}</span><span aria-hidden="true">↗</span>
+        </a>
+      </aside>}
     </main>
   );
 }
 
 /* ---------- footer ---------- */
 
-function Footer({ S }) {
+function Footer({ S, showFontLicenses = true }) {
   return (
     <footer className="b-footer">
-      <span>© 2026 {S.siteName} · <a className="b-footer__link" href="/font-licenses.html">Font licenses / 字体许可</a></span>
+      <span>© 2026 {S.siteName}{showFontLicenses && <> · <a className="b-footer__link" href="/font-licenses.html">Font licenses / 字体许可</a></>}</span>
       <div className="b-footer__icons">
         <a href="https://github.com/volcengine/openviking?utm_source=blog&utm_medium=referral&utm_campaign=blog" target="_blank" rel="noreferrer" aria-label="GitHub">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.385-1.335-1.755-1.335-1.755-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12c0-6.63-5.37-12-12-12z"/></svg>
@@ -340,16 +372,17 @@ function Footer({ S }) {
 /* ---------- root app ---------- */
 
 export function BlogShell({ router, lang, preference = 'auto', theme, onLang = () => {}, onToggleTheme = () => {}, S, formatDate, t }) {
+  const missing = router.route.name === 'notFound' || (router.route.name === 'post' && !getPostBySlug(router.route.slug));
   const onHome = () => router.navigate(buildPath({ name: 'index' }, router.query));
 
   return (
     <div className="b-shell">
-      <Topbar lang={lang} preference={preference} theme={theme} onLang={onLang} onToggleTheme={onToggleTheme} onHome={onHome} S={S} />
-      {router.route.name === 'index'
+      <Topbar lang={lang} preference={preference} theme={theme} onLang={onLang} onToggleTheme={onToggleTheme} onHome={missing ? undefined : onHome} S={S} />
+      {missing ? <NotFound S={S} lang={lang} /> : router.route.name === 'index'
         ? <IndexView lang={lang} t={t} theme={theme} navigate={router.navigate} S={S} formatDate={formatDate} />
         : <PostView slug={router.route.slug} lang={lang} theme={theme} navigate={router.navigate} S={S} formatDate={formatDate} t={t} />}
-      <Footer S={S} />
-      <VikingBotWidget lang={lang} />
+      <Footer S={S} showFontLicenses={!missing} />
+      {!missing && <VikingBotWidget lang={lang} />}
     </div>
   );
 }
@@ -391,9 +424,9 @@ export default function App() {
   };
   const onToggleTheme = () => setTheme(t => t === THEME_LIGHT ? THEME_DARK : THEME_LIGHT);
 
-  useEffect(() => { window.scrollTo({ top: 0, behavior: 'instant' in window ? 'instant' : 'auto' }); }, [router.route.name, router.route.slug]);
+  useEffect(() => { window.scrollTo({ top: 0, behavior: 'instant' in window ? 'instant' : 'auto' }); }, [router.route.name, router.route.slug, router.route.path]);
 
-  useEffect(() => { trackPageView(window.location.pathname); }, [router.route.name, router.route.slug]);
+  useEffect(() => { trackPageView(window.location.pathname); }, [router.route.name, router.route.slug, router.route.path]);
 
   const S = useShellStrings(lang);
   const formatDate = useMemo(() => makeFormatDate(lang), [lang]);
