@@ -43,7 +43,7 @@ import {
   TableRow,
 } from '#/components/ui/table'
 import { useAppConnection } from '#/hooks/use-app-connection'
-import { ovClient } from '#/lib/ov-client'
+import { getOvResult, ovClient } from '#/lib/ov-client'
 import { postResources } from '#/gen/ov-client'
 import { commitSession } from '#/lib/sessions/api'
 import { cn } from '#/lib/utils'
@@ -89,6 +89,7 @@ const TASK_STATUS_OPTIONS: Exclude<TaskStatusFilter, 'all'>[] = [
 ]
 
 function TasksRoute() {
+  const [overviewOpen, setOverviewOpen] = React.useState(false)
   const navigate = useNavigate()
   const { t } = useTranslation('tasksPage')
   const { identityScopeKey } = useAppConnection()
@@ -165,12 +166,14 @@ function TasksRoute() {
         resourceUri.startsWith('http://') ||
         resourceUri.startsWith('https://')
       ) {
-        const res = await postResources({
-          body: {
-            url: resourceUri,
-            reason: `Re-queued task: ${task.task_id}`,
-          } as any,
-        })
+        const res = await getOvResult(
+          postResources({
+            body: {
+              path: resourceUri,
+              reason: `Re-queued task: ${task.task_id}`,
+            },
+          }),
+        )
         return { res, task }
       }
 
@@ -614,93 +617,109 @@ function TasksRoute() {
         </div>
       </header>
 
-      {/* 4 大 Task 核心运行 KPI 观察行 */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Card className="flex flex-col gap-1 p-3 shadow-none transition-colors hover:border-primary/40">
-          <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span className="font-medium">{t('labels.successRate')}</span>
-          </div>
-          <div className="flex items-baseline gap-1">
-            <span className="font-mono text-xl font-bold tabular-nums text-foreground">
-              {kpiData.successRate.toFixed(1)}%
-            </span>
-          </div>
-          <p className="text-[11px] text-muted-foreground truncate">
-            {t('labels.taskSummary', {
-              total: kpiData.total,
-              failed: kpiData.failed,
-            })}
-          </p>
-        </Card>
+      <Button
+        variant="outline"
+        className="self-start md:hidden"
+        aria-expanded={overviewOpen}
+        aria-controls="tasks-overview"
+        onClick={() => setOverviewOpen((open) => !open)}
+      >
+        {t(overviewOpen ? 'studio:hideOverview' : 'studio:showOverview')}
+      </Button>
+      <div
+        id="tasks-overview"
+        className={cn(
+          'flex-col gap-4 md:flex',
+          overviewOpen ? 'flex' : 'hidden',
+        )}
+      >
+        {/* 4 大 Task 核心运行 KPI 观察行 */}
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          <Card className="flex flex-col gap-1 p-3 shadow-none transition-colors hover:border-primary/40">
+            <div className="flex items-center justify-between text-xs text-muted-foreground">
+              <span className="font-medium">{t('labels.successRate')}</span>
+            </div>
+            <div className="flex items-baseline gap-1">
+              <span className="font-mono text-xl font-bold tabular-nums text-foreground">
+                {kpiData.successRate.toFixed(1)}%
+              </span>
+            </div>
+            <p className="text-[11px] text-muted-foreground truncate">
+              {t('labels.taskSummary', {
+                total: kpiData.total,
+                failed: kpiData.failed,
+              })}
+            </p>
+          </Card>
 
-        <Card className="flex flex-col gap-1 p-3 shadow-none transition-colors hover:border-primary/40">
-          <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span className="font-medium">{t('labels.avgDuration')}</span>
-          </div>
-          <div className="flex items-baseline gap-1">
-            <span className="font-mono text-xl font-bold tabular-nums text-foreground">
-              {kpiData.avgDurationSec === undefined
-                ? '-'
-                : kpiData.avgDurationSec < 1
-                  ? `${(kpiData.avgDurationSec * 1000).toFixed(0)}ms`
-                  : `${kpiData.avgDurationSec.toFixed(1)}s`}
-            </span>
-          </div>
-          <p className="text-[11px] text-muted-foreground truncate">
-            {t('labels.avgProcessingTime')}
-          </p>
-        </Card>
+          <Card className="flex flex-col gap-1 p-3 shadow-none transition-colors hover:border-primary/40">
+            <div className="flex items-center justify-between text-xs text-muted-foreground">
+              <span className="font-medium">{t('labels.avgDuration')}</span>
+            </div>
+            <div className="flex items-baseline gap-1">
+              <span className="font-mono text-xl font-bold tabular-nums text-foreground">
+                {kpiData.avgDurationSec === undefined
+                  ? '-'
+                  : kpiData.avgDurationSec < 1
+                    ? `${(kpiData.avgDurationSec * 1000).toFixed(0)}ms`
+                    : `${kpiData.avgDurationSec.toFixed(1)}s`}
+              </span>
+            </div>
+            <p className="text-[11px] text-muted-foreground truncate">
+              {t('labels.avgProcessingTime')}
+            </p>
+          </Card>
 
-        <Card className="flex flex-col gap-1 p-3 shadow-none transition-colors hover:border-primary/40">
-          <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span className="font-medium">{t('labels.totalTasks')}</span>
-          </div>
-          <div className="flex items-baseline gap-1">
-            <span className="font-mono text-xl font-bold tabular-nums text-foreground">
-              {t('labels.taskCount', { count: kpiData.total })}
-            </span>
-          </div>
-          <p className="text-[11px] text-muted-foreground truncate">
-            {t('labels.completedTasks', { count: kpiData.completed })}
-          </p>
-        </Card>
+          <Card className="flex flex-col gap-1 p-3 shadow-none transition-colors hover:border-primary/40">
+            <div className="flex items-center justify-between text-xs text-muted-foreground">
+              <span className="font-medium">{t('labels.totalTasks')}</span>
+            </div>
+            <div className="flex items-baseline gap-1">
+              <span className="font-mono text-xl font-bold tabular-nums text-foreground">
+                {t('labels.taskCount', { count: kpiData.total })}
+              </span>
+            </div>
+            <p className="text-[11px] text-muted-foreground truncate">
+              {t('labels.completedTasks', { count: kpiData.completed })}
+            </p>
+          </Card>
 
-        <Card className="flex flex-col gap-1 p-3 shadow-none transition-colors hover:border-primary/40">
-          <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span className="font-medium">{t('labels.activePending')}</span>
-          </div>
-          <div className="flex items-baseline gap-1">
-            <span className="font-mono text-xl font-bold tabular-nums text-foreground">
-              {kpiData.running} / {kpiData.pending}
-            </span>
-          </div>
-          <p className="text-[11px] text-muted-foreground truncate">
-            {t('labels.runningPending')}
-          </p>
-        </Card>
-      </div>
-
-      {/* 任务队列 (上层) 与 工序队列 (下层) 50/50 并排观测行 */}
-      <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-2">
-        {/* 左侧 (50% 宽度 - 优先看上层任务): 任务队列状态 (Task Queues) */}
-        <div>
-          <QueueStatusCard
-            title={t('labels.taskQueueStatus')}
-            customRows={kpiData.typeRows}
-            isHealthy={kpiData.failed === 0}
-          />
+          <Card className="flex flex-col gap-1 p-3 shadow-none transition-colors hover:border-primary/40">
+            <div className="flex items-center justify-between text-xs text-muted-foreground">
+              <span className="font-medium">{t('labels.activePending')}</span>
+            </div>
+            <div className="flex items-baseline gap-1">
+              <span className="font-mono text-xl font-bold tabular-nums text-foreground">
+                {kpiData.running} / {kpiData.pending}
+              </span>
+            </div>
+            <p className="text-[11px] text-muted-foreground truncate">
+              {t('labels.runningPending')}
+            </p>
+          </Card>
         </div>
 
-        {/* 右侧 (50% 宽度 - 拆分出的下层工序): 工序队列状态 (Process Queues) */}
-        <div>
-          <QueueStatusCard
-            title={t('labels.processQueueStatus')}
-            customRows={queueRows}
-            isHealthy={kpiData.failed === 0}
-          />
+        {/* 任务队列 (上层) 与 工序队列 (下层) 50/50 并排观测行 */}
+        <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-2">
+          {/* 左侧 (50% 宽度 - 优先看上层任务): 任务队列状态 (Task Queues) */}
+          <div>
+            <QueueStatusCard
+              title={t('labels.taskQueueStatus')}
+              customRows={kpiData.typeRows}
+              isHealthy={kpiData.failed === 0}
+            />
+          </div>
+
+          {/* 右侧 (50% 宽度 - 拆分出的下层工序): 工序队列状态 (Process Queues) */}
+          <div>
+            <QueueStatusCard
+              title={t('labels.processQueueStatus')}
+              customRows={queueRows}
+              isHealthy={kpiData.failed === 0}
+            />
+          </div>
         </div>
       </div>
-
       <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card/60 p-2 shadow-xs">
         <span className="px-1 text-xs font-medium text-muted-foreground">
           {t('filters.label')}
@@ -835,11 +854,20 @@ function TasksRoute() {
                 <TableRow className="bg-muted/20 hover:bg-muted/20">
                   <TableHead>{t('table.task')}</TableHead>
                   <TableHead>{t('table.type')}</TableHead>
-                  <TableHead>{t('table.resource')}</TableHead>
-                  <TableHead>{t('labels.queuePipeline')}</TableHead>
+                  <TableHead className="hidden md:table-cell">
+                    {t('table.resource')}
+                  </TableHead>
+                  <TableHead className="hidden md:table-cell">
+                    {t('labels.queuePipeline')}
+                  </TableHead>
                   <TableHead>{t('table.status')}</TableHead>
-                  <TableHead title={t('labels.processingDurationHelp')}>{t('labels.timing')}</TableHead>
-                  <TableHead className="text-right">
+                  <TableHead
+                    className="hidden md:table-cell"
+                    title={t('labels.processingDurationHelp')}
+                  >
+                    {t('labels.timing')}
+                  </TableHead>
+                  <TableHead className="hidden text-right md:table-cell">
                     {t('table.createdAt')}
                   </TableHead>
                 </TableRow>
@@ -885,7 +913,7 @@ function TasksRoute() {
                     >
                       <TableCell>
                         <span className="flex items-center gap-2">
-                          <code className="min-w-0 truncate text-xs">
+                          <code className="min-w-0 max-w-28 truncate text-xs md:max-w-none">
                             {taskId || `#${pageOffset + index + 1}`}
                           </code>
                           {taskId ? (
@@ -900,22 +928,31 @@ function TasksRoute() {
                             })
                           : '-'}
                       </TableCell>
-                      <TableCell className="max-w-72 truncate text-muted-foreground">
+                      <TableCell className="hidden max-w-72 truncate text-muted-foreground md:table-cell">
                         {task.resource_id || '-'}
                       </TableCell>
-                      <TableCell>{renderQueuePipeline(task)}</TableCell>
+                      <TableCell className="hidden md:table-cell">
+                        {renderQueuePipeline(task)}
+                      </TableCell>
                       <TableCell>{renderStatus(task)}</TableCell>
-                      <TableCell className="whitespace-nowrap text-xs tabular-nums">
+                      <TableCell className="hidden whitespace-nowrap text-xs tabular-nums md:table-cell">
                         <div>
-                          {t('labels.processingDuration')}: <span>{task.status === 'pending' && (task.processing_seconds == null || task.processing_seconds === 0)
-                            ? t('labels.processingNotStarted')
-                            : formatTaskProcessingDuration(task) ?? t('labels.timingUnavailable')}</span>
+                          {t('labels.processingDuration')}:{' '}
+                          <span>
+                            {task.status === 'pending' &&
+                            (task.processing_seconds == null ||
+                              task.processing_seconds === 0)
+                              ? t('labels.processingNotStarted')
+                              : (formatTaskProcessingDuration(task) ??
+                                t('labels.timingUnavailable'))}
+                          </span>
                         </div>
                         <div className="text-muted-foreground">
-                          {t('labels.totalDuration')}: <span>{formatTaskDuration(task)}</span>
+                          {t('labels.totalDuration')}:{' '}
+                          <span>{formatTaskDuration(task)}</span>
                         </div>
                       </TableCell>
-                      <TableCell className="whitespace-nowrap text-right text-muted-foreground">
+                      <TableCell className="hidden whitespace-nowrap text-right text-muted-foreground md:table-cell">
                         {formatTime(task)}
                       </TableCell>
                     </TableRow>

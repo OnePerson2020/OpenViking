@@ -9,6 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as MemoriesRouteImport } from './routes/memories'
 import { Route as WatchesRouteRouteImport } from './routes/watches/route'
 import { Route as VikingbotRouteRouteImport } from './routes/vikingbot/route'
 import { Route as UsersRouteRouteImport } from './routes/users/route'
@@ -22,6 +23,7 @@ import { Route as PlaygroundRouteRouteImport } from './routes/playground/route'
 import { Route as PermissionsRouteRouteImport } from './routes/permissions/route'
 import { Route as MonitoringRouteRouteImport } from './routes/monitoring/route'
 import { Route as HomeRouteRouteImport } from './routes/home/route'
+import { Route as DirectoryRouteRouteImport } from './routes/directory/route'
 import { Route as AgentExperienceRouteRouteImport } from './routes/agent-experience/route'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as VikingbotIndexRouteImport } from './routes/vikingbot/index'
@@ -38,6 +40,11 @@ import { Route as CompileNewRouteImport } from './routes/compile/new'
 import { Route as AgentExperienceExperienceUriRouteImport } from './routes/agent-experience/$experienceUri'
 import { Route as CompileTasksTaskIdRouteImport } from './routes/compile/tasks/$taskId'
 
+const MemoriesRoute = MemoriesRouteImport.update({
+  id: '/memories',
+  path: '/memories',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const WatchesRouteRoute = WatchesRouteRouteImport.update({
   id: '/watches',
   path: '/watches',
@@ -101,6 +108,11 @@ const MonitoringRouteRoute = MonitoringRouteRouteImport.update({
 const HomeRouteRoute = HomeRouteRouteImport.update({
   id: '/home',
   path: '/home',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DirectoryRouteRoute = DirectoryRouteRouteImport.update({
+  id: '/directory',
+  path: '/directory',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AgentExperienceRouteRoute = AgentExperienceRouteRouteImport.update({
@@ -183,6 +195,7 @@ const CompileTasksTaskIdRoute = CompileTasksTaskIdRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/agent-experience': typeof AgentExperienceRouteRouteWithChildren
+  '/directory': typeof DirectoryRouteRoute
   '/home': typeof HomeRouteRoute
   '/monitoring': typeof MonitoringRouteRoute
   '/permissions': typeof PermissionsRouteRoute
@@ -196,6 +209,7 @@ export interface FileRoutesByFullPath {
   '/users': typeof UsersRouteRouteWithChildren
   '/vikingbot': typeof VikingbotRouteRouteWithChildren
   '/watches': typeof WatchesRouteRoute
+  '/memories': typeof MemoriesRoute
   '/agent-experience/$experienceUri': typeof AgentExperienceExperienceUriRoute
   '/compile/new': typeof CompileNewRoute
   '/oauth/consent': typeof OauthConsentRoute
@@ -212,6 +226,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/directory': typeof DirectoryRouteRoute
   '/home': typeof HomeRouteRoute
   '/monitoring': typeof MonitoringRouteRoute
   '/permissions': typeof PermissionsRouteRoute
@@ -222,6 +237,7 @@ export interface FileRoutesByTo {
   '/skills': typeof SkillsRouteRoute
   '/tasks': typeof TasksRouteRoute
   '/watches': typeof WatchesRouteRoute
+  '/memories': typeof MemoriesRoute
   '/agent-experience/$experienceUri': typeof AgentExperienceExperienceUriRoute
   '/compile/new': typeof CompileNewRoute
   '/oauth/consent': typeof OauthConsentRoute
@@ -240,6 +256,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/agent-experience': typeof AgentExperienceRouteRouteWithChildren
+  '/directory': typeof DirectoryRouteRoute
   '/home': typeof HomeRouteRoute
   '/monitoring': typeof MonitoringRouteRoute
   '/permissions': typeof PermissionsRouteRoute
@@ -253,6 +270,7 @@ export interface FileRoutesById {
   '/users': typeof UsersRouteRouteWithChildren
   '/vikingbot': typeof VikingbotRouteRouteWithChildren
   '/watches': typeof WatchesRouteRoute
+  '/memories': typeof MemoriesRoute
   '/agent-experience/$experienceUri': typeof AgentExperienceExperienceUriRoute
   '/compile/new': typeof CompileNewRoute
   '/oauth/consent': typeof OauthConsentRoute
@@ -272,6 +290,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/agent-experience'
+    | '/directory'
     | '/home'
     | '/monitoring'
     | '/permissions'
@@ -285,6 +304,7 @@ export interface FileRouteTypes {
     | '/users'
     | '/vikingbot'
     | '/watches'
+    | '/memories'
     | '/agent-experience/$experienceUri'
     | '/compile/new'
     | '/oauth/consent'
@@ -301,6 +321,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/directory'
     | '/home'
     | '/monitoring'
     | '/permissions'
@@ -311,6 +332,7 @@ export interface FileRouteTypes {
     | '/skills'
     | '/tasks'
     | '/watches'
+    | '/memories'
     | '/agent-experience/$experienceUri'
     | '/compile/new'
     | '/oauth/consent'
@@ -328,6 +350,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/agent-experience'
+    | '/directory'
     | '/home'
     | '/monitoring'
     | '/permissions'
@@ -341,6 +364,7 @@ export interface FileRouteTypes {
     | '/users'
     | '/vikingbot'
     | '/watches'
+    | '/memories'
     | '/agent-experience/$experienceUri'
     | '/compile/new'
     | '/oauth/consent'
@@ -359,6 +383,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AgentExperienceRouteRoute: typeof AgentExperienceRouteRouteWithChildren
+  DirectoryRouteRoute: typeof DirectoryRouteRoute
   HomeRouteRoute: typeof HomeRouteRoute
   MonitoringRouteRoute: typeof MonitoringRouteRoute
   PermissionsRouteRoute: typeof PermissionsRouteRoute
@@ -372,6 +397,7 @@ export interface RootRouteChildren {
   UsersRouteRoute: typeof UsersRouteRouteWithChildren
   VikingbotRouteRoute: typeof VikingbotRouteRouteWithChildren
   WatchesRouteRoute: typeof WatchesRouteRoute
+  MemoriesRoute: typeof MemoriesRoute
   CompileNewRoute: typeof CompileNewRoute
   OauthConsentRoute: typeof OauthConsentRoute
   OauthVerifyRoute: typeof OauthVerifyRoute
@@ -381,6 +407,13 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/memories': {
+      id: '/memories'
+      path: '/memories'
+      fullPath: '/memories'
+      preLoaderRoute: typeof MemoriesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/watches': {
       id: '/watches'
       path: '/watches'
@@ -470,6 +503,13 @@ declare module '@tanstack/react-router' {
       path: '/home'
       fullPath: '/home'
       preLoaderRoute: typeof HomeRouteRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/directory': {
+      id: '/directory'
+      path: '/directory'
+      fullPath: '/directory'
+      preLoaderRoute: typeof DirectoryRouteRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/agent-experience': {
@@ -638,6 +678,7 @@ const VikingbotRouteRouteWithChildren = VikingbotRouteRoute._addFileChildren(
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AgentExperienceRouteRoute: AgentExperienceRouteRouteWithChildren,
+  DirectoryRouteRoute: DirectoryRouteRoute,
   HomeRouteRoute: HomeRouteRoute,
   MonitoringRouteRoute: MonitoringRouteRoute,
   PermissionsRouteRoute: PermissionsRouteRoute,
@@ -651,6 +692,7 @@ const rootRouteChildren: RootRouteChildren = {
   UsersRouteRoute: UsersRouteRouteWithChildren,
   VikingbotRouteRoute: VikingbotRouteRouteWithChildren,
   WatchesRouteRoute: WatchesRouteRoute,
+  MemoriesRoute: MemoriesRoute,
   CompileNewRoute: CompileNewRoute,
   OauthConsentRoute: OauthConsentRoute,
   OauthVerifyRoute: OauthVerifyRoute,

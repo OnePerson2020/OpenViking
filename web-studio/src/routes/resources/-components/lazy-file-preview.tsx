@@ -10,12 +10,14 @@ const FilePreview = lazy(() =>
 )
 
 export function LazyFilePreview({
+  readOnly,
   file,
   hideDirectoryHeader,
   onClose,
   onNavigate,
   showCloseButton,
 }: {
+  readOnly?: boolean
   file: VikingFsEntry | null
   hideDirectoryHeader?: boolean
   onClose: () => void
@@ -31,6 +33,7 @@ export function LazyFilePreview({
       }
     >
       <FilePreview
+        readOnly={readOnly}
         file={file}
         hideDirectoryHeader={hideDirectoryHeader}
         onClose={onClose}

@@ -1,3 +1,4 @@
+import studio from './zh-CN/studio'
 import vikingbot from './zh-CN/vikingbot'
 import compile from './zh-CN/compile'
 import memoryPolicy from './zh-CN/user-memory-policy'
@@ -7,6 +8,7 @@ import activity from './zh-CN/activity'
 import memoryTemplates from './zh-CN/memory-templates'
 
 const zhCN = {
+  studio,
   compile,
   vikingbot,
   ...workspace,

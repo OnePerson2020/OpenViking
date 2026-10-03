@@ -38,6 +38,11 @@ vi.mock('react-i18next', () => ({
   }),
 }))
 
+const service = vi.hoisted(() => ({ provider: 'opensource' }))
+vi.mock('#/hooks/use-studio-service', () => ({
+  useStudioService: () => service,
+}))
+
 vi.mock('sonner', () => ({ toast: toastMocks }))
 
 vi.mock('#/hooks/use-app-connection', () => ({
@@ -113,6 +118,7 @@ function renderPage() {
 }
 
 beforeEach(() => {
+  service.provider = 'opensource'
   apiMocks.fetchWatches.mockResolvedValue([watch])
   apiMocks.fetchWatchProcessingHistory.mockResolvedValue([
     { status: 'running', task_id: 'processing-1' },
@@ -128,6 +134,22 @@ afterEach(() => {
 })
 
 describe('WatchManagementPage', () => {
+  it('does not offer hosted write actions when only list access is verified', async () => {
+    service.provider = 'volcengine'
+    renderPage()
+    await screen.findByText(watch.path)
+    for (const name of [
+      'actions.edit',
+      'actions.trigger',
+      'actions.more',
+      'add',
+    ]) {
+      expect(screen.queryByRole('button', { name })).toBeNull()
+    }
+    expect(screen.queryByRole('switch')).toBeNull()
+    expect(screen.queryByText('columns.actions')).toBeNull()
+    expect(apiMocks.triggerWatch).not.toHaveBeenCalled()
+  })
   it('shows edit as a direct row action', async () => {
     renderPage()
 

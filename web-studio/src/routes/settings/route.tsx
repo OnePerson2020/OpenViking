@@ -1,3 +1,4 @@
+import { resolveApiKeyAuth } from '#/lib/studio-auth'
 import * as React from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { createFileRoute } from '@tanstack/react-router'
@@ -13,6 +14,7 @@ import {
 import { useTranslation } from 'react-i18next'
 
 import { Alert, AlertDescription, AlertTitle } from '#/components/ui/alert'
+import { Button } from '#/components/ui/button'
 import { Badge } from '#/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '#/components/ui/card'
 import {
@@ -22,6 +24,8 @@ import {
   FieldLabel,
 } from '#/components/ui/field'
 import { Input } from '#/components/ui/input'
+import { resolveConfiguredServiceProvider } from '#/lib/studio-service'
+import { useStudioService } from '#/hooks/use-studio-service'
 import { useAppConnection } from '#/hooks/use-app-connection'
 import { probeStudioConnection } from '#/lib/admin'
 import type { CapabilityProbeResult } from '#/lib/admin'
@@ -125,9 +129,14 @@ function UserApiKeyInput({
 }
 
 function ConnectionSettingsRoute() {
-  const { i18n, t } = useTranslation('settings')
-  const { connection, saveConnection, serverMode } = useAppConnection()
+  const { i18n, t } = useTranslation(['settings', 'studio'])
+  const service = useStudioService()
+  const { connection, reconnect, saveConnection, serverMode } =
+    useAppConnection()
   const [draft, setDraft] = React.useState<ConnectionDraft>(connection)
+  const canEditControlCredential =
+    resolveConfiguredServiceProvider(draft.baseUrl, draft.serviceSelection) ===
+    'opensource'
   const pendingDraftRef = React.useRef<ConnectionDraft | null>(null)
   const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const saveConnectionRef = React.useRef(saveConnection)
@@ -175,7 +184,18 @@ function ConnectionSettingsRoute() {
     placeholderData: keepPreviousData,
     queryFn: () =>
       probeStudioConnection({
+        apiKeyAuth: resolveApiKeyAuth(
+          connection.baseUrl,
+          connection.serviceSelection,
+        ),
         accountId: connection.accountId || DEFAULT_ACCOUNT_ID,
+        skipAdmin: service.provider !== 'opensource',
+        dataRootUri:
+          service.provider === 'volcengine'
+            ? 'viking://~/'
+            : connection.userId
+              ? `viking://user/${connection.userId}/`
+              : undefined,
         adminApiKey: connection.adminApiKey,
         apiKey: connection.apiKey,
         baseUrl: connection.baseUrl,
@@ -184,6 +204,7 @@ function ConnectionSettingsRoute() {
       }),
     queryKey: [
       'studio-connection-probe',
+      service.provider,
       connection.baseUrl,
       connection.adminApiKey,
       connection.apiKey,
@@ -197,7 +218,8 @@ function ConnectionSettingsRoute() {
   const isDevMode = serverMode === 'dev'
   const isUnsupportedAuthMode = serverMode === 'oidc' || serverMode === 'ldap'
   const rootApiKey = connection.adminApiKey.trim()
-  const hasControlCredential = Boolean(draft.adminApiKey.trim())
+  const hasControlCredential =
+    service.provider === 'opensource' && Boolean(draft.adminApiKey.trim())
   const hasDataCredential = Boolean(draft.apiKey.trim())
   const adminProbe = probeQuery.data?.admin
   const dataProbe = probeQuery.data?.data
@@ -211,33 +233,35 @@ function ConnectionSettingsRoute() {
     !hasControlCredential &&
     probeQuery.data?.rootApiKeyRequired === true
   const keyGuide =
-    serverMode === 'trusted'
-      ? trustedCredentialRequired
-        ? {
-            primary: t('connection.keyGuide.trusted.primary'),
-            secondary: t('connection.keyGuide.trusted.secondary'),
-            title: t('connection.keyGuide.trusted.title'),
-          }
-        : null
-      : !hasControlCredential && !hasDataCredential
-        ? {
-            primary: t('connection.keyGuide.empty.primary'),
-            secondary: t('connection.keyGuide.empty.secondary'),
-            title: t('connection.keyGuide.empty.title'),
-          }
-        : !hasControlCredential
+    service.provider !== 'opensource'
+      ? null
+      : serverMode === 'trusted'
+        ? trustedCredentialRequired
           ? {
-              primary: t('connection.keyGuide.control.primary'),
-              secondary: t('connection.keyGuide.control.secondary'),
-              title: t('connection.keyGuide.control.title'),
+              primary: t('connection.keyGuide.trusted.primary'),
+              secondary: t('connection.keyGuide.trusted.secondary'),
+              title: t('connection.keyGuide.trusted.title'),
             }
-          : !hasDataCredential
+          : null
+        : !hasControlCredential && !hasDataCredential
+          ? {
+              primary: t('connection.keyGuide.empty.primary'),
+              secondary: t('connection.keyGuide.empty.secondary'),
+              title: t('connection.keyGuide.empty.title'),
+            }
+          : !hasControlCredential
             ? {
-                primary: t('connection.keyGuide.data.primary'),
-                secondary: t('connection.keyGuide.data.secondary'),
-                title: t('connection.keyGuide.data.title'),
+                primary: t('connection.keyGuide.control.primary'),
+                secondary: t('connection.keyGuide.control.secondary'),
+                title: t('connection.keyGuide.control.title'),
               }
-            : null
+            : !hasDataCredential
+              ? {
+                  primary: t('connection.keyGuide.data.primary'),
+                  secondary: t('connection.keyGuide.data.secondary'),
+                  title: t('connection.keyGuide.data.title'),
+                }
+              : null
 
   return (
     <div className="flex w-full min-w-0 flex-col gap-5">
@@ -265,6 +289,52 @@ function ConnectionSettingsRoute() {
           </div>
         </CardHeader>
         <CardContent className="grid gap-4 px-5 py-4">
+          <Field>
+            <FieldLabel htmlFor="settings-service-type">
+              {t('studio:serviceType')}
+            </FieldLabel>
+            <FieldContent>
+              <select
+                id="settings-service-type"
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                value={draft.serviceSelection ?? 'auto'}
+                onChange={(event) =>
+                  updateDraft({
+                    serviceSelection: event.target.value as
+                      | 'auto'
+                      | 'opensource'
+                      | 'volcengine',
+                  })
+                }
+              >
+                <option value="auto">{t('studio:auto')}</option>
+                <option value="opensource">
+                  {t('studio:providers.opensource')}
+                </option>
+                <option value="volcengine">
+                  {t('studio:providers.volcengine')}
+                </option>
+              </select>
+              <FieldDescription>{t('studio:serviceHint')}</FieldDescription>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={service.isChecking}
+                onClick={reconnect}
+              >
+                {t('studio:retry')}
+              </Button>
+              <p className="text-sm" aria-live="polite">
+                {t(
+                  `studio:providers.${service.isChecking ? 'checking' : service.provider}`,
+                )}{' '}
+                {service.version}
+              </p>
+              <FieldDescription>
+                {t(`studio:connectionSummary.${service.provider}`)}
+              </FieldDescription>
+            </FieldContent>
+          </Field>
           <Field>
             <FieldLabel htmlFor="settings-base-url">
               {t('fields.baseUrl')}
@@ -319,26 +389,28 @@ function ConnectionSettingsRoute() {
           ) : (
             <>
               <div className="grid gap-4 md:grid-cols-2">
-                <Field>
-                  <FieldLabel htmlFor="settings-root-api-key">
-                    {t('fields.rootApiKey')}
-                  </FieldLabel>
-                  <FieldContent>
-                    <Input
-                      id="settings-root-api-key"
-                      type="password"
-                      value={draft.adminApiKey}
-                      onChange={(event) =>
-                        updateDraft({ adminApiKey: event.target.value })
-                      }
-                      placeholder={t('placeholders.adminApiKey')}
-                      {...PLAIN_INPUT_PROPS}
-                    />
-                    <FieldDescription>
-                      {t('connection.rootHint')}
-                    </FieldDescription>
-                  </FieldContent>
-                </Field>
+                {canEditControlCredential ? (
+                  <Field>
+                    <FieldLabel htmlFor="settings-root-api-key">
+                      {t('fields.rootApiKey')}
+                    </FieldLabel>
+                    <FieldContent>
+                      <Input
+                        id="settings-root-api-key"
+                        type="password"
+                        value={draft.adminApiKey}
+                        onChange={(event) =>
+                          updateDraft({ adminApiKey: event.target.value })
+                        }
+                        placeholder={t('placeholders.adminApiKey')}
+                        {...PLAIN_INPUT_PROPS}
+                      />
+                      <FieldDescription>
+                        {t('connection.rootHint')}
+                      </FieldDescription>
+                    </FieldContent>
+                  </Field>
+                ) : null}
                 <Field>
                   <FieldLabel htmlFor="settings-user-api-key">
                     {t('fields.userApiKey')}
@@ -360,11 +432,13 @@ function ConnectionSettingsRoute() {
               </div>
 
               <div className="grid gap-2 md:grid-cols-2">
-                <CapabilityStatus
-                  isLoading={probeQuery.isFetching}
-                  label={t('health.admin')}
-                  result={adminProbe}
-                />
+                {service.provider === 'opensource' ? (
+                  <CapabilityStatus
+                    isLoading={probeQuery.isFetching}
+                    label={t('health.admin')}
+                    result={adminProbe}
+                  />
+                ) : null}
                 <CapabilityStatus
                   isLoading={probeQuery.isFetching}
                   label={t('health.data')}
@@ -372,6 +446,11 @@ function ConnectionSettingsRoute() {
                 />
               </div>
 
+              {service.provider === 'volcengine' ? (
+                <p className="text-sm text-muted-foreground">
+                  {t('studio:cloudManagement')}
+                </p>
+              ) : null}
               {(serverMode === 'api_key' || serverMode === 'trusted') &&
               keyGuide ? (
                 <Alert className="border-primary/25 bg-primary/[0.045]">

@@ -19,6 +19,13 @@ import { useTranslation } from 'react-i18next'
 import { Alert, AlertDescription, AlertTitle } from '#/components/ui/alert'
 import { Badge } from '#/components/ui/badge'
 import { Button } from '#/components/ui/button'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '#/components/ui/select'
 import { Card, CardContent, CardHeader, CardTitle } from '#/components/ui/card'
 import { useAppConnection } from '#/hooks/use-app-connection'
 import { getHealth, getObserverSystem, getOvResult } from '#/lib/ov-client'
@@ -100,21 +107,33 @@ async function fetchMonitoringOverview(): Promise<MonitoringOverview> {
   }
 }
 
-function HealthBadge({ healthy, label }: { healthy: boolean; label: string }) {
+function HealthBadge({
+  healthy,
+  label,
+}: {
+  healthy: boolean | undefined
+  label: string
+}) {
   return (
     <Badge
       variant="outline"
       className={cn(
         'gap-1.5 font-normal',
-        healthy
-          ? 'border-emerald-500/30 text-emerald-600'
-          : 'border-destructive/30 text-destructive',
+        healthy === undefined
+          ? 'text-muted-foreground'
+          : healthy
+            ? 'border-emerald-500/30 text-emerald-600'
+            : 'border-destructive/30 text-destructive',
       )}
     >
       <span
         className={cn(
           'size-1.5 rounded-full',
-          healthy ? 'bg-emerald-500' : 'bg-destructive',
+          healthy === undefined
+            ? 'bg-muted-foreground'
+            : healthy
+              ? 'bg-emerald-500'
+              : 'bg-destructive',
         )}
       />
       {label}
@@ -265,10 +284,27 @@ function MonitoringRoute() {
             </CardContent>
           </Card>
 
+          <div className="sm:hidden">
+            <Select
+              value={activeType}
+              onValueChange={(value) => setActiveType(value as MonitorType)}
+            >
+              <SelectTrigger className="w-full" aria-label={t('tabs.label')}>
+                <SelectValue>{t(`tabs.${activeType}`)}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {MONITOR_TYPES.map(([name]) => (
+                  <SelectItem key={name} value={name}>
+                    {t(`tabs.${name}`)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           <div
             role="tablist"
             aria-label={t('tabs.label')}
-            className="flex max-w-full gap-1 overflow-x-auto rounded-xl border bg-muted/20 p-1"
+            className="hidden max-w-full gap-1 overflow-x-auto sm:flex rounded-xl border bg-muted/20 p-1"
           >
             {MONITOR_TYPES.map(([name, Icon]) => (
               <button
@@ -295,8 +331,9 @@ function MonitoringRoute() {
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
               {MONITOR_TYPES.slice(1).map(([name, Icon]) => {
                 const component = overview?.components[name]
-                const healthy =
-                  component?.is_healthy === true && !component.has_errors
+                const healthy = component
+                  ? component.is_healthy && !component.has_errors
+                  : undefined
                 return (
                   <button
                     key={name}
@@ -315,9 +352,11 @@ function MonitoringRoute() {
                         <HealthBadge
                           healthy={healthy}
                           label={
-                            healthy
-                              ? t('health.healthy')
-                              : t('health.unhealthy')
+                            healthy === undefined
+                              ? t('health.unknown')
+                              : healthy
+                                ? t('health.healthy')
+                                : t('health.unhealthy')
                           }
                         />
                       </div>
@@ -344,14 +383,18 @@ function MonitoringRoute() {
                   </div>
                   <HealthBadge
                     healthy={
-                      selectedComponent?.is_healthy === true &&
-                      !selectedComponent.has_errors
+                      selectedComponent
+                        ? selectedComponent.is_healthy &&
+                          !selectedComponent.has_errors
+                        : undefined
                     }
                     label={
-                      selectedComponent?.is_healthy &&
-                      !selectedComponent.has_errors
-                        ? t('health.healthy')
-                        : t('health.unhealthy')
+                      !selectedComponent
+                        ? t('health.unknown')
+                        : selectedComponent.is_healthy &&
+                            !selectedComponent.has_errors
+                          ? t('health.healthy')
+                          : t('health.unhealthy')
                     }
                   />
                 </div>

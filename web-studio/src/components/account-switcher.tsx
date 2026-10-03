@@ -26,6 +26,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '#/components/ui/popover'
+import { useStudioService } from '#/hooks/use-studio-service'
 import { useAppConnection } from '#/hooks/use-app-connection'
 import {
   createAdminAccount,
@@ -79,7 +80,9 @@ export function AccountSwitcher() {
     adminUserId: DEFAULT_USER_ID,
   })
 
+  const { provider } = useStudioService()
   const { canManageAccounts } = resolveStudioManagementCapabilities({
+    serviceProvider: provider,
     hasControlCredential: Boolean(connection.adminApiKey.trim()),
     isRoleLoading: isConnectionRoleLoading,
     role: connectionRole,

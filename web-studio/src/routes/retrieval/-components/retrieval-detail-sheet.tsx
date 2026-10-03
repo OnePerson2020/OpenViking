@@ -12,6 +12,7 @@ import {
   SheetTitle,
 } from '#/components/ui/sheet'
 import { cn } from '#/lib/utils'
+import { useStudioService } from '#/hooks/use-studio-service'
 
 import { displayName, resourceSearchForResult } from '../-lib/results'
 import type { FindContextType, FindResultItem } from '#/lib/retrieval'
@@ -53,6 +54,7 @@ export function RetrievalDetailSheet({
   onClose: () => void
   t: TFunction<'retrieval'>
 }) {
+  const { provider } = useStudioService()
   const { name, parent } = displayName(detail?.uri ?? '')
   const summary = detail?.summary ?? detail?.abstract
   const resourceSearch = detail?.item
@@ -105,7 +107,7 @@ export function RetrievalDetailSheet({
               value={`L${detail.item.level}`}
             />
           ) : null}
-          {resourceSearch ? (
+          {resourceSearch && provider === 'opensource' ? (
             <Button
               className="ml-auto gap-1.5"
               nativeButton={false}

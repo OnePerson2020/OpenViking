@@ -1,3 +1,4 @@
+import studio from './en/studio'
 import vikingbot from './en/vikingbot'
 import compile from './en/compile'
 import memoryPolicy from './en/user-memory-policy'
@@ -7,6 +8,7 @@ import activity from './en/activity'
 import memoryTemplates from './en/memory-templates'
 
 const en = {
+  studio,
   compile,
   vikingbot,
   ...workspace,

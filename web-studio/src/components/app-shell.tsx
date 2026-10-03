@@ -9,6 +9,7 @@ import {
   ListChecksIcon,
   HistoryIcon,
   HomeIcon,
+  FolderIcon,
   GithubIcon,
   KeyRoundIcon,
   MoonIcon,
@@ -59,12 +60,17 @@ import {
 } from '#/hooks/use-app-connection'
 import type { ServerMode } from '#/hooks/use-server-mode'
 import { cn } from '#/lib/utils'
+import { useStudioCapabilities } from '#/hooks/use-studio-capabilities'
+import { useStudioService } from '#/hooks/use-studio-service'
+import { featureForPath, isStudioFeatureVisible } from '#/lib/studio-service'
+import { resolveDomainDestination } from '#/lib/studio-navigation'
+import type { StudioDomain } from '#/lib/studio-service'
+import { StudioFeatureBoundary } from './studio-feature-boundary'
 import { resolveStudioManagementCapabilities } from '#/lib/studio-permissions'
 
 type NavItem = {
   icon: React.ComponentType
   id: string
-  section: 'workspace' | 'operations'
   titleKey: string
   to: string
   children?: readonly NavSubItem[]
@@ -86,37 +92,44 @@ type NavGroupItemProps = {
 
 const NAV_ITEMS: readonly NavItem[] = [
   {
+    icon: FolderIcon,
+    id: 'directory',
+    titleKey: 'studio:directory',
+    to: '/directory',
+  },
+  {
+    icon: UsersRoundIcon,
+    id: 'users',
+    titleKey: 'footer.users',
+    to: '/users',
+  },
+  {
     icon: HomeIcon,
     id: 'home',
-    section: 'workspace',
-    titleKey: 'navigation.home.title',
+    titleKey: 'studio:statistics',
     to: '/home',
   },
   {
     icon: PanelsTopLeftIcon,
     id: 'playground',
-    section: 'workspace',
     titleKey: 'navigation.playground.title',
     to: '/playground',
   },
   {
     icon: BotIcon,
     id: 'vikingbot',
-    section: 'workspace',
     titleKey: 'vikingbot:title',
     to: '/vikingbot',
   },
   {
     icon: SearchIcon,
     id: 'retrieval',
-    section: 'workspace',
     titleKey: 'navigation.retrieval.title',
     to: '/retrieval',
   },
   {
     icon: SparklesIcon,
     id: 'skills',
-    section: 'workspace',
     titleKey: 'navigation.skills.title',
     to: '/skills',
   },
@@ -124,63 +137,51 @@ const NAV_ITEMS: readonly NavItem[] = [
   {
     icon: WorkflowIcon,
     id: 'compile',
-    section: 'workspace',
     titleKey: 'navigation.compile.title',
     to: '/compile',
   },
   {
     icon: MessagesSquareIcon,
     id: 'sessions',
-    section: 'operations',
-    titleKey: 'navigation.sessions.title',
+    titleKey: 'studio:sessionRecords',
     to: '/sessions',
   },
   {
     icon: BrainIcon,
     id: 'agentExperience',
-    section: 'operations',
     titleKey: 'navigation.agentExperience.title',
     to: '/agent-experience',
   },
   {
     icon: ScrollTextIcon,
     id: 'requestLogs',
-    section: 'operations',
     titleKey: 'navigation.requestLogs.title',
     to: '/request-logs',
   },
   {
     icon: ListChecksIcon,
     id: 'tasks',
-    section: 'operations',
-    titleKey: 'navigation.tasks.title',
+    titleKey: 'studio:processingTasks',
     to: '/tasks',
   },
   {
     icon: HistoryIcon,
     id: 'watches',
-    section: 'operations',
     titleKey: 'navigation.watches.title',
     to: '/watches',
   },
   {
     icon: ActivityIcon,
     id: 'monitoring',
-    section: 'operations',
     titleKey: 'navigation.monitoring.title',
     to: '/monitoring',
   },
 ] as const
 
 const NAV_SECTIONS = [
-  {
-    id: 'workspace',
-    titleKey: 'sidebar.groups.workspace',
-  },
-  {
-    id: 'operations',
-    titleKey: 'sidebar.groups.operations',
-  },
+  { id: 'workspace', titleKey: 'studio:domains.workspace' },
+  { id: 'extensions', titleKey: 'studio:domains.extensions' },
+  { id: 'management', titleKey: 'studio:domains.management' },
 ] as const
 
 const LANGUAGE_OPTIONS = [
@@ -277,7 +278,7 @@ function IdentityScopedAppShell({ children }: { children: React.ReactNode }) {
   return (
     <AppShellInner key={identityScopeKey}>
       <ConnectionScopedRouteContent serverMode={serverMode}>
-        {children}
+        <StudioFeatureBoundary>{children}</StudioFeatureBoundary>
       </ConnectionScopedRouteContent>
     </AppShellInner>
   )
@@ -306,7 +307,7 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   const agentIntegrationsHref = `https://docs.openviking.ai/${
     currentLanguage === 'zh-CN' ? 'zh' : 'en'
   }/agent-integrations/01-overview`
-  const sdkApiHref = `https://docs.openviking.ai/${
+  const opensourceApiHref = `https://docs.openviking.ai/${
     currentLanguage === 'zh-CN' ? 'zh' : 'en'
   }/api/01-overview`
   const [crossDeviceVerifyOpen, setCrossDeviceVerifyOpen] =
@@ -314,8 +315,13 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   const { connection, connectionRole, isConnectionRoleLoading, serverMode } =
     useAppConnection()
   const settingsActive = pathname === '/settings'
-  const usersActive = pathname === '/users' || pathname.startsWith('/users/')
+  const { provider } = useStudioService()
+  const sdkApiHref =
+    provider === 'volcengine'
+      ? 'https://docs.volcengine.com/docs/84313/2381937'
+      : opensourceApiHref
   const { canManageUsers } = resolveStudioManagementCapabilities({
+    serviceProvider: provider,
     hasControlCredential: Boolean(connection.adminApiKey.trim()),
     isRoleLoading: isConnectionRoleLoading,
     role: connectionRole,
@@ -323,7 +329,40 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   })
   const crossDeviceVerifyActive =
     pathname === '/oauth/verify' || pathname.startsWith('/oauth/verify/')
-  const visibleNavItems = NAV_ITEMS
+  const service = useStudioService()
+  const activeDomain = featureForPath(pathname)?.domain ?? 'workspace'
+  const capabilities = useStudioCapabilities()
+  const availableNavItems = NAV_ITEMS.filter((item) => {
+    const feature = featureForPath(item.to)
+    if (!feature) return false
+    if (feature.domain === 'management' && !canManageUsers) return false
+    return isStudioFeatureVisible(
+      provider,
+      feature,
+      capabilities[feature.id]?.data,
+    )
+  })
+  const visibleNavItems = availableNavItems.filter(
+    (item) => featureForPath(item.to)?.domain === activeDomain,
+  )
+  const extensionEntry = availableNavItems.find(
+    (item) => featureForPath(item.to)?.domain === 'extensions',
+  )
+
+  const navigationPaths = availableNavItems.map((item) => item.to)
+  if (navigationPaths.includes('/directory')) navigationPaths.push('/memories')
+  const domainPages = React.useRef<Partial<Record<StudioDomain, string>>>({})
+  React.useEffect(() => {
+    const feature = featureForPath(pathname)
+    if (feature && navigationPaths.includes(feature.to)) {
+      domainPages.current[feature.domain] = pathname
+    }
+  }, [pathname, availableNavItems])
+  const availableDomains = NAV_SECTIONS.filter(
+    (section) =>
+      (section.id !== 'management' || canManageUsers) &&
+      (section.id !== 'extensions' || Boolean(extensionEntry)),
+  )
 
   function openCrossDeviceVerify(): void {
     if (crossDeviceVerifyActive) {
@@ -359,7 +398,10 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
         </SidebarHeader>
 
         <SidebarContent className="gap-0 py-1">
-          {NAV_SECTIONS.map((section) => (
+          {NAV_SECTIONS.filter(
+            (section) =>
+              section.id === activeDomain && visibleNavItems.length > 0,
+          ).map((section) => (
             <SidebarGroup key={section.id} className="pb-1">
               <SidebarGroupLabel className="h-7 px-2 pt-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-sidebar-foreground/45">
                 {t(section.titleKey, { ns: 'appShell' })}
@@ -367,7 +409,11 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
               <SidebarGroupContent>
                 <SidebarMenu>
                   {visibleNavItems
-                    .filter((item) => item.section === section.id)
+                    .filter(
+                      (item) =>
+                        (featureForPath(item.to)?.domain ?? 'workspace') ===
+                        section.id,
+                    )
                     .map((item) => {
                       const isActive =
                         pathname === item.to ||
@@ -428,36 +474,25 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                     <span>{t('footer.connection', { ns: 'appShell' })}</span>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
-                {canManageUsers ? (
+                {provider === 'opensource' ? (
                   <SidebarMenuItem>
                     <SidebarMenuButton
-                      render={<Link to="/users" />}
-                      isActive={usersActive}
-                      tooltip={t('footer.users', { ns: 'appShell' })}
+                      onClick={openCrossDeviceVerify}
+                      isActive={crossDeviceVerifyActive}
+                      tooltip={t('navigation.crossDeviceVerify.title', {
+                        ns: 'appShell',
+                      })}
                       className="h-9"
                     >
-                      <UsersRoundIcon />
-                      <span>{t('footer.users', { ns: 'appShell' })}</span>
+                      <KeyRoundIcon />
+                      <span>
+                        {t('navigation.crossDeviceVerify.title', {
+                          ns: 'appShell',
+                        })}
+                      </span>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 ) : null}
-                <SidebarMenuItem>
-                  <SidebarMenuButton
-                    onClick={openCrossDeviceVerify}
-                    isActive={crossDeviceVerifyActive}
-                    tooltip={t('navigation.crossDeviceVerify.title', {
-                      ns: 'appShell',
-                    })}
-                    className="h-9"
-                  >
-                    <KeyRoundIcon />
-                    <span>
-                      {t('navigation.crossDeviceVerify.title', {
-                        ns: 'appShell',
-                      })}
-                    </span>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>
@@ -472,7 +507,11 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                   <SidebarMenuButton
                     render={
                       <a
-                        href="https://docs.openviking.ai/"
+                        href={
+                          provider === 'volcengine'
+                            ? sdkApiHref
+                            : 'https://docs.openviking.ai/'
+                        }
                         target="_blank"
                         rel="noreferrer"
                       />
@@ -496,26 +535,28 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
                     <span>{t('footer.sdkApi', { ns: 'appShell' })}</span>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
-                <SidebarMenuItem>
-                  <SidebarMenuButton
-                    render={
-                      <a
-                        href={agentIntegrationsHref}
-                        target="_blank"
-                        rel="noreferrer"
-                      />
-                    }
-                    tooltip={t('footer.agentIntegrations', {
-                      ns: 'appShell',
-                    })}
-                    className="h-9"
-                  >
-                    <BotIcon />
-                    <span>
-                      {t('footer.agentIntegrations', { ns: 'appShell' })}
-                    </span>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
+                {provider === 'opensource' ? (
+                  <SidebarMenuItem>
+                    <SidebarMenuButton
+                      render={
+                        <a
+                          href={agentIntegrationsHref}
+                          target="_blank"
+                          rel="noreferrer"
+                        />
+                      }
+                      tooltip={t('footer.agentIntegrations', {
+                        ns: 'appShell',
+                      })}
+                      className="h-9"
+                    >
+                      <BotIcon />
+                      <span>
+                        {t('footer.agentIntegrations', { ns: 'appShell' })}
+                      </span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ) : null}
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>
@@ -589,17 +630,62 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        <ScrollArea className="min-h-0 flex-1">
-          <div className="flex w-full flex-col gap-6 px-4 py-6 md:px-6">
+        <nav
+          aria-label={t('studio:domainsLabel')}
+          className="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-2 md:px-6"
+        >
+          {(availableDomains.length > 1 ? availableDomains : []).map(
+            (section) => (
+              <Link
+                key={section.id}
+                to={resolveDomainDestination(
+                  section.id,
+                  featureForPath(pathname)?.domain === section.id
+                    ? pathname
+                    : domainPages.current[section.id],
+                  navigationPaths,
+                )}
+                aria-current={activeDomain === section.id ? 'page' : undefined}
+                className={cn(
+                  'rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-muted',
+                  activeDomain === section.id &&
+                    'bg-primary/10 font-medium text-primary',
+                )}
+              >
+                {t(section.titleKey)}
+              </Link>
+            ),
+          )}
+          <span className="ml-auto text-xs text-muted-foreground">
+            {t(
+              `studio:providers.${service.isChecking ? 'checking' : service.provider}`,
+            )}{' '}
+            {service.version}
+          </span>
+        </nav>
+        {pathname === '/playground' ||
+        pathname === '/vikingbot' ||
+        pathname.startsWith('/vikingbot/') ||
+        pathname === '/sessions' ||
+        pathname.startsWith('/sessions/') ? (
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             {children}
           </div>
-        </ScrollArea>
+        ) : (
+          <ScrollArea className="min-h-0 flex-1">
+            <div className="flex w-full flex-col gap-6 px-4 py-6 md:px-6">
+              {children}
+            </div>
+          </ScrollArea>
+        )}
       </SidebarInset>
 
-      <CrossDeviceVerifyDialog
-        open={crossDeviceVerifyOpen}
-        onOpenChange={setCrossDeviceVerifyOpen}
-      />
+      {provider === 'opensource' ? (
+        <CrossDeviceVerifyDialog
+          open={crossDeviceVerifyOpen}
+          onOpenChange={setCrossDeviceVerifyOpen}
+        />
+      ) : null}
       <GeneratedCredentialDialog />
     </SidebarProvider>
   )

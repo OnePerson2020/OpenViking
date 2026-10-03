@@ -85,6 +85,26 @@ describe('fetchSessionMessages', () => {
     })
   })
 
+  it('reads hosted current context without requesting optional archives', async () => {
+    getSessionIdContextMock.mockReturnValue(
+      response({ messages: [message('current', 'readable')] }),
+    )
+    getSessionIdArchiveByArchiveIdMock.mockRejectedValue(
+      new OvClientError({
+        code: 'ApiBlocked',
+        statusCode: 403,
+        message: 'Not exposed',
+      }),
+    )
+    const result = await fetchSessionMessages(
+      'hosted-session',
+      { commit_count: 2 } as Parameters<typeof fetchSessionMessages>[1],
+      false,
+    )
+    expect(result.map(({ id }) => id)).toEqual(['current'])
+    expect(getSessionIdArchiveByArchiveIdMock).not.toHaveBeenCalled()
+  })
+
   it('keeps readable history when an unfinished archive is unavailable', async () => {
     getSessionBySessionIdMock.mockReturnValue(response({ commit_count: 2 }))
     getSessionIdArchiveByArchiveIdMock

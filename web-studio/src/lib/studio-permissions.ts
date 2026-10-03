@@ -1,3 +1,4 @@
+import type { ServiceProvider } from './studio-service'
 import type { ConnectionRole } from '#/hooks/use-app-connection'
 import type { ServerMode } from '#/hooks/use-server-mode'
 
@@ -7,17 +8,24 @@ export type StudioManagementCapabilities = {
 }
 
 export function resolveStudioManagementCapabilities({
+  serviceProvider = 'opensource',
   hasControlCredential,
   isRoleLoading,
   role,
   serverMode,
 }: {
+  serviceProvider?: ServiceProvider
   hasControlCredential: boolean
   isRoleLoading: boolean
   role: ConnectionRole
   serverMode: ServerMode
 }): StudioManagementCapabilities {
-  if (isRoleLoading || serverMode === 'dev' || !hasControlCredential) {
+  if (
+    serviceProvider !== 'opensource' ||
+    isRoleLoading ||
+    serverMode === 'dev' ||
+    !hasControlCredential
+  ) {
     return {
       canManageAccounts: false,
       canManageUsers: false,

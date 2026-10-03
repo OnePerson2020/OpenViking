@@ -125,6 +125,7 @@ async function ensureLanguage(lang: string): Promise<void> {
 }
 
 interface FilePreviewProps {
+  readOnly?: boolean
   file: VikingFsEntry | null
   hideDirectoryHeader?: boolean
   onClose: () => void
@@ -1348,6 +1349,7 @@ function JsonlPreview({ content }: { content: string }) {
 }
 
 export function FilePreview({
+  readOnly = false,
   file,
   hideDirectoryHeader = false,
   onClose,
@@ -1376,7 +1378,7 @@ export function FilePreview({
     resolvedFile,
     {
       maxAutoReadBytes: LARGE_FILE_PREVIEW_BYTES,
-      defaultReadLimit: -1,
+      defaultReadLimit: readOnly ? 10000 : -1,
       requireKnownSize: isJsonFile,
     },
     {
@@ -1392,7 +1394,10 @@ export function FilePreview({
     () => memoryFieldsDisplayContent(preview?.content || ''),
     [preview?.content],
   )
-  const frontmatter = useMemo(() => splitMarkdownFrontmatter(displayContent || ''), [displayContent])
+  const frontmatter = useMemo(
+    () => splitMarkdownFrontmatter(displayContent || ''),
+    [displayContent],
+  )
   const okfDocument = useMemo(
     () =>
       file && preview?.fileType === 'markdown'
@@ -1418,6 +1423,7 @@ export function FilePreview({
   const { invalidatePreview } = useInvalidateVikingFs()
 
   const canEdit =
+    !readOnly &&
     !file?.isDir &&
     preview?.shouldAutoRead &&
     (preview.fileType === 'code' ||
@@ -1942,7 +1948,12 @@ export function FilePreview({
                     onNavigate={onNavigate}
                     rawFrontmatter={okfDocument.rawFrontmatter}
                   />
-                ) : frontmatter ? <YamlMetadata rawFrontmatter={frontmatter.rawFrontmatter} defaultOpen /> : null}
+                ) : frontmatter ? (
+                  <YamlMetadata
+                    rawFrontmatter={frontmatter.rawFrontmatter}
+                    defaultOpen
+                  />
+                ) : null}
                 <article className="prose prose-sm max-w-none break-words dark:prose-invert dark:prose-pre:bg-muted-foreground/20">
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}

@@ -550,7 +550,7 @@ function PlaygroundWorkbench() {
   }, [])
 
   return (
-    <div className="-mx-4 -my-6 flex h-[calc(100svh-3rem)] min-h-0 flex-col bg-background md:-mx-6">
+    <div className="flex min-h-0 flex-1 flex-col bg-background">
       <div
         ref={layoutRef}
         className="flex min-h-0 flex-1 flex-col bg-background lg:flex-row"

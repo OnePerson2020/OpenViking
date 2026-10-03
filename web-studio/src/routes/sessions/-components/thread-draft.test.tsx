@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { useState } from 'react'
-import { act, cleanup, render } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { Thread } from './thread'
 
 const m = vi.hoisted(() => ({
+  provider: 'opensource',
   create: vi.fn(),
   history: vi.fn(),
   send: vi.fn(),
@@ -12,6 +13,9 @@ const m = vi.hoisted(() => ({
 }))
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
+}))
+vi.mock('#/hooks/use-studio-service', () => ({
+  useStudioService: () => ({ provider: m.provider, ready: true }),
 }))
 vi.mock('#/hooks/use-app-connection', () => ({
   useAppConnection: () => ({ identityScopeKey: 'test' }),
@@ -37,6 +41,8 @@ vi.mock('./composer', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks()
+  m.provider = 'opensource'
+  m.onSend = undefined
   m.history.mockReturnValue({ isPending: true })
   Element.prototype.scrollIntoView = vi.fn()
 })
@@ -46,7 +52,7 @@ it('does not request draft history and persists only once on first send', async 
   m.create.mockResolvedValue({ session_id: 'draft' })
   render(<Thread sessionId="draft" draft />)
   expect(m.create).not.toHaveBeenCalled()
-  expect(m.history).toHaveBeenLastCalledWith(undefined)
+  expect(m.history).toHaveBeenLastCalledWith(undefined, true)
   await act(async () => {
     expect(await m.onSend!('first')).toBe(true)
   })
@@ -55,7 +61,7 @@ it('does not request draft history and persists only once on first send', async 
   })
   expect(m.create).toHaveBeenCalledExactlyOnceWith('draft')
   expect(m.send).toHaveBeenCalledWith('first')
-  expect(m.history).toHaveBeenLastCalledWith(undefined)
+  expect(m.history).toHaveBeenLastCalledWith(undefined, true)
 })
 
 it('rejects failed creation so the composer can retain input', async () => {
@@ -90,9 +96,9 @@ it('does not send after leaving a draft during creation', async () => {
 
 it('loads the correct history when switching existing sessions', () => {
   const view = render(<Thread sessionId="first" />)
-  expect(m.history).toHaveBeenLastCalledWith('first')
+  expect(m.history).toHaveBeenLastCalledWith('first', true)
   view.rerender(<Thread sessionId="second" />)
-  expect(m.history).toHaveBeenLastCalledWith('second')
+  expect(m.history).toHaveBeenLastCalledWith('second', true)
   expect(m.create).not.toHaveBeenCalled()
 })
 
@@ -119,10 +125,22 @@ it('loads persisted history and continues after switching tabs', async () => {
   })
   act(() => showThread(false))
   act(() => showThread(true))
-  expect(m.history).toHaveBeenLastCalledWith('draft')
+  expect(m.history).toHaveBeenLastCalledWith('draft', true)
   await act(async () => {
     expect(await m.onSend!('second')).toBe(true)
   })
   expect(m.create).toHaveBeenCalledExactlyOnceWith('draft')
   expect(m.send).toHaveBeenLastCalledWith('second')
+})
+
+it('preserves hosted session history without exposing a Bot composer or draft send', () => {
+  m.provider = 'volcengine'
+  m.history.mockReturnValue({ isPending: false, data: [] })
+  render(<Thread sessionId="hosted-session" />)
+  expect(m.history).toHaveBeenLastCalledWith('hosted-session', false)
+  expect(m.onSend).toBeUndefined()
+  expect(m.send).not.toHaveBeenCalled()
+  expect(m.create).not.toHaveBeenCalled()
+  expect(screen.getByText('chat.emptyReadDescription')).toBeTruthy()
+  expect(screen.queryByText('chat.emptyDescription')).toBeNull()
 })

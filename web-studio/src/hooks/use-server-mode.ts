@@ -32,6 +32,13 @@ function isServerAuthMode(value: unknown): value is ServerAuthMode {
   )
 }
 
+function forgetFailedHealthRequest(
+  promise: Promise<Record<string, unknown>>,
+): void {
+  // Reconnection may clear or replace the cached request while this one is pending.
+  if (recentHealthRequest?.promise === promise) recentHealthRequest = undefined
+}
+
 export async function fetchServerHealth(
   baseUrl: string,
   headers: Record<string, string> = {},
@@ -76,21 +83,17 @@ export async function fetchServerHealth(
   try {
     return await promise
   } catch (error) {
-    if (recentHealthRequest.promise === promise) {
-      recentHealthRequest = undefined
-    }
+    forgetFailedHealthRequest(promise)
     throw error
   }
 }
 
-export async function detectServerMode(
-  baseUrl: string,
-  headers?: Record<string, string>,
-): Promise<ServerMode> {
-  try {
-    const data = await fetchServerHealth(baseUrl, headers)
-    return isServerAuthMode(data.auth_mode) ? data.auth_mode : 'api_key'
-  } catch {
-    return 'offline'
-  }
+export function resetServerHealthCache(): void {
+  recentHealthRequest = undefined
+}
+
+export function resolveServerAuthMode(
+  data: Record<string, unknown>,
+): ServerAuthMode {
+  return isServerAuthMode(data.auth_mode) ? data.auth_mode : 'api_key'
 }

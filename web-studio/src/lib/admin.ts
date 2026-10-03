@@ -1,3 +1,5 @@
+import { resolveApiKeyAuth } from './studio-auth'
+import type { ApiKeyAuth } from './studio-auth'
 import axios from 'axios'
 import { fetchServerHealth } from '#/hooks/use-server-mode'
 
@@ -88,6 +90,9 @@ export type StudioConnectionProbe = {
 }
 
 export type ProbeConnectionInput = {
+  apiKeyAuth?: ApiKeyAuth
+  skipAdmin?: boolean
+  dataRootUri?: string
   accountId: string
   adminApiKey: string
   apiKey: string
@@ -167,8 +172,13 @@ function createProbeClient(baseUrl: string) {
 function setApiKeyHeader(
   headers: Record<string, string>,
   apiKey: string,
+  auth: ApiKeyAuth = 'header',
 ): void {
-  setOptionalHeader(headers, 'X-API-Key', apiKey)
+  setOptionalHeader(
+    headers,
+    auth === 'bearer' ? 'Authorization' : 'X-API-Key',
+    auth === 'bearer' && apiKey ? `Bearer ${apiKey}` : apiKey,
+  )
 }
 
 function probeError(error: unknown): CapabilityProbeResult {
@@ -273,6 +283,7 @@ async function probeDataAccess(
   setApiKeyHeader(
     headers,
     input.apiKey || (input.serverMode === 'trusted' ? input.adminApiKey : ''),
+    input.apiKeyAuth ?? resolveApiKeyAuth(input.baseUrl),
   )
 
   if (input.serverMode === 'trusted') {
@@ -286,7 +297,7 @@ async function probeDataAccess(
       params: {
         node_limit: 1,
         output: 'agent',
-        uri: 'viking://',
+        uri: input.dataRootUri ?? 'viking://',
       },
     })
     return {
@@ -306,7 +317,9 @@ export async function probeStudioConnection(
   setOptionalHeader(headers, 'X-OpenViking-Account', input.accountId)
   setOptionalHeader(headers, 'X-OpenViking-User', input.userId)
   const [admin, data, health] = await Promise.all([
-    probeAdminAccess(input),
+    input.skipAdmin
+      ? Promise.resolve({ state: 'skipped' as const })
+      : probeAdminAccess(input),
     probeDataAccess(input),
     Promise.allSettled(
       input.serverMode === 'trusted'

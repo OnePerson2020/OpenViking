@@ -160,12 +160,15 @@ function isMissingArchive(error: unknown): boolean {
 export async function fetchSessionMessages(
   sessionId: string,
   sessionMeta?: SessionMeta,
+  includeArchives = true,
 ): Promise<Message[]> {
   const context = await getOvResult<SessionContextResult>(
     getSessionIdContext({
       path: { session_id: sessionId },
     }),
   )
+
+  if (!includeArchives) return getMessages(context.messages)
 
   let commitCount = 0
   try {

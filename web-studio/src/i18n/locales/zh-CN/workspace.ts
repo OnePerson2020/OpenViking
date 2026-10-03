@@ -53,7 +53,7 @@ const workspace = {
         title: 'Agent 经验',
       },
       tasks: {
-        title: '任务中心',
+        title: '处理任务',
       },
       watches: {
         title: '定时同步',
@@ -89,6 +89,7 @@ const workspace = {
     loading: '正在加载监控数据...',
     loadFailed: '监控数据加载失败',
     health: {
+      unknown: '暂无数据',
       healthy: '正常',
       unhealthy: '异常',
     },
@@ -414,7 +415,7 @@ const workspace = {
       noPendingMessages: '未创建新任务：该会话没有待提交消息',
       commitSkipped: '未创建新任务：本次会话提交已跳过',
     },
-    title: '任务中心',
+    title: '处理任务',
     description: '集中查看资源处理、会话提交和重建索引等后台任务。',
     refresh: '刷新',
     loading: '正在加载任务...',

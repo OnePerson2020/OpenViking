@@ -53,7 +53,7 @@ const workspace = {
         title: 'Agent Experience',
       },
       tasks: {
-        title: 'Task Center',
+        title: 'Processing tasks',
       },
       watches: {
         title: 'Scheduled Sync',
@@ -89,6 +89,7 @@ const workspace = {
     loading: 'Loading monitoring data...',
     loadFailed: 'Could not load monitoring data',
     health: {
+      unknown: 'No data',
       healthy: 'Healthy',
       unhealthy: 'Unhealthy',
     },
@@ -425,7 +426,7 @@ const workspace = {
         'No new task created: this session has no pending messages',
       commitSkipped: 'No new task created: this session commit was skipped',
     },
-    title: 'Task Center',
+    title: 'Processing tasks',
     description:
       'Track background work such as resource processing, session commits, and reindexing.',
     refresh: 'Refresh',

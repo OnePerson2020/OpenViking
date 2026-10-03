@@ -1,13 +1,17 @@
+import { resolveApiKeyAuth } from '#/lib/studio-auth'
 import * as React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useRouterState } from '@tanstack/react-router'
 
 import i18n from '#/i18n'
+import { identifyServiceProvider } from '#/lib/studio-service'
+import type { ServiceSelection } from '#/lib/studio-service'
 import { fetchAdminAccounts } from '#/lib/admin'
 import { isOvClientError, ovClient } from '#/lib/ov-client'
 
 import {
-  detectServerMode,
+  resolveServerAuthMode,
+  resetServerHealthCache,
   fetchServerHealth,
   normalizeBaseUrl,
 } from './use-server-mode'
@@ -16,6 +20,7 @@ import type { ServerMode } from './use-server-mode'
 export type ConnectionRole = 'admin' | 'root' | 'unknown' | 'user'
 
 export type ConnectionDraft = {
+  serviceSelection?: ServiceSelection
   accountId: string
   adminApiKey: string
   apiKey: string
@@ -44,6 +49,8 @@ type AppConnectionContextValue = {
   identityScopeKey: string
   isConnectionRoleLoading: boolean
   openConnectionSettings: () => void
+  reconnect: () => void
+  serverHealth: Record<string, unknown> | null
   saveConnection: (next: ConnectionDraft) => void
   setGeneratedCredential: (credential: GeneratedCredential) => void
   serverMode: ServerMode
@@ -151,6 +158,11 @@ function normalizeConnectionDraft(
   connection: ConnectionDraft,
 ): ConnectionDraft {
   return {
+    serviceSelection:
+      connection.serviceSelection === 'opensource' ||
+      connection.serviceSelection === 'volcengine'
+        ? connection.serviceSelection
+        : 'auto',
     accountId: connection.accountId.trim(),
     adminApiKey: connection.adminApiKey.trim(),
     apiKey: connection.apiKey.trim(),
@@ -158,7 +170,7 @@ function normalizeConnectionDraft(
     // slash here ran on every keystroke and fought the input: typing the "//"
     // of "http://" kept collapsing back to "http:". Trailing slashes are
     // stripped where the URL is actually used instead (ovClient.setOptions,
-    // detectServerMode, detectConnectionRole, and the admin client).
+    // fetchServerHealth, detectConnectionRole, and the admin client).
     baseUrl: connection.baseUrl.trim(),
     userId: connection.userId.trim(),
   }
@@ -180,6 +192,7 @@ export function createIdentityScopeKey(
   const dataKey = connection.apiKey || connection.adminApiKey
   return [
     normalizeBaseUrl(connection.baseUrl),
+    connection.serviceSelection ?? 'auto',
     serverMode,
     connection.accountId,
     connection.userId,
@@ -193,6 +206,7 @@ export function createConnectionRoleProbeKey(
 ): string {
   return [
     normalizeBaseUrl(connection.baseUrl),
+    connection.serviceSelection ?? 'auto',
     serverMode,
     connection.accountId,
     connection.userId,
@@ -278,6 +292,10 @@ function applyConnection(
 ): void {
   ovClient.setOptions({
     baseUrl: connection.baseUrl,
+    apiKeyAuth: resolveApiKeyAuth(
+      connection.baseUrl,
+      connection.serviceSelection,
+    ),
   })
   ovClient.setConnection({
     accountId: connection.accountId,
@@ -307,29 +325,41 @@ type ConnectionIdentity = {
   userId: string
 }
 
-function createConnectionHealthHeaders(
+export function createConnectionHealthHeaders(
   connection: ConnectionDraft,
   credential: 'control' | 'data' = 'control',
 ): Record<string, string> {
   const headers: Record<string, string> = {}
+  const auth = resolveApiKeyAuth(
+    connection.baseUrl,
+    connection.serviceSelection,
+  )
   const apiKey =
-    credential === 'data'
-      ? connection.apiKey || connection.adminApiKey
-      : connection.adminApiKey || connection.apiKey
+    auth === 'bearer'
+      ? connection.apiKey
+      : credential === 'data'
+        ? connection.apiKey || connection.adminApiKey
+        : connection.adminApiKey || connection.apiKey
   if (apiKey) {
-    headers['X-API-Key'] = apiKey
+    headers[auth === 'bearer' ? 'Authorization' : 'X-API-Key'] =
+      auth === 'bearer' ? `Bearer ${apiKey}` : apiKey
   }
-  if (connection.accountId) {
+  const isHosted = auth === 'bearer'
+  if (!isHosted && connection.accountId) {
     headers['X-OpenViking-Account'] = connection.accountId
   }
-  if (connection.userId) {
+  if (!isHosted && connection.userId) {
     headers['X-OpenViking-User'] = connection.userId
   }
   return headers
 }
 
 async function canListAccounts(connection: ConnectionDraft): Promise<boolean> {
-  if (!connection.adminApiKey) {
+  if (
+    !connection.adminApiKey ||
+    identifyServiceProvider(connection.baseUrl) === 'volcengine' ||
+    connection.serviceSelection === 'volcengine'
+  ) {
     return false
   }
 
@@ -529,6 +559,23 @@ export function AppConnectionProvider({
       ),
   )
   const [serverMode, setServerMode] = React.useState<ServerMode>('checking')
+  const [serverHealth, setServerHealth] = React.useState<{
+    key: string
+    data: Record<string, unknown>
+  } | null>(null)
+  const [connectionAttempt, setConnectionAttempt] = React.useState(0)
+  const reconnect = React.useCallback(() => {
+    authPromptSuppressedUntilRef.current =
+      Date.now() + AUTH_PROMPT_SUPPRESSION_MS
+    synchronizedRoleProbeRef.current = null
+    resetServerHealthCache()
+    setServerHealth(null)
+    setServerMode('checking')
+    setConnectionRole('unknown')
+    setConnectionRoleLoading(true)
+    queryClient.clear()
+    setConnectionAttempt((attempt) => attempt + 1)
+  }, [queryClient])
   const [generatedCredential, setGeneratedCredential] =
     React.useState<GeneratedCredential | null>(null)
 
@@ -547,14 +594,42 @@ export function AppConnectionProvider({
     let cancelled = false
 
     setServerMode('checking')
-    void detectServerMode(
+    setServerHealth(null)
+    void fetchServerHealth(
       connection.baseUrl,
-      createConnectionHealthHeaders(connection),
-    ).then((mode) => {
-      if (!cancelled) {
-        setServerMode(mode)
-      }
-    })
+      createConnectionHealthHeaders(connection, 'data'),
+    )
+      .then((health) => {
+        if (!cancelled) {
+          const mode = resolveServerAuthMode(health)
+          const resolved = synchronizeResolvedDataIdentity(connection, {
+            accountId:
+              typeof health.account_id === 'string' ? health.account_id : '',
+            userId: typeof health.user_id === 'string' ? health.user_id : '',
+            role: isConnectionRole(health.role) ? health.role : 'unknown',
+          })
+          // Resolve the data identity before exposing a ready workspace. A slow
+          // or expired management credential must not delay personal navigation.
+          const next = resolved
+            ? synchronizeConnectionRuntime(resolved, mode)
+            : connection
+          if (resolved) {
+            queryClient.clear()
+            setConnection(next)
+          }
+          setServerHealth({
+            key: createConnectionRoleProbeKey(next, 'checking'),
+            data: health,
+          })
+          setServerMode(mode)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setServerHealth(null)
+          setServerMode('offline')
+        }
+      })
 
     return () => {
       cancelled = true
@@ -564,7 +639,10 @@ export function AppConnectionProvider({
     connection.adminApiKey,
     connection.apiKey,
     connection.baseUrl,
+    connection.serviceSelection,
     connection.userId,
+    connectionAttempt,
+    queryClient,
   ])
 
   React.useEffect(() => {
@@ -599,37 +677,16 @@ export function AppConnectionProvider({
     }
 
     void detectConnectionIdentity(connection)
+      .catch(() => ({
+        accountId: '',
+        role: 'unknown' as const,
+        userId: '',
+      }))
       .then(async (controlIdentity) => {
         if (isCancelled()) {
           return
         }
-        const dataIdentity =
-          connection.apiKey &&
-          (controlIdentity.role === 'root' ||
-            (controlIdentity.role === 'admin' &&
-              controlIdentity.accountId === connection.accountId))
-            ? await detectConnectionIdentity(connection, 'data')
-            : !connection.adminApiKey
-              ? controlIdentity
-              : null
-        if (isCancelled()) {
-          return
-        }
-
         const { accountId, role } = controlIdentity
-        const dataConnection = dataIdentity
-          ? synchronizeResolvedDataIdentity(connection, dataIdentity)
-          : null
-        if (dataConnection) {
-          const next = synchronizeConnectionRuntime(dataConnection, serverMode)
-          synchronizedRoleProbeRef.current = {
-            key: createConnectionRoleProbeKey(next, serverMode),
-            role,
-          }
-          queryClient.clear()
-          setConnection(next)
-          return
-        }
         // An account-admin Root key is scoped to its own account. Pin that
         // account as the assumed identity so admin and data calls target the
         // right tenant instead of failing with a mismatch (the server rejects
@@ -637,6 +694,8 @@ export function AppConnectionProvider({
         // key is not account-scoped, so its account selection is left intact.
         if (
           role === 'admin' &&
+          (!connection.apiKey ||
+            connection.apiKey === connection.adminApiKey) &&
           accountId &&
           connection.accountId !== accountId
         ) {
@@ -670,6 +729,7 @@ export function AppConnectionProvider({
     connection.adminApiKey,
     connection.apiKey,
     connection.baseUrl,
+    connection.serviceSelection,
     connection.userId,
     queryClient,
     serverMode,
@@ -711,6 +771,12 @@ export function AppConnectionProvider({
       identityScopeKey: createIdentityScopeKey(connection, serverMode),
       isConnectionRoleLoading,
       openConnectionSettings,
+      reconnect,
+      serverHealth:
+        serverHealth?.key ===
+        createConnectionRoleProbeKey(connection, 'checking')
+          ? serverHealth.data
+          : null,
       saveConnection: commitConnection,
       setGeneratedCredential,
       serverMode,
@@ -740,6 +806,9 @@ export function AppConnectionProvider({
           throw createConnectionError('credentialMismatch')
         }
 
+        if (pathname === '/directory' || pathname === '/memories') {
+          await navigate({ replace: true, to: pathname })
+        }
         if (pathname === '/playground') {
           await navigate({
             replace: true,
@@ -770,6 +839,8 @@ export function AppConnectionProvider({
     openConnectionSettings,
     pathname,
     queryClient,
+    reconnect,
+    serverHealth,
     serverMode,
   ])
 

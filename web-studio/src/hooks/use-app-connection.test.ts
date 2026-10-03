@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   createConnectionError,
+  createConnectionHealthHeaders,
   createManagementAccountConnection,
   createIdentityScopeKey,
   createConnectionRoleProbeKey,
@@ -263,6 +264,7 @@ describe('synchronizeConnectionRuntime', () => {
     )
 
     expect(next).toEqual({
+      serviceSelection: 'auto',
       accountId: 'account-b',
       adminApiKey: 'root-key',
       apiKey: 'account-b-user-key',
@@ -353,5 +355,48 @@ describe('shouldRedirectToLoginOnApiError', () => {
         acceptClientError,
       ),
     ).toBe(false)
+  })
+})
+
+describe('connection credential planes', () => {
+  it('uses the hosted data credential even when a source control credential remains configured', () => {
+    const connection = {
+      baseUrl: 'https://api.vikingdb.cn-beijing.volces.com/openviking',
+      apiKey: 'user-key',
+      adminApiKey: 'expired-control-key',
+      accountId: 'old-account',
+      userId: 'old-user',
+    }
+    expect(createConnectionHealthHeaders(connection, 'data')).toEqual({
+      Authorization: 'Bearer user-key',
+    })
+    expect(createConnectionHealthHeaders(connection, 'control')).toEqual({
+      Authorization: 'Bearer user-key',
+    })
+    expect(
+      createConnectionHealthHeaders({ ...connection, apiKey: '' }, 'data'),
+    ).toEqual({})
+  })
+  it('drops identity assertions when a custom domain is explicitly selected as hosted', () => {
+    const connection = {
+      baseUrl: 'https://proxy.example/openviking',
+      serviceSelection: 'volcengine' as const,
+      apiKey: 'user-key',
+      adminApiKey: '',
+      accountId: 'old-account',
+      userId: 'old-user',
+    }
+    expect(createConnectionHealthHeaders(connection, 'data')).toEqual({
+      Authorization: 'Bearer user-key',
+    })
+    expect(
+      createConnectionHealthHeaders(
+        { ...connection, serviceSelection: 'opensource' },
+        'data',
+      ),
+    ).toMatchObject({
+      'X-OpenViking-Account': 'old-account',
+      'X-OpenViking-User': 'old-user',
+    })
   })
 })

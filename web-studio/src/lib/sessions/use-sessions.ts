@@ -69,18 +69,21 @@ export function useSession(sessionId: string | undefined) {
 }
 
 /** Fetch message history for a session. */
-export function useSessionMessages(sessionId: string | undefined) {
+export function useSessionMessages(
+  sessionId: string | undefined,
+  includeArchives = true,
+) {
   const queryClient = useQueryClient()
 
   return useQuery<Message[]>({
-    queryKey: [...SESSIONS_KEY, sessionId, 'messages'],
+    queryKey: [...SESSIONS_KEY, sessionId, 'messages', includeArchives],
     queryFn: async () => {
       const session = await queryClient.fetchQuery({
         queryFn: () => fetchSession(sessionId!),
         queryKey: [...SESSIONS_KEY, sessionId],
         staleTime: 15_000,
       })
-      return fetchSessionMessages(sessionId!, session)
+      return fetchSessionMessages(sessionId!, session, includeArchives)
     },
     enabled: Boolean(sessionId),
     staleTime: 30_000, // cache for 30s to avoid flash on session switch
