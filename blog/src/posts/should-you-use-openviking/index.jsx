@@ -34,6 +34,14 @@ function trackCompletion(answers) {
   track(`edition/${result.lowFit ? 'none' : result.forms.top}`);
 }
 
+// Option letters (by position, as in the share code) for questions 1..index+1; '_' marks a skipped one.
+function answerPath(answers, index) {
+  return QUESTIONS.slice(0, index + 1).map((q) => {
+    const i = q.options.findIndex(o => o.key === answers[q.id]);
+    return i < 0 ? '_' : LETTERS[i];
+  }).join('');
+}
+
 // A takes no onClick, so link clicks are caught on the container and matched by href.
 function linkTracker(place, links, t) {
   const handler = (e) => {
@@ -851,6 +859,9 @@ function useQuiz(navigate) {
     const id = QUESTION_IDS[index];
     const wasComplete = isComplete(answers);
     const next = { ...answers, [id]: key };
+    // First answer to each question reports the answer path so far as option letters, e.g. seq/BCA.
+    // Per-page totals then give reach per question (sum by length) and drop-off after any path prefix.
+    if (!answers[id]) track(`seq/${answerPath(next, index)}`);
     setAnswers(next);
     clearTimeout(advanceTimer.current);
     const go = () => {
