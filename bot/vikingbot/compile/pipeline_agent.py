@@ -18,7 +18,7 @@ from vikingbot.compile.pipeline_io import retry_allowed
 from vikingbot.compile.renderer import validate_relative_file_path
 from vikingbot.compile.results import FileResponse, RecordResponse
 from vikingbot.compile.schemas import result_schema
-from vikingbot.compile.skill_resources import EvidenceReader, SkillScript
+from vikingbot.compile.skill_resources import EvidenceReader
 from vikingbot.providers.base import LLMProvider
 
 
@@ -240,13 +240,16 @@ def agent_runner(loop, session_key, connection, limits):
         registry.register(submit)
         if model.resources:
             registry.register(model.resources)
-            registry.register(SkillScript(model.resources))
         if evidence.allowed - evidence.delivered:
             registry.register(evidence)
         for name in ("read_file", "write_file", "edit_file"):
             tool = loop.tools.get(name)
             if tool is not None:
                 registry.register(CompileChildTool(tool, root, merge_only=True))
+        tool = loop.tools.get("exec")
+        if tool is not None:
+            await model.files.sandbox.write_file(f"{root}/.keep", "")
+            registry.register(CompileChildTool(tool, root))
         child = copy(loop)
         child.provider = ChildProvider(model, schema, stage, submit=submit)
         child._preview_tool_result = complete_tool_result
@@ -254,7 +257,7 @@ def agent_runner(loop, session_key, connection, limits):
             "\nUse emit to submit. Supplied Skill attachments are complete; "
             "they fulfill the Skill's reading requirements without a tool call. Do not reread them. "
             "read_skill_resource is available for additional references. "
-            "Only assigned evidence and your isolated scratch files are available. "
+            "Use assigned evidence, Skill attachments and your scratch files for this job. "
             "Prefer one inline emit for small finished results; scratch writing and rereading "
             "are optional, not mandatory verification steps. "
             "Write large/multiple files using write_file, then emit content_ref paths "
@@ -263,8 +266,7 @@ def agent_runner(loop, session_key, connection, limits):
             "For a large record collection, build a JSON result file incrementally with file "
             "tools, then emit only result_ref pointing to that file. Finished independent Map "
             "files may use ready_path plus ready_content_ref and concise routing payloads. "
-            "Use run_skill_script for Python scripts supplied by the selected Skill. "
-            "Scratch files are data; writing a script does not execute it. "
+            "read_skill_resource provides local paths for Skill scripts and their dependencies. "
             "Use edit_file to repair existing JSON."
         )
         if stage == "map_agent":

@@ -5,14 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import posixpath
-import shlex
-import sys
 import uuid
 
 from openviking.core.namespace import relative_uri_path
 from openviking.utils.path_safety import safe_join_viking_uri
 from vikingbot.agent.tools.base import Tool
 from vikingbot.compile.hashing import content_hash
+from vikingbot.compile.models import COMPILE_STAGING_ROOT
 from vikingbot.compile.renderer import validate_relative_file_path
 
 
@@ -22,11 +21,13 @@ class SkillResources(Tool):
     A task snapshots at most 32 attachments, 256 KiB each and 1 MiB total. Reads
     return complete requested line ranges with hashes and explicit remaining lines.
     Hashes bind execution caches and recovery to attachments read by execution stages.
+    Complete snapshots are saved in the task sandbox with their Skill-relative layout
+    so commands can use scripts and loaded dependencies through ordinary file paths.
     """
 
     name = "read_skill_resource"
     description = (
-        "Read a configuration, reference or template inside the selected Skill package. "
+        "Read a script, configuration, reference or template inside the selected Skill package. "
         "Path is relative to that Skill, or a full Viking URI inside it. "
         "Omit offset/limit to read the complete file. "
         "Line offsets are zero-based; use explicit non-overlapping ranges for long files."
@@ -47,6 +48,13 @@ class SkillResources(Tool):
         self.snapshots: dict[str, str] = {}
         self.hashes: dict[str, str] = {}
         self.lock = asyncio.Lock()
+        self.local_root = posixpath.join(
+            files.sandbox.sandbox_cwd, COMPILE_STAGING_ROOT, "skills", uuid.uuid4().hex
+        )
+        self.description += (
+            f" Loaded attachments are saved under {self.local_root} with their Skill-relative "
+            "paths; reads return local_path for the complete file in the sandbox."
+        )
 
     def path(self, path):
         """Reject traversal, encoded traversal and namespace escape before any client read."""
@@ -75,7 +83,9 @@ class SkillResources(Tool):
                 size = sum(len(v.encode()) for k, v in self.snapshots.items() if k != path)
                 if size + len(raw) > 1024 * 1024:
                     raise ValueError("Skill dependencies exceed 1 MiB")
-                self.snapshots[path] = raw.decode("utf-8")
+                content = raw.decode("utf-8")
+                await self.files.sandbox.write_file(posixpath.join(self.local_root, path), content)
+                self.snapshots[path] = content
                 self.hashes[path] = content_hash(raw)
                 await self.files.put("skill-dependencies", self.hashes)
             return self.snapshots[path]
@@ -88,51 +98,6 @@ class SkillResources(Tool):
                 return False
         return True
 
-    async def run_script(self, path, data):
-        """Run a selected Skill's Python file using the task's existing exec permissions.
-
-        The package contains versioned, authorized attachments. The script receives
-        input/output JSON filenames as argv, runs in a private invocation directory,
-        and cannot publish artifacts through its return value. Direct backends retain
-        their configured host execution semantics; this is not an OS sandbox.
-        Cancellation and the 60-second command timeout stop the process tree.
-        """
-        path = self.path(path)
-        if not path.endswith(".py"):
-            raise ValueError("Skill scripts must be Python files")
-        await self.read(path)
-        sandbox = self.files.sandbox
-        root = f"__compile_staging__/scripts/{uuid.uuid4().hex}"
-        for relative, content in list(self.snapshots.items()):
-            await sandbox.write_file(f"{root}/skill/{relative}", content)
-        await sandbox.write_file(f"{root}/input.json", json.dumps(data, ensure_ascii=False))
-        absolute = posixpath.join(sandbox.sandbox_cwd, root)
-        local = sandbox.local_file_path(f"{root}/skill/{path}")
-        executable = sys.executable if local is not None else "python3"
-        # A separate completion marker distinguishes a valid result from a file
-        # written before an exception, timeout or nonzero SystemExit.
-        wrapper = (
-            "import pathlib,runpy,sys; "
-            f"sys.path.insert(0, {posixpath.join(absolute, 'skill')!r}); "
-            f"sys.argv = {[posixpath.join(absolute, 'skill', path), posixpath.join(absolute, 'input.json'), posixpath.join(absolute, 'output.json')]!r}\n"
-            "try:\n runpy.run_path(sys.argv[0], run_name='__main__')\n"
-            "except SystemExit as exc:\n"
-            " if exc.code not in (None, 0): raise\n"
-            f"pathlib.Path({posixpath.join(absolute, 'complete')!r}).write_text('ok')\n"
-        )
-        await sandbox.execute(
-            f"cd {shlex.quote(absolute)} && {shlex.quote(executable)} -I -c {shlex.quote(wrapper)}",
-            timeout=60,
-        )
-        try:
-            complete = await sandbox.read_file_bytes(f"{root}/complete", max_bytes=2)
-            if complete != b"ok":
-                raise ValueError("Skill script did not complete")
-            raw = await sandbox.read_file_bytes(f"{root}/output.json", max_bytes=8 * 1024 * 1024)
-            return json.loads(raw)
-        except (OSError, ValueError) as exc:
-            raise ValueError(f"Skill script {path} did not return complete JSON: {exc}") from exc
-
     async def execute(self, tool_context=None, path="", offset=0, limit=None):
         """Return the requested lines, never a silently truncated rule or template."""
         if offset < 0 or (limit is not None and limit < 1):
@@ -144,6 +109,7 @@ class SkillResources(Tool):
         return json.dumps(
             {
                 "path": path,
+                "local_path": posixpath.join(self.local_root, path),
                 "sha256": self.hashes[path],
                 "offset": offset,
                 "end": end,
@@ -153,30 +119,6 @@ class SkillResources(Tool):
             },
             ensure_ascii=False,
         )
-
-
-class SkillScript(Tool):
-    """Expose installed Skill scripts without executing model-authored scratch code."""
-
-    name = "run_skill_script"
-    description = (
-        "Run a Python script from the selected Skill. It receives input/output JSON paths "
-        "as argv[1:3]; its JSON result is returned for validation and explicit emit submission. "
-        "Read the script's instructions first. Script execution does not publish any files."
-    )
-    parameters = {
-        "type": "object",
-        "properties": {"path": {"type": "string"}, "data": {"type": "object"}},
-        "required": ["path", "data"],
-        "additionalProperties": False,
-    }
-
-    def __init__(self, resources):
-        self.resources = resources
-
-    async def execute(self, tool_context=None, path="", data=None):
-        """Return script data; the caller's normal typed submission owns acceptance."""
-        return json.dumps(await self.resources.run_script(path, data), ensure_ascii=False)
 
 
 class EvidenceReader(Tool):

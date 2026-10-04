@@ -86,8 +86,7 @@ catalog; related_subjects does not confirm that a file exists.
 Use available tools as needed. With file tools, large results may be written
 to temporary files and submitted using emit's reference fields. Temporary
 files are separate from the output directory.
-run_skill_script runs only Skill-supplied scripts when available; it cannot
-execute scripts written during this task.
+read_skill_resource provides local paths for Skill scripts and their dependencies.
 
 Submit the complete result through emit without extra prose.
 """

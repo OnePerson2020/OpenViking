@@ -82,8 +82,8 @@ that step; do not write a separate call for each source file or job.
 
 ## Access Boundaries
 
-Execution steps cannot access unassigned materials, scan all history, access external
-networks or run arbitrary scripts.
+Work with the assigned materials. Avoid scanning all history.
+Agent commands run under the configured sandbox permissions.
 
 """
 
@@ -123,7 +123,7 @@ class Transform(PlanModel):
         description="Use direct for straightforward tasks with small results. "
         "Prefer agent for detailed knowledge compilation or large results. "
         "Both modes can read assigned materials and Skill references. "
-        "Agent can also write and revise temporary files and run Skill-supplied scripts.",
+        "Agent can also write and revise temporary files and run commands in the configured sandbox.",
     )
     input_unit: Literal["range", "file"] = Field(
         default="range",
