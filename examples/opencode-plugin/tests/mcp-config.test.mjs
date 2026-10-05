@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import { dirname, join } from "node:path"
-import { createOpenVikingMcpConfig, injectOpenVikingMcpConfig } from "../lib/mcp-config.mjs"
+import { createOpenVikingMcpConfig, createOpenVikingV2McpConfig, injectOpenVikingMcpConfig, injectOpenVikingSkillPaths } from "../lib/mcp-config.mjs"
 
 const testDir = dirname(fileURLToPath(import.meta.url))
 
@@ -35,6 +35,20 @@ test("injectOpenVikingMcpConfig leaves OpenCode MCP config untouched in hook-onl
   })
 })
 
+test("injectOpenVikingSkillPaths appends the bundled skills directory once", () => {
+  const config = { skills: { paths: [".opencode/skills"] } }
+
+  assert.equal(injectOpenVikingSkillPaths(config, "/tmp/openviking-plugin"), true)
+  injectOpenVikingSkillPaths(config, "/tmp/openviking-plugin")
+  assert.deepEqual(config.skills.paths, [".opencode/skills", "/tmp/openviking-plugin/skills"])
+})
+
+test("OpenCode plugin adds its skills only after registering the MCP server", async () => {
+  const source = await readFile(join(testDir, "../index.mjs"), "utf8")
+
+  assert.match(source, /if \(injected\) injectOpenVikingSkillPaths\(opencodeConfig, pluginRoot\)/)
+})
+
 test("OpenCode plugin keeps tools on MCP rather than native tool hook", async () => {
   const source = await readFile(join(testDir, "../index.mjs"), "utf8")
 
@@ -59,4 +73,24 @@ test("OpenCode MCP config points to the proxy entrypoint", () => {
   assert.equal(entry.type, "local")
   assert.equal(entry.command[0], "node")
   assert.match(entry.command[1], /servers\/mcp-proxy\.mjs$/)
+})
+
+test("OpenCode v2 MCP config uses the local server schema", () => {
+  const entry = createOpenVikingV2McpConfig("/tmp/ov")
+
+  assert.equal(entry.type, "local")
+  assert.equal(entry.command[0], "node")
+  assert.match(entry.command[1], /servers\/mcp-proxy\.mjs$/)
+  assert.equal(entry.enabled, undefined)
+  assert.equal(entry.codemode, false)
+  assert.deepEqual(entry.timeout, { startup: 15000, catalog: 15000, execution: 15000 })
+})
+
+test("OpenCode plugin exports a v2 setup without importing @opencode/plugin", async () => {
+  const source = await readFile(join(testDir, "../index.mjs"), "utf8")
+
+  assert.match(source, /id:\s*"openviking"/)
+  assert.match(source, /async setup\(ctx\)/)
+  assert.match(source, /async server\(input\)/)
+  assert.doesNotMatch(source, /@opencode\/plugin/)
 })

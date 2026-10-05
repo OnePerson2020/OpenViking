@@ -34,18 +34,23 @@ fn compact_request_body(body: &mut Value) {
         if key == "processing_mode" {
             return value != "semantic_and_vectors";
         }
+        if key == "search_type" {
+            return value != "semantic";
+        }
         true
     });
 }
 
 fn add_resource_tag_fields(body: &mut Value, tags: &[String], tag_mode: &str) {
-    if tags.is_empty() {
+    if tags.is_empty() && tag_mode != "clear" {
         return;
     }
     let obj = body
         .as_object_mut()
         .expect("add_resource request body must be an object");
-    obj.insert("tags".to_string(), serde_json::json!(tags));
+    if !tags.is_empty() {
+        obj.insert("tags".to_string(), serde_json::json!(tags));
+    }
     obj.insert("tag_mode".to_string(), serde_json::json!(tag_mode));
 }
 
@@ -385,9 +390,13 @@ impl HttpClient {
         processing_mode: &str,
         tags: Vec<String>,
         tag_mode: &str,
+        acl: Option<Value>,
     ) -> Result<serde_json::Value> {
         let mut body = Self::build_write_body(uri, content, mode, wait, timeout, processing_mode);
         add_resource_tag_fields(&mut body, &tags, tag_mode);
+        if let Some(acl) = acl {
+            body["acl"] = acl;
+        }
         self.post("/api/v1/content/write", &body).await
     }
 
@@ -474,7 +483,7 @@ impl HttpClient {
         uri: &str,
         mode: &str,
         wait: bool,
-        dry_run: bool,
+        force: bool,
         tags: Vec<String>,
         tag_mode: &str,
         recursive: bool,
@@ -483,18 +492,14 @@ impl HttpClient {
             "uri": uri,
             "mode": mode,
             "wait": wait,
-            "dry_run": dry_run,
         });
+        if force {
+            body["force"] = serde_json::json!(true);
+        }
         if !recursive {
             body["recursive"] = serde_json::json!(false);
         }
-        if !tags.is_empty() {
-            let obj = body
-                .as_object_mut()
-                .expect("reindex request body must be an object");
-            obj.insert("tags".to_string(), serde_json::json!(tags));
-            obj.insert("tag_mode".to_string(), serde_json::json!(tag_mode));
-        }
+        add_resource_tag_fields(&mut body, &tags, tag_mode);
         self.post("/api/v1/content/reindex", &body).await
     }
 
@@ -564,6 +569,9 @@ impl HttpClient {
         recursive: bool,
         output: &str,
         abs_limit: i32,
+        include_abstract: Option<bool>,
+        include_overview: Option<bool>,
+        overview_limit: i32,
         show_all_hidden: bool,
         node_limit: i32,
         offset: i32,
@@ -580,9 +588,16 @@ impl HttpClient {
             ("recursive".to_string(), recursive.to_string()),
             ("output".to_string(), output.to_string()),
             ("abs_limit".to_string(), abs_limit.to_string()),
+            ("overview_limit".to_string(), overview_limit.to_string()),
             ("show_all_hidden".to_string(), show_all_hidden.to_string()),
             ("node_limit".to_string(), node_limit.to_string()),
         ];
+        if let Some(value) = include_abstract {
+            params.push(("include_abstract".to_string(), value.to_string()));
+        }
+        if let Some(value) = include_overview {
+            params.push(("include_overview".to_string(), value.to_string()));
+        }
         if offset != 0 {
             params.push(("offset".to_string(), offset.to_string()));
         }
@@ -612,7 +627,11 @@ impl HttpClient {
         uri: &str,
         output: &str,
         abs_limit: i32,
+        include_abstract: Option<bool>,
+        include_overview: Option<bool>,
+        overview_limit: i32,
         show_all_hidden: bool,
+        directories_only: bool,
         node_limit: i32,
         level_limit: i32,
         offset: i32,
@@ -628,7 +647,17 @@ impl HttpClient {
             ("show_all_hidden".to_string(), show_all_hidden.to_string()),
             ("node_limit".to_string(), node_limit.to_string()),
             ("level_limit".to_string(), level_limit.to_string()),
+            ("overview_limit".to_string(), overview_limit.to_string()),
         ];
+        if let Some(value) = include_abstract {
+            params.push(("include_abstract".to_string(), value.to_string()));
+        }
+        if let Some(value) = include_overview {
+            params.push(("include_overview".to_string(), value.to_string()));
+        }
+        if directories_only {
+            params.push(("directories_only".to_string(), "true".to_string()));
+        }
         if offset != 0 {
             params.push(("offset".to_string(), offset.to_string()));
         }
@@ -647,11 +676,19 @@ impl HttpClient {
         self.get("/api/v1/fs/tree", &params).await
     }
 
-    pub async fn mkdir(&self, uri: &str, description: Option<&str>) -> Result<serde_json::Value> {
-        let body = match description {
+    pub async fn mkdir(
+        &self,
+        uri: &str,
+        description: Option<&str>,
+        acl: Option<Value>,
+    ) -> Result<serde_json::Value> {
+        let mut body = match description {
             Some(description) => serde_json::json!({ "uri": uri, "description": description }),
             None => serde_json::json!({ "uri": uri }),
         };
+        if let Some(acl) = acl {
+            body["acl"] = acl;
+        }
         self.post("/api/v1/fs/mkdir", &body).await
     }
 
@@ -721,6 +758,7 @@ impl HttpClient {
         context_type: Option<Vec<String>>,
         tags: Option<Vec<String>>,
         read_content: bool,
+        events_time_decay_protection: Option<String>,
     ) -> Result<serde_json::Value> {
         let image_url = normalize_image_input(image)?;
         let mut body = serde_json::json!({
@@ -736,6 +774,7 @@ impl HttpClient {
             "context_type": context_type,
             "tags": tags,
             "read_content": read_content.then_some(true),
+            "events_time_decay_protection": events_time_decay_protection,
         });
         compact_request_body(&mut body);
         self.post("/api/v1/search/find", &body).await
@@ -746,6 +785,7 @@ impl HttpClient {
         query: String,
         uri: String,
         image: Option<String>,
+        search_type: String,
         session_id: Option<String>,
         node_limit: i32,
         threshold: Option<f64>,
@@ -756,11 +796,13 @@ impl HttpClient {
         context_type: Option<Vec<String>>,
         tags: Option<Vec<String>>,
         read_content: bool,
+        events_time_decay_protection: Option<String>,
     ) -> Result<serde_json::Value> {
         let image_url = normalize_image_input(image)?;
         let mut body = serde_json::json!({
             "query": query,
             "image_url": image_url,
+            "search_type": search_type,
             "target_uri": uri,
             "session_id": session_id,
             "limit": node_limit,
@@ -772,6 +814,7 @@ impl HttpClient {
             "context_type": context_type,
             "tags": tags,
             "read_content": read_content.then_some(true),
+            "events_time_decay_protection": events_time_decay_protection,
         });
         compact_request_body(&mut body);
         self.post("/api/v1/search/search", &body).await
@@ -852,6 +895,7 @@ impl HttpClient {
         resource_args: Option<Map<String, Value>>,
         tags: Vec<String>,
         tag_mode: String,
+        acl: Option<Value>,
         show_progress: bool,
         verbose: bool,
     ) -> Result<serde_json::Value> {
@@ -871,6 +915,9 @@ impl HttpClient {
 
         let build_body = |base: serde_json::Value| {
             let mut body = base;
+            if let Some(acl) = &acl {
+                body["acl"] = acl.clone();
+            }
             add_resource_tag_fields(&mut body, &tags, &tag_mode);
             if create_parent {
                 body.as_object_mut()
@@ -2044,6 +2091,7 @@ mod tests {
                 None,
                 Vec::new(),
                 "replace".to_string(),
+                None,
                 false,
                 false,
             )
@@ -2080,6 +2128,7 @@ mod tests {
                 Some(no_split_args),
                 Vec::new(),
                 "replace".to_string(),
+                None,
                 false,
                 false,
             )
@@ -2112,6 +2161,20 @@ mod tests {
     }
 
     #[test]
+    fn compact_request_body_drops_default_search_type_for_legacy_servers() {
+        let mut body = json!({"query": "OAuth token", "search_type": "semantic"});
+        super::compact_request_body(&mut body);
+        assert!(!body.as_object().unwrap().contains_key("search_type"));
+    }
+
+    #[test]
+    fn compact_request_body_keeps_keywords_search_type() {
+        let mut body = json!({"query": "OAuth token", "search_type": "keywords"});
+        super::compact_request_body(&mut body);
+        assert_eq!(body["search_type"], "keywords");
+    }
+
+    #[test]
     fn add_resource_tag_fields_adds_tags_and_tag_mode() {
         let mut body = json!({"path": "https://example.com/demo.md"});
         let tags = vec!["team=search".to_string(), "env=test".to_string()];
@@ -2131,6 +2194,17 @@ mod tests {
         let obj = body.as_object().unwrap();
         assert!(!obj.contains_key("tags"));
         assert!(!obj.contains_key("tag_mode"));
+    }
+
+    #[test]
+    fn add_resource_tag_fields_sends_clear_without_tags() {
+        let mut body = json!({"path": "https://example.com/demo.md"});
+
+        super::add_resource_tag_fields(&mut body, &[], "clear");
+
+        let obj = body.as_object().unwrap();
+        assert!(!obj.contains_key("tags"));
+        assert_eq!(body["tag_mode"], json!("clear"));
     }
 
     #[test]
@@ -2264,6 +2338,9 @@ mod tests {
                 false,
                 "agent",
                 256,
+                Some(false),
+                Some(true),
+                512,
                 false,
                 20,
                 4,
@@ -2284,6 +2361,9 @@ mod tests {
         assert!(request.contains("limit=5"));
         assert!(request.contains("sort_by=mtime"));
         assert!(request.contains("sort_order=desc"));
+        assert!(request.contains("include_abstract=false"));
+        assert!(request.contains("include_overview=true"));
+        assert!(request.contains("overview_limit=512"));
         assert!(!request.contains("tz="));
         assert!(!request.contains("include_mod_time_iso="));
 
@@ -2296,6 +2376,9 @@ mod tests {
                 false,
                 "agent",
                 256,
+                None,
+                None,
+                4000,
                 false,
                 20,
                 0,
@@ -2312,6 +2395,9 @@ mod tests {
             .await
             .expect("default request should be captured");
         assert!(!default_request.contains("offset="));
+        assert!(!default_request.contains("include_abstract="));
+        assert!(!default_request.contains("include_overview="));
+        assert!(default_request.contains("overview_limit=4000"));
         assert!(!default_request.contains("&limit="));
         assert!(!default_request.contains("sort_by="));
         assert!(!default_request.contains("sort_order="));
@@ -2458,7 +2544,11 @@ mod tests {
                 "viking://resources",
                 "agent",
                 256,
+                Some(false),
+                Some(true),
+                512,
                 false,
+                true,
                 20,
                 3,
                 4,
@@ -2475,6 +2565,10 @@ mod tests {
         assert!(request.contains("node_limit=20"));
         assert!(request.contains("offset=4"));
         assert!(request.contains("limit=5"));
+        assert!(request.contains("include_abstract=false"));
+        assert!(request.contains("include_overview=true"));
+        assert!(request.contains("overview_limit=512"));
+        assert!(request.contains("directories_only=true"));
         assert!(!request.contains("tz="));
         assert!(!request.contains("include_mod_time_iso="));
 
@@ -2485,6 +2579,10 @@ mod tests {
                 "viking://resources",
                 "agent",
                 256,
+                None,
+                None,
+                4000,
+                false,
                 false,
                 20,
                 3,
@@ -2500,6 +2598,9 @@ mod tests {
             .await
             .expect("default request should be captured");
         assert!(!default_request.contains("offset="));
+        assert!(!default_request.contains("include_abstract="));
+        assert!(!default_request.contains("include_overview="));
+        assert!(!default_request.contains("directories_only="));
         assert!(!default_request.contains("&limit="));
     }
 

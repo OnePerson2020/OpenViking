@@ -17,6 +17,7 @@ from openviking_cli.exceptions import PermissionDeniedError
 from openviking_cli.utils.config.grep_config import GrepEngine
 
 _GREP_LS_PAGE_SIZE = 1000
+_FULLTEXT_UNSUPPORTED_CACHE_TTL = 60.0
 
 
 def _pkg():
@@ -154,7 +155,11 @@ class _GrepMixin:
         if not vector_store:
             return "fs"
 
-        backend_type = getattr(vector_store, "_backend_type", "unknown")
+        account_id = getattr(ctx, "account_id", None) if ctx is not None else None
+        if account_id and hasattr(vector_store, "get_account_backend"):
+            backend_type = (await vector_store.get_account_backend(account_id))._mode
+        else:
+            backend_type = getattr(vector_store, "_backend_type", "unknown")
         # Keep this set consistent with ``CollectionAdapter.USE_CONTENT_FIELD``:
         # only these backends store the ``content`` field required for full-text grep.
         if backend_type not in ("volcengine", "vikingdb"):
@@ -181,21 +186,43 @@ class _GrepMixin:
 
         return "vikingdb_then_fs"
 
-    async def _collection_has_fulltext(self, vector_store, ctx) -> bool:
+    async def _collection_has_fulltext(
+        self, vector_store, ctx, supported_modes=None, raise_on_error: bool = False
+    ) -> bool:
         """Check if collection has content field and FullText config.
 
-        Result is cached on the VikingFS instance since collection schema
-        does not change at runtime.
+        The cache is scoped by Account and collection identity because one
+        VikingFS instance can serve dedicated Account VectorDB collections.
         """
-        if self._fulltext_available is not None:
-            return self._fulltext_available
+        account_id = getattr(ctx, "account_id", "") if ctx is not None else ""
+        backend = None
+        if account_id and hasattr(vector_store, "get_account_backend"):
+            backend = await vector_store.get_account_backend(account_id)
+        elif not account_id:
+            backend = vector_store
+        cache_key = (
+            account_id,
+            str(getattr(backend, "_mode", "")),
+            str(getattr(backend, "collection_name", getattr(backend, "_collection_name", ""))),
+            str(getattr(backend, "index_name", getattr(backend, "_index_name", ""))),
+        )
+        if supported_modes is not None and getattr(backend, "_mode", None) not in supported_modes:
+            return False
+        cached = self._fulltext_available.get(cache_key)
+        if cached is not None:
+            supported, expires_at = cached
+            if expires_at is None or time.monotonic() < expires_at:
+                return supported
+            del self._fulltext_available[cache_key]
         try:
             meta = None
             if hasattr(vector_store, "get_collection_meta"):
-                meta = await vector_store.get_collection_meta(ctx=ctx)
-            if not meta:
-                self._fulltext_available = False
-                return False
+                meta = await vector_store.get_collection_meta(
+                    ctx=ctx,
+                    raise_on_error=raise_on_error,
+                )
+            if not isinstance(meta, dict) or not isinstance(meta.get("Fields"), list):
+                raise RuntimeError("Vector backend returned invalid collection metadata")
             fields = meta.get("Fields", [])
             has_content = any(
                 f.get("FieldName") == "content" and f.get("FieldType") == "text" for f in fields
@@ -203,9 +230,21 @@ class _GrepMixin:
             fulltext = meta.get("FullText") or []
             has_content_fulltext = any(ft.get("Field") == "content" for ft in fulltext)
             result = has_content and has_content_fulltext
-            self._fulltext_available = result
+            expires_at = None if result else time.monotonic() + _FULLTEXT_UNSUPPORTED_CACHE_TTL
+            self._fulltext_available[cache_key] = (result, expires_at)
             return result
         except Exception:
+            if raise_on_error:
+                logger.error(
+                    "Failed to check collection fulltext config: "
+                    "account_id=%s backend=%s collection=%s index=%s",
+                    account_id,
+                    cache_key[1],
+                    cache_key[2],
+                    cache_key[3],
+                    exc_info=True,
+                )
+                raise
             logger.debug(
                 "Failed to check collection fulltext config, assuming no fulltext", exc_info=True
             )
@@ -752,7 +791,11 @@ class _GrepMixin:
                         ctx=ctx,
                     )
                 except PermissionDeniedError:
-                    if current_depth == 0:
+                    # A denial on the first page means this child subtree is
+                    # no longer visible and can be skipped. Once traversal has
+                    # consumed a page, swallowing the error would misreport a
+                    # partial result as complete.
+                    if current_depth == 0 or offset > 0:
                         raise
                     logger.debug(
                         f"Skipping inaccessible directory during grep: {normalized_current_uri}"

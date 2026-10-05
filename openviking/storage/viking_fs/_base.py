@@ -12,6 +12,7 @@ from openviking_cli.exceptions import (
 from openviking_cli.utils.logger import get_logger
 
 if TYPE_CHECKING:
+    from openviking.config.vlm import VLMResolver
     from openviking.storage.acl import AclManager
     from openviking.storage.viking_vector_index_backend import VikingVectorIndexBackend
     from openviking_cli.utils.config import GlobConfig, GrepConfig, RerankConfig, RetrievalConfig
@@ -204,6 +205,9 @@ def init_viking_fs(
     timeout: int = 10,
     enable_recorder: bool = False,
     encryptor: Optional[Any] = None,
+    vlm_resolver: Optional["VLMResolver"] = None,
+    embedding_provider: Optional[Any] = None,
+    vector_config_resolver: Optional[Any] = None,
 ):
     """Initialize VikingFS singleton.
 
@@ -211,7 +215,7 @@ def init_viking_fs(
         agfs: Pre-initialized AGFS client (HTTP or Binding)
         query_embedder: Embedder instance
         rerank_config: Rerank configuration
-        retrieval_config: Retrieval ranking configuration
+        retrieval_config: Retrieval behavior configuration
         grep_config: Grep engine configuration
         glob_config: Glob engine configuration
         vector_store: Vector store instance
@@ -232,6 +236,9 @@ def init_viking_fs(
         grep_config=grep_config,
         glob_config=glob_config,
         encryptor=encryptor,
+        vlm_resolver=vlm_resolver,
+        embedding_provider=embedding_provider,
+        vector_config_resolver=vector_config_resolver,
     )
 
     if enable_recorder:

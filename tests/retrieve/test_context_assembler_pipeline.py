@@ -48,7 +48,27 @@ class _FakeFindResult:
         self.skills = skills or []
 
 
-def _service(*, hits, bodies, session=None, abstracts=None):
+class _FakeVLMResolver:
+    async def get_query_planner(self, account_id):
+        del account_id
+        return object()
+
+    async def has_dedicated_query_planner(self, account_id):
+        del account_id
+        return True
+
+
+_DEFAULT_VLM_RESOLVER = _FakeVLMResolver()
+
+
+def _service(
+    *,
+    hits,
+    bodies,
+    session=None,
+    abstracts=None,
+    vlm_resolver=_DEFAULT_VLM_RESOLVER,
+):
     abstracts = abstracts or {}
 
     async def fake_find(**kwargs):
@@ -75,6 +95,7 @@ def _service(*, hits, bodies, session=None, abstracts=None):
         fs=SimpleNamespace(read=fake_read, abstract=fake_abstract),
         sessions=SimpleNamespace(get=fake_get),
         viking_fs=None,
+        vlm_resolver=vlm_resolver,
     )
 
 
@@ -151,12 +172,13 @@ async def test_assembly_returns_readable_entries_within_budget():
 async def test_query_expansion_fans_out_planned_queries(monkeypatch):
     queries_seen = []
 
-    async def fake_expand(*, query, session, mode, timeout_s=None):
-        del session, mode, timeout_s
+    async def fake_expand(*, query, session, mode, **kwargs):
+        del session, mode, kwargs
         return [query, "expanded query"], "used"
 
     async def fake_find(**kwargs):
         queries_seen.append(kwargs["query"])
+        assert kwargs["events_time_decay_protection"] == "2d"
         return _FakeFindResult()
 
     async def fake_get(session_id, ctx, *, auto_create=False):
@@ -171,6 +193,7 @@ async def test_query_expansion_fans_out_planned_queries(monkeypatch):
         fs=SimpleNamespace(read=None),
         sessions=SimpleNamespace(get=fake_get),
         viking_fs=None,
+        vlm_resolver=_DEFAULT_VLM_RESOLVER,
     )
 
     result = await assemble_context(
@@ -178,6 +201,7 @@ async def test_query_expansion_fans_out_planned_queries(monkeypatch):
         ctx=_ctx(),
         params=AssembleParams(
             query="short",
+            events_time_decay_protection="2d",
             session_id="s1",
             query_expansion="auto",
             peer_scope="actor",
@@ -410,17 +434,18 @@ async def test_rewrite_kernel_distinguishes_no_relevant_from_invalid_output(monk
 
     config = SimpleNamespace(
         retrieval=SimpleNamespace(recall_rewrite_timeout_s=1),
-        get_query_planner=lambda: _Planner(),
     )
     monkeypatch.setattr(rewrite_module, "get_openviking_config", lambda: config)
     monkeypatch.setattr(rewrite_module, "render_prompt", lambda *args, **kwargs: "rewrite prompt")
 
     statuses = []
+    planner = _Planner()
     for _ in range(3):
         digest, status, _ = await rewrite_module.rewrite_context(
             query="q",
             rendered='<memory uri="viking://a">body</memory>',
             valid_uris=["viking://a"],
+            planner=planner,
         )
         assert digest == ""
         statuses.append(status)
@@ -729,6 +754,34 @@ async def test_excluding_a_package_drops_a_hit_on_any_file_inside_it():
 
     assert result.entries == []
     assert result.stats["excluded"] == 1
+
+
+async def test_exclude_uris_directory_prefix_excludes_subtree():
+    """Passing a directory URI to exclude_uris should exclude all files under it."""
+    hits = [
+        {
+            "uri": f"{USER_ROOT}/memories/events/old.md",
+            "score": 0.8,
+            "abstract": "old event",
+        },
+        {
+            "uri": f"{USER_ROOT}/memories/preferences/lang.md",
+            "score": 0.7,
+            "abstract": "language pref",
+        },
+    ]
+    result = await assemble_context(
+        service=_service(hits=hits, bodies={}),
+        ctx=_ctx(),
+        params=AssembleParams(
+            query="test",
+            exclude_uris=[f"{USER_ROOT}/memories/events"],
+        ),
+    )
+
+    uris = [e.uri for e in result.entries]
+    assert f"{USER_ROOT}/memories/events/old.md" not in uris
+    assert f"{USER_ROOT}/memories/preferences/lang.md" in uris
 
 
 async def test_a_pinned_detail_reads_the_package_skill_md():

@@ -44,6 +44,7 @@ from openviking.server.mcp_endpoint import (
     write,
 )
 from openviking.server.mcp_endpoint import ls as list_tool
+from openviking.service.fs_service import ListingPage
 from openviking_cli.exceptions import (
     AlreadyExistsError,
     FailedPreconditionError,
@@ -721,6 +722,7 @@ async def test_search_context_mode_returns_assembled_context(service, monkeypatc
     result = await search(
         query="what happened",
         mode="context",
+        events_time_decay_protection="2d",
         quotas={"events": 1, "entities": 0},
         purpose="coding",
         min_score=0.1,
@@ -742,6 +744,7 @@ async def test_search_context_mode_returns_assembled_context(service, monkeypatc
     assert params.quotas == {"events": 1, "entities": 0}
     assert params.purpose == "coding"
     assert params.score_threshold == 0.1
+    assert params.events_time_decay_protection == "2d"
     assert params.max_tokens == 800
     assert params.detail == {"events": "overview"}
     assert params.dedup_turns == 5
@@ -1257,6 +1260,10 @@ async def test_list_root(service):
     assert isinstance(result, str)
 
 
+async def test_list_defaults_to_viking_root(service):
+    assert await list_tool() == await list_tool("viking://")
+
+
 async def test_list_empty_dir(service):
     ctx = DEFAULT_CTX
     await service.viking_fs.mkdir(
@@ -1264,6 +1271,15 @@ async def test_list_empty_dir(service):
     )
     result = await list_tool("viking://user/test_user/memories/empty_test")
     assert isinstance(result, str)
+
+
+async def test_list_reports_more_entries(service):
+    await write(uri="viking://resources/test_list_limit/f1.md", content="1\n")
+    await write(uri="viking://resources/test_list_limit/f2.md", content="2\n")
+
+    result = await list_tool("viking://resources/test_list_limit", limit=1)
+
+    assert "(more entries available;" in result
 
 
 # ---------------------------------------------------------------------------
@@ -1444,7 +1460,7 @@ async def test_add_skill_rejects_a_target_below_a_skill_root_before_minting_a_to
     finally:
         _mcp_ctx.reset(token)
 
-    assert result.startswith("Error: Unsupported skill root URI")
+    assert result.startswith("INVALID_ARGUMENT: Unsupported skill root URI")
     assert "viking://agent/skills" in result
     assert upload_token_store._store == {}
 
@@ -1480,12 +1496,11 @@ async def test_add_skill_list_only_upload_says_nothing_is_installed(service):
         ({"data": _skill_md("x"), "path": "/tmp/x"}, "not both"),
         ({"data": "/tmp/skills/pdf/SKILL.md"}, 'add_skill(path="/tmp/skills/pdf/SKILL.md")'),
         ({"path": "viking://agent/skills/pdf"}, "read its SKILL.md"),
-        ({"data": _skill_md("x"), "target_uri": "viking://resources/x"}, "Error:"),
+        ({"data": _skill_md("x"), "target_uri": "viking://resources/x"}, "INVALID_URI:"),
     ],
 )
 async def test_add_skill_rejects_invalid_arguments(kwargs, expected):
     result = await add_skill(**kwargs)
-    assert result.startswith("Error:")
     assert expected in result
 
 
@@ -2037,6 +2052,15 @@ async def test_edit_missing_old_string_fails(service):
         await edit(uri=uri, old_string="zzz", new_string="x")
 
 
+async def test_edit_line_ending_mismatch_says_so(service):
+    uri = "viking://resources/test_edit_crlf.md"
+    await write(uri=uri, content="line 1\r\nline 2\r\n")
+    with pytest.raises(InvalidArgumentError, match="CRLF/LF"):
+        await edit(uri=uri, old_string="line 1\nline 2\n", new_string="x")
+    with pytest.raises(InvalidArgumentError, match=r"not found in \S+\. Re-read"):
+        await edit(uri=uri, old_string="zzz", new_string="x")
+
+
 async def test_edit_empty_old_string_fails(service):
     uri = "viking://resources/test_edit_empty.md"
     await write(uri=uri, content="alpha\n")
@@ -2355,19 +2379,30 @@ async def test_tree_node_limit_adds_truncation_note(service):
     assert "(truncated at node_limit=1" in result
 
 
+async def test_tree_exact_node_limit_does_not_add_truncation_note(service):
+    await write(uri="viking://resources/test_tree_exact_limit/f1.md", content="1\n")
+
+    result = await tree(uri="viking://resources/test_tree_exact_limit", node_limit=1)
+
+    assert "(truncated at node_limit=1" not in result
+
+
 async def test_tree_include_abstract_renders_directory_abstracts(service, monkeypatch):
     captured = {}
 
     async def fake_tree(uri, **kwargs):
         captured.update(kwargs)
-        return [
-            {
-                "rel_path": "pr-review",
-                "isDir": True,
-                "abstract": "name: pr-review\ndescription: Review a PR diff",
-            },
-            {"rel_path": "pr-review/SKILL.md", "isDir": False, "size": 42, "abstract": ""},
-        ]
+        return ListingPage(
+            entries=[
+                {
+                    "rel_path": "pr-review",
+                    "isDir": True,
+                    "abstract": "name: pr-review\ndescription: Review a PR diff",
+                },
+                {"rel_path": "pr-review/SKILL.md", "isDir": False, "size": 42, "abstract": ""},
+            ],
+            has_more=False,
+        )
 
     monkeypatch.setattr(service.fs, "tree", fake_tree)
 
@@ -2381,26 +2416,29 @@ async def test_tree_include_abstract_renders_directory_abstracts(service, monkey
 
 async def test_tree_include_abstract_skips_not_ready_placeholders(service, monkeypatch):
     async def fake_tree(uri, **kwargs):
-        return [
-            {
-                "rel_path": "pdf",
-                "uri": "viking://user/test_user/skills/pdf",
-                "isDir": True,
-                "abstract": "name: pdf\ndescription: Fill PDF forms",
-            },
-            {
-                "rel_path": "pdf/scripts",
-                "uri": "viking://user/test_user/skills/pdf/scripts",
-                "isDir": True,
-                "abstract": "# viking://user/test_user/skills/pdf/scripts [Directory abstract is not ready]",
-            },
-            {
-                "rel_path": "pdf/references",
-                "uri": "viking://user/test_user/skills/pdf/references",
-                "isDir": True,
-                "abstract": "[.abstract.md is not ready]",
-            },
-        ]
+        return ListingPage(
+            entries=[
+                {
+                    "rel_path": "pdf",
+                    "uri": "viking://user/test_user/skills/pdf",
+                    "isDir": True,
+                    "abstract": "name: pdf\ndescription: Fill PDF forms",
+                },
+                {
+                    "rel_path": "pdf/scripts",
+                    "uri": "viking://user/test_user/skills/pdf/scripts",
+                    "isDir": True,
+                    "abstract": "# viking://user/test_user/skills/pdf/scripts [Directory abstract is not ready]",
+                },
+                {
+                    "rel_path": "pdf/references",
+                    "uri": "viking://user/test_user/skills/pdf/references",
+                    "isDir": True,
+                    "abstract": "[.abstract.md is not ready]",
+                },
+            ],
+            has_more=False,
+        )
 
     monkeypatch.setattr(service.fs, "tree", fake_tree)
 

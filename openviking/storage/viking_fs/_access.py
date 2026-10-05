@@ -24,6 +24,8 @@ from openviking.storage.acl import (
     AclEntry,
     AclLevel,
     AclMode,
+    AclSpec,
+    AclUpdate,
     acl_allows,
     acl_ancestors,
     has_implicit_manage,
@@ -34,6 +36,7 @@ from openviking.storage.acl import (
 from openviking.storage.internal_names import is_storage_internal_name
 from openviking_cli.exceptions import (
     FailedPreconditionError,
+    InvalidArgumentError,
     NotFoundError,
     PermissionDeniedError,
 )
@@ -95,6 +98,14 @@ class _AccessMixin:
             return ctx
         bound = self._bound_ctx.get()
         return bound or self._default_ctx()
+
+    def _require_request_context(self, ctx: Optional[RequestContext]) -> RequestContext:
+        """Resolve an account context without inventing the default account."""
+        if ctx is None and self._bound_ctx.get() is None:
+            raise RuntimeError(
+                "Account request context is required for account-scoped operations"
+            )
+        return self._ctx_or_default(ctx)
 
     @contextmanager
     def bind_request_context(self, ctx: RequestContext):
@@ -195,11 +206,7 @@ class _AccessMixin:
 
         effective = await acl_manager.resolve_many(pending, real_ctx) if pending else {}
         for uri in pending:
-            acl = effective[uri]
-            if not acl.enabled:
-                result[uri] = self._is_accessible(uri, real_ctx)
-            else:
-                result[uri] = acl_allows(acl, real_ctx, action)
+            result[uri] = acl_allows(effective[uri], real_ctx, action)
         return result
 
     async def _ensure_access(
@@ -222,7 +229,10 @@ class _AccessMixin:
         access = await self._can_access_many(uris, real_ctx, action=action)
         denied = next((uri for uri in uris if not access.get(uri, False)), None)
         if denied is not None:
-            raise PermissionDeniedError(f"Access denied for {denied}", resource=denied)
+            raise PermissionDeniedError(
+                f"Access denied for {denied}: {action.value} permission required",
+                resource=denied,
+            )
 
         if action is AclAction.READ:
             return
@@ -278,10 +288,13 @@ class _AccessMixin:
         acl_ancestors(uri)
         if has_implicit_manage(real_ctx, uri):
             return real_ctx
-        effective = await self.acl_manager.resolve(uri, real_ctx)
-        if effective.enabled and acl_allows(effective, real_ctx, AclAction.MANAGE):
-            return real_ctx
-        raise PermissionDeniedError(f"ACL management denied for {uri}", resource=uri)
+        if await self.acl_manager.is_enabled(real_ctx.account_id):
+            effective = await self.acl_manager.resolve(uri, real_ctx)
+            if acl_allows(effective, real_ctx, AclAction.MANAGE):
+                return real_ctx
+        raise PermissionDeniedError(
+            f"ACL management denied for {uri}: manage permission required", resource=uri
+        )
 
     async def _ensure_acl_target_exists(self, uri: str, ctx: RequestContext) -> bool:
         """Return whether the ACL target is a directory; raise if it is missing."""
@@ -313,6 +326,19 @@ class _AccessMixin:
         await self._ensure_acl_target_exists(uri, real_ctx)
         effective = await self.acl_manager.resolve(uri, real_ctx)
         return self.acl_manager.to_report(uri, effective)
+
+    async def prepare_acl_update(
+        self,
+        uri: str,
+        acl: AclSpec | Mapping[str, Any],
+        ctx: RequestContext,
+    ) -> AclUpdate:
+        """Authorize an explicit ACL against the permissions before the write."""
+        spec = AclSpec.model_validate(acl)
+        if len(acl_ancestors(uri)) == 1:
+            raise InvalidArgumentError("ACL cannot be set on viking://resources")
+        await self._ensure_acl_manage(uri, ctx)
+        return AclUpdate(uri=uri, acl=spec)
 
     async def set_acl(
         self,
@@ -527,6 +553,7 @@ class _AccessMixin:
         sort_by: Optional[str] = None,
         sort_order: str = "asc",
         ctx: Optional[RequestContext] = None,
+        directories_only: bool = False,
     ):
         """Yield one visible tree page after namespace and ACL filtering."""
         real_ctx = self._ctx_or_default(ctx)
@@ -562,6 +589,7 @@ class _AccessMixin:
                 offset=raw_offset,
                 sort_by=sort_by,
                 sort_order=sort_order,
+                directories_only=directories_only,
             )
             if not raw_entries:
                 return

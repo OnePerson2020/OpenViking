@@ -306,6 +306,25 @@ def test_semantic_plan_validates_ancestors_without_rescanning_entries():
     assert entries.iterations <= 4
 
 
+def test_semantic_plan_serialization_ignores_legacy_parent_propagation():
+    from openviking.storage.context_update_plan import (
+        SemanticPlan,
+        SemanticTreeEntry,
+        SemanticTreeSnapshot,
+    )
+
+    plan = SemanticPlan(
+        "viking://resources/repo",
+        "resource",
+        SemanticTreeSnapshot((SemanticTreeEntry("", "directory", "unchanged", "aggregate"),)),
+    )
+
+    serialized = plan.to_dict()
+
+    assert "propagation" not in serialized
+    assert SemanticPlan.from_dict({**serialized, "propagation": {"enabled": False}}) == plan
+
+
 def test_semantic_plan_rejects_missing_higher_ancestor_independent_of_entry_order():
     from openviking.storage.context_update_plan import (
         IndexSlot,
@@ -971,7 +990,377 @@ def test_healthy_noop_produces_no_actions_or_semantic_plan():
     assert plan.is_noop()
     assert plan.content_tree_actions == ()
     assert plan.semantic_plan is None
+
+
+def test_shared_semantic_closure_generates_complete_file_without_abstract():
+    """RNFV add_resources and RFV reindex share this closure rule."""
+    from openviking.storage.context_update_plan import (
+        ContentState,
+        IndexState,
+        SemanticAction,
+        build_context_update_plan,
+    )
+    from openviking.storage.resource_diff import ResourceDiffEntry, ResourceDiffResult
+    from openviking.storage.resource_rnfv import RequestIntent, VectorRecordSnapshot
+
+    root = "viking://resources/repo"
+    plan = build_context_update_plan(
+        root_uri=root,
+        context_type="resource",
+        request=RequestIntent(root, "semantic_and_vectors"),
+        diff=ResourceDiffResult(
+            {
+                "": ResourceDiffEntry(
+                    "",
+                    ContentState.UNCHANGED,
+                    IndexState.MISSING,
+                    old_kind="directory",
+                    new_kind="directory",
+                ),
+                "a.md": ResourceDiffEntry(
+                    "a.md",
+                    ContentState.UNCHANGED,
+                    IndexState.COMPLETE,
+                    old_kind="file",
+                    new_kind="file",
+                    md5="same",
+                ),
+            }
+        ),
+        new_kinds={"": "directory", "a.md": "file"},
+        artifact_paths={"a.md": "repository/a.md"},
+        records={"a-l2": VectorRecordSnapshot("a-l2", f"{root}/a.md", "a.md", 2, {"md5": "same"})},
+        is_code_repo=False,
+        account_id="acc",
+    )
+
+    entries = {entry.relative_path: entry for entry in plan.semantic_plan.tree.entries}
+    assert entries[""].semantic_action is SemanticAction.AGGREGATE
+    assert entries["a.md"].semantic_action is SemanticAction.GENERATE
     assert plan.direct_index_actions == ()
+
+
+@pytest.mark.asyncio
+async def test_healthy_rnfv_clear_request_produces_scalar_only_update():
+    from openviking.storage.context_update_plan import (
+        FieldPatch,
+        build_context_update_plan_from_snapshot,
+    )
+    from openviking.storage.resource_rnfv import (
+        FormalEntry,
+        FormalTreeSnapshot,
+        NewArtifactSnapshot,
+        NewEntry,
+        RequestIntent,
+        RNFVSnapshot,
+        VectorIndexSnapshot,
+        VectorRecordSnapshot,
+    )
+    from openviking.utils.ingest_options import IngestOptions
+
+    uri = "viking://resources/repo/a.txt"
+    ingest_options = IngestOptions.from_search_tags(None, mode="clear")
+    request = RequestIntent.from_ingest_options(
+        target_uri=uri,
+        processing_mode="vectors_only",
+        ingest_options=ingest_options,
+    )
+    snapshot = RNFVSnapshot(
+        request,
+        NewArtifactSnapshot({"": NewEntry(md5="same")}),
+        FormalTreeSnapshot({"": FormalEntry()}),
+        VectorIndexSnapshot(
+            {
+                "a-l2": VectorRecordSnapshot(
+                    "a-l2",
+                    uri,
+                    "",
+                    2,
+                    {"md5": "same", "search_tags": ["scope=old"]},
+                )
+            },
+            request.required_vector_fields(),
+        ),
+    )
+
+    diff, plan = await build_context_update_plan_from_snapshot(
+        snapshot=snapshot,
+        store=AsyncMock(),
+        artifact_ref=object(),
+        target=AsyncMock(),
+        vikingdb=AsyncMock(),
+        context_type="resource",
+        is_code_repo=False,
+        account_id="acc",
+        ctx=object(),
+        root_preexisting=True,
+        artifact_paths={"": "repository/a.txt"},
+        ingest_options=ingest_options,
+        root_is_file=True,
+    )
+
+    assert diff.entries[""].content_state.value == "unchanged"
+    assert request.scalar_intents[0].value == ()
+    assert request.required_vector_fields() >= {"search_tags"}
+    assert plan.content_tree_actions == ()
+    assert plan.semantic_plan is None
+    assert len(plan.direct_index_actions) == 1
+    action = plan.direct_index_actions[0]
+    assert action.action.value == "update_fields"
+    assert action.record_id == "a-l2"
+    assert action.field_patch == FieldPatch(
+        {"search_tags": ()},
+        {"search_tags": "replace"},
+        {
+            "uri": uri,
+            "account_id": "acc",
+            "level": 2,
+            "md5": "same",
+            "search_tags": [],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_healthy_rnfv_empty_replace_request_is_noop():
+    from openviking.storage.context_update_plan import build_context_update_plan_from_snapshot
+    from openviking.storage.resource_rnfv import (
+        FormalEntry,
+        FormalTreeSnapshot,
+        NewArtifactSnapshot,
+        NewEntry,
+        RequestIntent,
+        RNFVSnapshot,
+        VectorIndexSnapshot,
+        VectorRecordSnapshot,
+    )
+    from openviking.utils.ingest_options import IngestOptions
+
+    uri = "viking://resources/repo/a.txt"
+    ingest_options = IngestOptions.from_search_tags([], mode="replace")
+    request = RequestIntent.from_ingest_options(
+        target_uri=uri,
+        processing_mode="vectors_only",
+        ingest_options=ingest_options,
+    )
+    snapshot = RNFVSnapshot(
+        request,
+        NewArtifactSnapshot({"": NewEntry(md5="same")}),
+        FormalTreeSnapshot({"": FormalEntry()}),
+        VectorIndexSnapshot(
+            {
+                "a-l2": VectorRecordSnapshot(
+                    "a-l2",
+                    uri,
+                    "",
+                    2,
+                    {"md5": "same", "search_tags": ["scope=old"]},
+                )
+            },
+            request.required_vector_fields(),
+        ),
+    )
+
+    diff, plan = await build_context_update_plan_from_snapshot(
+        snapshot=snapshot,
+        store=AsyncMock(),
+        artifact_ref=object(),
+        target=AsyncMock(),
+        vikingdb=AsyncMock(),
+        context_type="resource",
+        is_code_repo=False,
+        account_id="acc",
+        ctx=object(),
+        root_preexisting=True,
+        artifact_paths={"": "repository/a.txt"},
+        ingest_options=ingest_options,
+        root_is_file=True,
+    )
+
+    assert diff.entries[""].content_state.value == "unchanged"
+    assert request.scalar_intents == ()
+    assert "search_tags" not in request.required_vector_fields()
+    assert plan.is_noop()
+
+
+def test_healthy_directory_rnfv_clear_updates_all_vector_levels():
+    from openviking.storage.context_update_plan import (
+        ContentState,
+        IndexState,
+        build_context_update_plan,
+    )
+    from openviking.storage.resource_diff import ResourceDiffEntry, ResourceDiffResult
+    from openviking.storage.resource_rnfv import (
+        RequestIntent,
+        VectorRecordSnapshot,
+    )
+    from openviking.utils.ingest_options import IngestOptions
+
+    root = "viking://resources/repo"
+    request = RequestIntent.from_ingest_options(
+        target_uri=root,
+        processing_mode="semantic_and_vectors",
+        ingest_options=IngestOptions.from_search_tags(None, mode="clear"),
+    )
+    records = {
+        "root-l0": VectorRecordSnapshot("root-l0", root, "", 0, {"search_tags": ["scope=old"]}),
+        "root-l1": VectorRecordSnapshot("root-l1", root, "", 1, {"search_tags": ["scope=old"]}),
+        "a-l2": VectorRecordSnapshot(
+            "a-l2",
+            root + "/a.py",
+            "a.py",
+            2,
+            {"md5": "same", "search_tags": ["scope=old"]},
+        ),
+    }
+
+    plan = build_context_update_plan(
+        root_uri=root,
+        context_type="resource",
+        request=request,
+        diff=ResourceDiffResult(
+            {
+                "": ResourceDiffEntry(
+                    "",
+                    ContentState.UNCHANGED,
+                    IndexState.COMPLETE,
+                    old_kind="directory",
+                    new_kind="directory",
+                ),
+                "a.py": ResourceDiffEntry(
+                    "a.py",
+                    ContentState.UNCHANGED,
+                    IndexState.COMPLETE,
+                    old_kind="file",
+                    new_kind="file",
+                    md5="same",
+                ),
+            }
+        ),
+        new_kinds={"": "directory", "a.py": "file"},
+        artifact_paths={"a.py": "repository/a.py"},
+        records=records,
+        is_code_repo=False,
+        account_id="acc",
+    )
+
+    assert plan.content_tree_actions == ()
+    assert plan.semantic_plan is None
+    assert {
+        (action.record_id, action.level, action.action.value)
+        for action in plan.direct_index_actions
+    } == {
+        ("root-l0", 0, "update_fields"),
+        ("root-l1", 1, "update_fields"),
+        ("a-l2", 2, "update_fields"),
+    }
+    assert all(
+        action.field_patch.values == {"search_tags": []}
+        and action.field_patch.modes == {"search_tags": "replace"}
+        for action in plan.direct_index_actions
+    )
+
+
+@pytest.mark.parametrize("existing_tags", [None, []])
+def test_healthy_rnfv_clear_is_noop_when_vector_has_no_tags(existing_tags):
+    from openviking.storage.context_update_plan import (
+        ContentState,
+        IndexState,
+        build_context_update_plan,
+    )
+    from openviking.storage.resource_diff import ResourceDiffEntry, ResourceDiffResult
+    from openviking.storage.resource_rnfv import RequestIntent, VectorRecordSnapshot
+    from openviking.utils.ingest_options import IngestOptions
+
+    root = "viking://resources/repo"
+    fields = {"md5": "same"}
+    if existing_tags is not None:
+        fields["search_tags"] = existing_tags
+    request = RequestIntent.from_ingest_options(
+        target_uri=root,
+        processing_mode="vectors_only",
+        ingest_options=IngestOptions.from_search_tags(None, mode="clear"),
+    )
+    plan = build_context_update_plan(
+        root_uri=root,
+        context_type="resource",
+        request=request,
+        diff=ResourceDiffResult(
+            {
+                "a.py": ResourceDiffEntry(
+                    "a.py",
+                    ContentState.UNCHANGED,
+                    IndexState.COMPLETE,
+                    old_kind="file",
+                    new_kind="file",
+                    md5="same",
+                )
+            }
+        ),
+        new_kinds={"a.py": "file"},
+        artifact_paths={"a.py": "repository/a.py"},
+        records={"a-l2": VectorRecordSnapshot("a-l2", root + "/a.py", "a.py", 2, fields)},
+        is_code_repo=False,
+        account_id="acc",
+    )
+
+    assert plan.is_noop()
+
+
+@pytest.mark.parametrize(
+    ("existing_tags", "expected_update"),
+    [
+        (["scope=old"], True),
+        (["scope=new"], False),
+        (None, True),
+        ([], True),
+    ],
+)
+def test_healthy_rnfv_non_empty_replace_compares_against_vector_tags(
+    existing_tags, expected_update
+):
+    from openviking.storage.context_update_plan import (
+        ContentState,
+        IndexState,
+        build_context_update_plan,
+    )
+    from openviking.storage.resource_diff import ResourceDiffEntry, ResourceDiffResult
+    from openviking.storage.resource_rnfv import RequestIntent, VectorRecordSnapshot
+    from openviking.utils.ingest_options import IngestOptions
+
+    root = "viking://resources/repo"
+    fields = {"md5": "same"}
+    if existing_tags is not None:
+        fields["search_tags"] = existing_tags
+    request = RequestIntent.from_ingest_options(
+        target_uri=root,
+        processing_mode="vectors_only",
+        ingest_options=IngestOptions.from_search_tags(["scope=new"], mode="replace"),
+    )
+    plan = build_context_update_plan(
+        root_uri=root,
+        context_type="resource",
+        request=request,
+        diff=ResourceDiffResult(
+            {
+                "a.py": ResourceDiffEntry(
+                    "a.py",
+                    ContentState.UNCHANGED,
+                    IndexState.COMPLETE,
+                    old_kind="file",
+                    new_kind="file",
+                    md5="same",
+                )
+            }
+        ),
+        new_kinds={"a.py": "file"},
+        artifact_paths={"a.py": "repository/a.py"},
+        records={"a-l2": VectorRecordSnapshot("a-l2", root + "/a.py", "a.py", 2, fields)},
+        is_code_repo=False,
+        account_id="acc",
+    )
+
+    assert bool(plan.direct_index_actions) is expected_update
 
 
 @pytest.mark.asyncio
@@ -1601,19 +1990,58 @@ def test_vectors_only_missing_index_for_existing_content_uses_partial_update_rep
     assert plan.direct_index_actions[0].action.value == "merge"
 
 
-def test_vectors_only_partial_repair_preserves_explicit_replace_empty_tags():
+def test_vectors_only_partial_repair_ignores_explicit_replace_empty_tags():
     from openviking.storage.context_update_plan import build_context_update_plan
     from openviking.storage.resource_diff import ResourceDiffEntry, ResourceDiffResult
-    from openviking.storage.resource_rnfv import RequestIntent, ScalarIntent
+    from openviking.storage.resource_rnfv import RequestIntent
+    from openviking.utils.ingest_options import IngestOptions
 
     root = "viking://resources/repo"
     plan = build_context_update_plan(
         root_uri=root,
         context_type="resource",
-        request=RequestIntent(
-            root,
-            "vectors_only",
-            scalar_intents=(ScalarIntent("search_tags", "replace", ()),),
+        request=RequestIntent.from_ingest_options(
+            target_uri=root,
+            processing_mode="vectors_only",
+            ingest_options=IngestOptions.from_search_tags([], mode="replace"),
+        ),
+        diff=ResourceDiffResult(
+            {
+                "a.py": ResourceDiffEntry(
+                    "a.py",
+                    "unchanged",
+                    "missing",
+                    old_kind="file",
+                    new_kind="file",
+                    md5="same",
+                )
+            }
+        ),
+        new_kinds={"a.py": "file"},
+        artifact_paths={"a.py": "repository/a.py"},
+        records={},
+        is_code_repo=False,
+        account_id="acc",
+    )
+
+    assert len(plan.direct_index_actions) == 1
+    assert plan.direct_index_actions[0].field_patch is None
+
+
+def test_vectors_only_partial_repair_preserves_clear_tags_intent():
+    from openviking.storage.context_update_plan import build_context_update_plan
+    from openviking.storage.resource_diff import ResourceDiffEntry, ResourceDiffResult
+    from openviking.storage.resource_rnfv import RequestIntent
+    from openviking.utils.ingest_options import IngestOptions
+
+    root = "viking://resources/repo"
+    plan = build_context_update_plan(
+        root_uri=root,
+        context_type="resource",
+        request=RequestIntent.from_ingest_options(
+            target_uri=root,
+            processing_mode="vectors_only",
+            ingest_options=IngestOptions.from_search_tags(None, mode="clear"),
         ),
         diff=ResourceDiffResult(
             {
@@ -2209,6 +2637,11 @@ async def test_resource_processor_dispatches_direct_index_actions_without_semant
     )
     monkeypatch.setattr("openviking.storage.queuefs.get_queue_manager", lambda: queue_manager)
     monkeypatch.setattr("openviking.utils.embedding_utils._enqueue_embedding_message", enqueue)
+    vectorize_directory = AsyncMock(return_value={0, 1})
+    monkeypatch.setattr(
+        "openviking.utils.resource_processor.vectorize_directory_meta",
+        vectorize_directory,
+    )
     processor = ResourceProcessor(SimpleNamespace(get_embedder=lambda: None))
     processor._vectorize_resource_file = AsyncMock()
     ctx = RequestContext(UserIdentifier("acc", "user"), Role.USER)
@@ -2226,6 +2659,16 @@ async def test_resource_processor_dispatches_direct_index_actions_without_semant
                 ),
             ),
             DirectIndexAction(
+                "update_fields",
+                "viking://resources/repo/clear.py",
+                2,
+                "id-clear",
+                field_patch=FieldPatch(
+                    {"search_tags": []},
+                    {"search_tags": "replace"},
+                ),
+            ),
+            DirectIndexAction(
                 "merge",
                 "viking://resources/repo/c.py",
                 2,
@@ -2235,24 +2678,142 @@ async def test_resource_processor_dispatches_direct_index_actions_without_semant
                     {"search_tags": "append"},
                 ),
                 md5="new-md5",
+                summary="existing summary",
+            ),
+            DirectIndexAction(
+                "merge",
+                "viking://resources/repo",
+                0,
+                "repo-l0",
+                field_patch=FieldPatch(
+                    {"search_tags": ["scope=new"]},
+                    {"search_tags": "replace"},
+                ),
+                md5="abstract-md5",
+            ),
+            DirectIndexAction(
+                "upsert",
+                "viking://resources/repo",
+                1,
+                "repo-l1",
+                md5="overview-md5",
             ),
         ),
         ctx=ctx,
+        source_contents={
+            ("viking://resources/repo/c.py", 2): b"print('current')",
+            ("viking://resources/repo", 0): "current abstract",
+            ("viking://resources/repo", 1): "current overview",
+        },
     )
-    assert [msg.action.value for msg in enqueued] == ["delete", "update_fields"]
+    assert [msg.action.value for msg in enqueued] == [
+        "delete",
+        "update_fields",
+        "update_fields",
+    ]
     assert enqueued[0].record_ids == ["id-a"]
     assert enqueued[1].update_fields["search_tags"] == ["scope=new"]
+    assert enqueued[2].record_ids == ["id-clear"]
+    assert enqueued[2].update_fields["search_tags"] == []
+    assert enqueued[2].field_modes == {"search_tags": "replace"}
     processor._vectorize_resource_file.assert_awaited_once_with(
         "viking://resources/repo/c.py",
         ctx=ctx,
         file_md5="new-md5",
+        ingest_options=None,
         scalar_override={"_record_id": "id-c"},
         action="merge",
         field_patch=FieldPatch(
             {"search_tags": ["scope=new"]},
             {"search_tags": "append"},
         ),
+        summary="existing summary",
+        file_content=b"print('current')",
     )
+    vectorize_directory.assert_awaited_once_with(
+        "viking://resources/repo",
+        "current abstract",
+        "current overview",
+        context_type="resource",
+        ctx=ctx,
+        include_abstract=True,
+        include_overview=True,
+        content_is_body=True,
+        actions={0: "merge", 1: "upsert"},
+        scalar_overrides={
+            0: {"_record_id": "repo-l0"},
+            1: {"_record_id": "repo-l1"},
+        },
+        field_patches={
+            0: FieldPatch(
+                {"search_tags": ["scope=new"]},
+                {"search_tags": "replace"},
+            )
+        },
+        md5s={0: "abstract-md5", 1: "overview-md5"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_resource_processor_rejects_direct_upsert_without_snapshot_source():
+    from openviking.server.identity import RequestContext, Role
+    from openviking.storage.context_update_plan import DirectIndexAction
+    from openviking.utils.resource_processor import ResourceProcessor
+    from openviking_cli.session.user_id import UserIdentifier
+
+    processor = ResourceProcessor(SimpleNamespace(get_embedder=lambda: None))
+    ctx = RequestContext(UserIdentifier("acc", "user"), Role.USER)
+
+    with pytest.raises(ValueError, match="directory L0 vector source is unavailable"):
+        await processor._enqueue_index_actions(
+            (
+                DirectIndexAction(
+                    "upsert",
+                    "viking://resources/repo",
+                    0,
+                    "repo-l0",
+                    md5="abstract-md5",
+                ),
+            ),
+            ctx=ctx,
+            source_contents={},
+        )
+
+
+@pytest.mark.asyncio
+async def test_resource_processor_preserves_skill_metadata_in_direct_directory_merge(monkeypatch):
+    from openviking.server.identity import RequestContext, Role
+    from openviking.storage.context_update_plan import DirectIndexAction
+    from openviking.utils.resource_processor import ResourceProcessor
+    from openviking_cli.session.user_id import UserIdentifier
+
+    vectorize_directory = AsyncMock(return_value={0})
+    monkeypatch.setattr(
+        "openviking.utils.resource_processor.vectorize_directory_meta", vectorize_directory
+    )
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.get_queue_manager",
+        lambda: SimpleNamespace(EMBEDDING="embedding", get_queue=lambda *a, **k: object()),
+    )
+    processor = ResourceProcessor(SimpleNamespace(get_embedder=lambda: None))
+    ctx = RequestContext(UserIdentifier("acc", "owner"), Role.USER)
+    uri = "viking://user/owner/skills/demo"
+
+    await processor._enqueue_index_actions(
+        (DirectIndexAction("merge", uri, 0, "skill-l0", md5="new"),),
+        ctx=ctx,
+        source_contents={
+            (uri, 0): "name: demo\ndescription: Demo\ntags: [tool]\nallowed_tools: [Read]",
+        },
+    )
+
+    meta = vectorize_directory.await_args.kwargs["meta"]
+    assert meta == {
+        "name": "demo",
+        "description": "Demo",
+        "tags": ["tool"],
+        "allowed_tools": ["Read"],
+    }
 
 
 def test_semantic_message_roundtrip_uses_explicit_plan():
@@ -2884,6 +3445,7 @@ async def test_direct_only_plan_skips_semantic_queue(monkeypatch):
 async def test_vectors_only_context_plan_does_not_run_legacy_vectorization(monkeypatch):
     from openviking.server.identity import RequestContext, Role
     from openviking.storage.context_update_plan import ContextUpdatePlan, DirectIndexAction
+    from openviking.utils.ingest_options import IngestOptions
     from openviking.utils.resource_processor import ResourceProcessor
     from openviking_cli.session.user_id import UserIdentifier
 
@@ -2917,7 +3479,9 @@ async def test_vectors_only_context_plan_does_not_run_legacy_vectorization(monke
     )
 
     processor._enqueue_index_actions.assert_awaited_once_with(
-        plan.direct_index_actions, ctx=processor._enqueue_index_actions.await_args.kwargs["ctx"]
+        plan.direct_index_actions,
+        ctx=processor._enqueue_index_actions.await_args.kwargs["ctx"],
+        ingest_options=IngestOptions(),
     )
     processor._vectorize_prepared_files.assert_not_awaited()
 
@@ -2982,7 +3546,7 @@ async def test_semantic_processor_runs_only_plan_execution_roots(monkeypatch):
         root_write_result = None
 
         def __init__(self, **kwargs):
-            calls.append(("init", kwargs["semantic_plan"]))
+            calls.append(("init", kwargs))
 
         async def run(self, uri):
             calls.append(("run", uri))
@@ -3059,7 +3623,8 @@ async def test_semantic_processor_runs_only_plan_execution_roots(monkeypatch):
         "openviking.storage.queuefs.semantic_processor.SemanticLockScope.resolve",
         AsyncMock(return_value=SimpleNamespace(lock=None, close=AsyncMock())),
     )
-    processor = SemanticProcessor()
+    resolver = SimpleNamespace(get_vlm=AsyncMock())
+    processor = SemanticProcessor(vlm_resolver=resolver)
     processor._cleanup_local_artifact = AsyncMock()
     msg = SemanticMsg(
         uri=root,
@@ -3068,11 +3633,13 @@ async def test_semantic_processor_runs_only_plan_execution_roots(monkeypatch):
         user_id="user",
         role="user",
         plan=plan,
+        generation_trigger="reindex",
     )
 
     await processor.on_dequeue(msg.to_dict())
 
     assert [value for kind, value in calls if kind == "run"] == [root]
+    assert calls[0][1]["generation_trigger"] == "reindex"
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,6 @@
 # 示例：LLM Wiki
 
-把一批异构来源编译成一套 Karpathy 风格、有出处、互相链接的 **LLM Wiki**：每一页有明确的检索目的，开头一句话直给结论，术语统一，关系显式，证据紧贴结论，并由一个 `index.md` 做导航入口。
+将不同来源的材料整理成 Karpathy 风格的 LLM Wiki，即互相链接的 Markdown 知识库。每页围绕一个实体、概念或问题，先给结论，再列出处；`index.md` 提供导航。
 
 这套 Skill 会按页面的检索目的挑选最合适的页面类型：
 
@@ -13,9 +13,11 @@
 | `analysis` | 围绕一个问题的跨来源结论 |
 | `summary` | 单一来源的忠实数字化摘要（仅当 `--instruction` 明确要求时才生成） |
 
-默认以 `entity` 和 `concept` 为主，其余类型只在满足各自的严格判定时才提升。产物是一个**知识库**，不是逐文档的摘要拼盘。
+默认生成 `entity` 和 `concept` 页面，其他类型按 Skill 中的条件生成。多个来源中的相关内容会合并到同一主题下。
 
 Skill 源码：[examples/compile/ov-compile-skills/llm-wiki](https://github.com/volcengine/OpenViking/tree/main/examples/compile/ov-compile-skills/llm-wiki) · 可视化脚本：[examples/compile/graph-show/llm-wiki](https://github.com/volcengine/OpenViking/tree/main/examples/compile/graph-show/llm-wiki)
+
+先确认[前置条件](01-overview.md#前置条件)，并在 OpenViking 仓库根目录运行以下命令。来源目录需替换为自己的资料目录。
 
 ## 第一步：准备来源
 
@@ -23,7 +25,7 @@ Skill 源码：[examples/compile/ov-compile-skills/llm-wiki](https://github.com/
 
 ```bash
 # 导入一个目录作为来源
-ov add-resource ./my-research --to viking://resources/research
+ov add-resource ./my-research --to viking://resources/research --wait
 
 # 或者写入单个文件
 ov mkdir viking://resources/research
@@ -39,17 +41,17 @@ ov ls -r viking://resources/research
 
 ## 第二步：添加 Skill
 
-把 LLM Wiki 的 Skill 装进服务。默认落到你的用户私有 skills 命名空间；想让团队共用就用 `-p viking://agent/skills`：
+本例将 Skill 安装到共享目录 `viking://agent/skills`，与后面的编译命令保持一致。省略 `-p` 会安装到用户私有目录，此时应把 `--skill` 改为安装返回的 URI：
 
 ```bash
-ov add-skill examples/compile/ov-compile-skills/llm-wiki
+ov add-skill examples/compile/ov-compile-skills/llm-wiki -p viking://agent/skills --wait
 ```
 
 查看装好的 Skill URI：
 
 ```bash
 ov skills list
-# → viking://agent/skills/llm-wiki  （或 viking://user/<你>/skills/llm-wiki）
+# → viking://agent/skills/llm-wiki
 ```
 
 ## 第三步：执行编译
@@ -79,7 +81,7 @@ ov task cancel cmp_01abc      # 协作式取消
 
 主代理在收集子任务结果时获得草稿目录，保存合并计划时只收到统计、本次成功保存的分配变更和问题预览。完整分配、任务说明和检查点保存在 `__compile_staging__/merge-state.json`。内部工具 `merge_compile_drafts` 支持只读 `view` 查询：`drafts`、`unassigned`、`groups`、`failures`、`conflicts`，以及配合准确 `group_name` 的 `group` 查询。列表通过 `offset`、`limit` 分页（默认 20 条，最多 50 条），`next_offset` 表示后续页面。主代理压缩上下文后可通过这些查询恢复细节，最终覆盖校验始终使用完整状态。
 
-## 第四步：看看产物
+## 第四步：查看产物
 
 最终校验错误会连同最多 3 轮的修复倒计时返回主代理。修复仍失败时，Compile 将最终输出目录中所有已生成文件原样写入目标，包括未通过内容或合并校验的文件。写入成功后任务完成，不报告未完成部分；本次输出未涉及的已有目标文件保持不变。
 

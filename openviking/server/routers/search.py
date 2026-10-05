@@ -8,11 +8,12 @@ import json
 import math
 from typing import Any, Dict, List, Literal, Optional, Sequence, Union
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi import Response as FastAPIResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from openviking.core.path_variables import resolve_path_variables
+from openviking.core.retrieval_types import SearchType
 from openviking.core.uri_validation import validate_request_viking_uri
 from openviking.pyagfs.exceptions import AGFSClientError, AGFSNotFoundError
 from openviking.retrieve.context_assembler import (
@@ -45,6 +46,7 @@ from openviking.utils.search_filters import (
     merge_search_filter,
 )
 from openviking.utils.tags import build_search_tags_filter
+from openviking.utils.time_decay import validate_event_time_decay_request
 from openviking_cli.exceptions import InvalidArgumentError, NotFoundError
 
 
@@ -216,6 +218,15 @@ class FindRequest(BaseModel):
     level: Optional[Union[int, str, List[int]]] = None
     read_content: bool = False
     telemetry: TelemetryRequest = False
+    events_time_decay_protection: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_time_decay(self) -> "FindRequest":
+        validate_event_time_decay_request(self.events_time_decay_protection)
+        if self.events_time_decay_protection is not None:
+            if not self.query.strip() and not self.image_url:
+                raise ValueError("events_time_decay_protection requires a semantic query or image")
+        return self
 
 
 def _reject_unknown_categories(value: Any, label: str, allowed: Sequence[str]) -> None:
@@ -284,6 +295,7 @@ class SearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = ""
+    search_type: SearchType = "semantic"
     image_url: Optional[str] = None
     target_uri: Union[str, List[str]] = ""
     context_type: Optional[Union[str, List[str]]] = None
@@ -301,6 +313,7 @@ class SearchRequest(BaseModel):
     level: Optional[Union[int, str, List[int]]] = None
     read_content: bool = False
     telemetry: TelemetryRequest = False
+    events_time_decay_protection: Optional[str] = None
 
     mode: Literal["list", "context"] = "list"
 
@@ -318,6 +331,12 @@ class SearchRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_mode(self) -> "SearchRequest":
+        validate_event_time_decay_request(self.events_time_decay_protection)
+        if self.search_type == "keywords":
+            if not self.query.strip():
+                raise ValueError("query must not be empty when search_type='keywords'")
+            if self.image_url:
+                raise ValueError("image_url is not supported when search_type='keywords'")
         if self.mode == "list":
             error = context_only_fields_error(self.model_fields_set)
             if error:
@@ -426,6 +445,7 @@ class GlobRequest(BaseModel):
 @router.post("/find")
 async def find(
     request: FindRequest,
+    http_request: Request,
     _ctx: RequestContext = Depends(get_request_context),
 ):
     """Semantic search without session context."""
@@ -453,6 +473,7 @@ async def find(
             filter=effective_filter,
             level=_resolve_levels(request.level) or None,
             image_url=resolved_image_url,
+            events_time_decay_protection=request.events_time_decay_protection,
         ),
     )
     result = execution.result
@@ -461,6 +482,7 @@ async def find(
     if request.read_content:
         result = await _inline_read_content(result, service=service, ctx=_ctx)
     result = _sanitize_floats(result)
+    http_request.state.retrieval_result_count = result.get("total", 0)
     return Response(
         status="ok",
         result=result,
@@ -485,16 +507,19 @@ async def _search_context(
     service: Any,
     ctx: RequestContext,
     request: SearchRequest,
+    http_request: Request,
     effective_filter: Optional[Dict[str, Any]],
     actual_limit: int,
 ):
     """Assemble an injection-ready context block for one request."""
     params = AssembleParams(
         query=request.query,
+        search_type=request.search_type,
         image_url=_resolve_image_url(request.image_url, ctx),
         limit=actual_limit,
         score_threshold=request.score_threshold,
         filter=effective_filter,
+        events_time_decay_protection=request.events_time_decay_protection,
         session_id=request.session_id,
         query_expansion=request.query_expansion,
         max_tokens=request.max_tokens,
@@ -517,6 +542,7 @@ async def _search_context(
     ignored = _context_ignored_fields(request)
     if ignored:
         result.stats["ignored"] = ignored
+    http_request.state.retrieval_result_count = len(result.entries)
     return Response(
         status="ok",
         result=_sanitize_floats(result.to_dict()),
@@ -527,6 +553,7 @@ async def _search_context(
 @router.post("/search")
 async def search(
     request: SearchRequest,
+    http_request: Request,
     _ctx: RequestContext = Depends(get_request_context),
 ):
     """Semantic search with optional session context."""
@@ -545,6 +572,7 @@ async def search(
             service=service,
             ctx=_ctx,
             request=request,
+            http_request=http_request,
             effective_filter=effective_filter,
             actual_limit=actual_limit,
         )
@@ -559,6 +587,7 @@ async def search(
             await session.load()
         return await service.search.search(
             query=request.query,
+            search_type=request.search_type,
             ctx=_ctx,
             target_uri=resolved_target_uri,
             session=session,
@@ -567,6 +596,7 @@ async def search(
             filter=effective_filter,
             level=_resolve_levels(request.level) or None,
             image_url=resolved_image_url,
+            events_time_decay_protection=request.events_time_decay_protection,
         )
 
     execution = await run_operation(
@@ -580,6 +610,7 @@ async def search(
     if request.read_content:
         result = await _inline_read_content(result, service=service, ctx=_ctx)
     result = _sanitize_floats(result)
+    http_request.state.retrieval_result_count = result.get("total", 0)
     return Response(
         status="ok",
         result=result,

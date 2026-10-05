@@ -454,6 +454,13 @@ class EmbeddingModelConfig(BaseModel):
 
             return get_cohere_model_default_dimension(model)
 
+        if provider == "jina":
+            from openviking.models.embedder.jina_embedders import (
+                get_jina_model_default_dimension,
+            )
+
+            return get_jina_model_default_dimension(model)
+
         if provider == "gemini":
             from openviking.models.embedder.gemini_embedders import GeminiDenseEmbedder
 
@@ -476,7 +483,7 @@ class EmbeddingModelConfig(BaseModel):
             except ImportError:
                 return 1024
 
-        # Providers without a known dimension lookup (volcengine, jina,
+        # Providers without a known dimension lookup (volcengine,
         # vikingdb, ollama for unlisted models, etc.) cannot be cross-checked
         # here without an explicit dimension. Return None so validation skips
         # them; same-provider credentials are typically dimension-compatible
@@ -539,6 +546,13 @@ class EmbeddingModelConfig(BaseModel):
             )
 
             return get_cohere_model_default_dimension(effective_model)
+
+        if provider == "jina":
+            from openviking.models.embedder.jina_embedders import (
+                get_jina_model_default_dimension,
+            )
+
+            return get_jina_model_default_dimension(effective_model)
 
         if provider == "gemini":
             from openviking.models.embedder.gemini_embedders import GeminiDenseEmbedder
@@ -1039,6 +1053,9 @@ class EmbeddingConfig(BaseModel):
         if self.dense:
             return self._create_single_or_failover_embedder("dense", self.dense)
 
+        if self.sparse:
+            return self._create_single_or_failover_embedder("sparse", self.sparse)
+
         raise ValueError("No embedding configuration found (dense, sparse, or hybrid)")
 
     def _create_single_or_failover_embedder(
@@ -1112,6 +1129,8 @@ class EmbeddingConfig(BaseModel):
             return self.hybrid.get_effective_dimension()
         if self.dense:
             return self.dense.get_effective_dimension()
+        if self.sparse:
+            return self.sparse.get_effective_dimension()
         return 2048
 
     @staticmethod

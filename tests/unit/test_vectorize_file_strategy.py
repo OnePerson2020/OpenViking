@@ -53,6 +53,11 @@ class DummyFS:
         self.read_calls = []
         self.read_file_calls = 0
         self.read_file_bytes_calls = 0
+        self.vector_store = self
+        self._vector_config_resolver = self
+
+    async def resolve(self, account_id):
+        return types.SimpleNamespace(embedding=embedding_utils.get_openviking_config().embedding)
 
     async def read(self, _path, offset=0, size=-1, ctx=None):
         self.read_calls.append((offset, size))
@@ -318,6 +323,33 @@ async def test_vectorize_image_downsamples_large_embedding_input(monkeypatch):
     assert max(width, height) <= 64
     assert fs.content == original
     assert fs.read_file_bytes_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_vectorize_image_uses_supplied_bytes_without_second_read(monkeypatch):
+    queue = DummyQueue()
+    original = _jpeg_bytes(20, 20)
+    fs = DummyFS(b"must not be read")
+    monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
+    monkeypatch.setattr(embedding_utils, "get_viking_fs", lambda: fs)
+    monkeypatch.setattr(
+        embedding_utils,
+        "get_openviking_config",
+        lambda: types.SimpleNamespace(
+            embedding=types.SimpleNamespace(text_source="content_only", max_input_tokens=1000),
+            image=ImageConfig(preview_max_dimension=64, max_file_size_mb=100.0),
+        ),
+    )
+
+    await embedding_utils.vectorize_file(
+        file_path="viking://resources/docs/image.jpg",
+        summary_dict={"name": "image.jpg", "summary": "image"},
+        parent_uri="viking://resources/docs",
+        ctx=DummyReq(),
+        file_content=original,
+    )
+
+    assert fs.read_file_bytes_calls == 0
 
 
 @pytest.mark.asyncio
@@ -671,6 +703,26 @@ async def test_vectorize_directory_meta_applies_merge_per_level(monkeypatch):
     assert "_upsert_options" not in queue.items[0].context_data
     assert queue.items[0].action.value == "merge"
     assert queue.items[1].action.value == "upsert"
+
+
+@pytest.mark.asyncio
+async def test_vectorize_directory_meta_writes_per_level_source_md5(monkeypatch):
+    queue = DummyQueue()
+    monkeypatch.setattr(embedding_utils, "get_queue_manager", lambda: DummyQueueManager(queue))
+    monkeypatch.setattr(embedding_utils, "get_viking_fs", lambda: DummyFS("ignored"))
+
+    await embedding_utils.vectorize_directory_meta(
+        uri="viking://user/default/resources/demo",
+        abstract="demo abstract",
+        overview="demo overview",
+        ctx=DummyReq(),
+        md5s={0: "abstract-md5", 1: "overview-md5"},
+    )
+
+    assert [item.context_data["md5"] for item in queue.items] == [
+        "abstract-md5",
+        "overview-md5",
+    ]
 
 
 @pytest.mark.asyncio

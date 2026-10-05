@@ -1,7 +1,6 @@
 import { isCaptureEnabled } from "./shared/capture-utils.mjs";
 import { buildProfileBlock } from "./shared/profile-inject.mjs";
 import { buildRecallBlock, isRecallEnabled } from "./shared/recall-core.mjs";
-import { deriveHarnessSessionId } from "./shared/session-model.mjs";
 import {
   dequeue,
   enqueue,
@@ -12,16 +11,18 @@ import { isRetryableFailure } from "./shared/retryable.mjs";
 import { resolveEffectivePeerId } from "./shared/workspace-peer.mjs";
 import {
   captureEvent,
-  OPENVIKING_PLUGIN_SOURCE,
+  isOpenVikingPluginMessage,
   pluginMessage,
   promptText,
 } from "./capture.mjs";
+import { deriveDshSessionId } from "./session-id.mjs";
 
 export class OpenVikingRuntime {
-  constructor(client, config, logger = console) {
+  constructor(client, config, logger = console, resolveSessionPeer = null) {
     this.client = client;
     this.config = config;
     this.logger = logger;
+    this.resolveSessionPeer = resolveSessionPeer;
     this.states = new Map();
     this.drainTimer = null;
     this.drainRunning = false;
@@ -33,7 +34,7 @@ export class OpenVikingRuntime {
     let state = this.states.get(session.id);
     if (state) return state;
     const cwd = session.header?.cwd || process.cwd();
-    const peer = resolveEffectivePeerId({
+    const peer = this.resolveSessionPeer?.(cwd) ?? resolveEffectivePeerId({
       cfg: {
         peerId: this.config.explicitPeerId,
         peerSource: this.config.peerSource,
@@ -44,7 +45,7 @@ export class OpenVikingRuntime {
     });
     state = {
       dshSessionId: String(session.id),
-      ovSessionId: deriveHarnessSessionId("dsh-", String(session.id)),
+      ovSessionId: deriveDshSessionId(session.id),
       config: { ...this.config, peerId: peer.peerId, legacyPeerId: peer.legacyPeerId },
       ready: false,
       profileBlock: "",
@@ -139,6 +140,7 @@ export class OpenVikingRuntime {
         actorPeerId: state.config.peerId,
         legacyPeerId: state.config.legacyPeerId,
         sessionId: state.ovSessionId,
+        excludeUris: state.config.recallExcludeUris,
         log: (stage, data) => this.log(stage, data),
       },
     );
@@ -420,7 +422,6 @@ function hasStartupProfile(agent) {
 }
 
 function isStartupProfile(message) {
-  return message?.source?.kind === "plugin"
-    && message.source.plugin === OPENVIKING_PLUGIN_SOURCE
+  return isOpenVikingPluginMessage(message)
     && message.source.form === "instructions";
 }

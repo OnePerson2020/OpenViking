@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
+// SPDX-License-Identifier: AGPL-3.0
+
 import { OpenVikingError } from "./errors.js";
 import {
   nodeImagePathToDataURI,
@@ -8,6 +11,7 @@ import {
 import { OpenVikingTransport, type TransportOptions } from "./transport.js";
 import type {
   AddResourceOptions,
+  AclSpec,
   BatchAddMessagesOptions,
   BatchWriteOperation,
   BatchWriteOptions,
@@ -23,12 +27,14 @@ import type {
   GitCommitOptions,
   GitRestoreOptions,
   JsonObject,
+  ListPage,
   ListOptions,
   GetSkillOptions,
   GrepOptions,
   GlobOptions,
   ImportPackOptions,
   Message,
+  ObserverFormat,
   PreflightAssetOptions,
   ReindexOptions,
   RequestOptions,
@@ -39,6 +45,7 @@ import type {
   SetTagsOptions,
   TaskListOptions,
   TreeOptions,
+  TreePage,
   UpdateSessionConfigOptions,
   UpdateWatchOptions,
   WaitOptions,
@@ -156,7 +163,11 @@ export class OpenVikingClient {
           ? options.args
           : undefined,
       tags: options.tags,
-      tag_mode: options.tags ? options.tagMode : undefined,
+      acl: options.acl,
+      tag_mode:
+        options.tags !== undefined || options.tagMode === "clear"
+          ? (options.tagMode ?? "replace")
+          : undefined,
       telemetry: options.telemetry,
     });
     const local = await nodePathToBlob(source);
@@ -181,7 +192,9 @@ export class OpenVikingClient {
       target_uri: options.targetUri,
     });
     const local =
-      typeof source === "string" ? await nodePathToBlob(source) : undefined;
+      typeof source === "string"
+        ? await nodePathToBlob(source, { allowInlineContent: true })
+        : undefined;
     if (local)
       body.temp_file_id = await this.upload(local.blob, local.filename);
     else body.data = source;
@@ -272,7 +285,9 @@ export class OpenVikingClient {
       telemetry: options.telemetry,
     });
     const local =
-      typeof source === "string" ? await nodePathToBlob(source) : undefined;
+      typeof source === "string"
+        ? await nodePathToBlob(source, { allowInlineContent: true })
+        : undefined;
     if (local)
       body.temp_file_id = await this.upload(local.blob, local.filename);
     else body.data = source;
@@ -378,6 +393,9 @@ export class OpenVikingClient {
       image_url: imageUrl,
       session_id:
         kind === "search" ? (options as SearchOptions).sessionId : undefined,
+      events_time_decay_protection: options.eventsTimeDecayProtection,
+      search_type:
+        kind === "search" ? (options as SearchOptions).searchType : undefined,
       limit: options.limit,
       node_limit: options.nodeLimit,
       score_threshold: options.scoreThreshold,
@@ -407,6 +425,7 @@ export class OpenVikingClient {
     const body = compact({
       query,
       mode: "context",
+      search_type: options.searchType,
       image_url: imageUrl,
       session_id: options.sessionId,
       limit: options.limit,
@@ -419,6 +438,7 @@ export class OpenVikingClient {
       since: options.since,
       until: options.until,
       time_field: options.timeField,
+      events_time_decay_protection: options.eventsTimeDecayProtection,
       query_expansion: options.queryExpansion,
       max_tokens: options.maxTokens,
       quotas: options.quotas,
@@ -476,41 +496,74 @@ export class OpenVikingClient {
     });
   }
   /** List directory contents. */
-  list(uri: string, options: ListOptions = {}): Promise<unknown[]> {
-    return this.request("GET", "/api/v1/fs/ls", {
-      query: {
-        uri: normalizeURI(uri),
-        simple: options.simple ?? false,
-        recursive: options.recursive ?? false,
-        output: options.output ?? "original",
-        abs_limit: options.absLimit ?? 256,
-        show_all_hidden: options.showAllHidden ?? false,
-        node_limit: options.nodeLimit ?? 1000,
-        offset: options.offset,
-        limit: options.limit,
-        sort_by: options.sortBy,
-        sort_order: options.sortOrder,
-        tags: options.tags,
-        include_tags: options.includeTags || undefined,
+  async list(uri: string, options: ListOptions = {}): Promise<unknown[]> {
+    return (await this.listPage(uri, options)).result;
+  }
+  /** List directory contents with pagination metadata. */
+  async listPage(uri: string, options: ListOptions = {}): Promise<ListPage> {
+    const envelope = await this.transport.requestEnvelope<unknown[]>(
+      "GET",
+      "/api/v1/fs/ls",
+      {
+        query: {
+          uri: normalizeURI(uri),
+          simple: options.simple ?? false,
+          recursive: options.recursive ?? false,
+          output: options.output ?? "original",
+          abs_limit: options.absLimit ?? 256,
+          include_abstract: options.includeAbstract,
+          include_overview: options.includeOverview,
+          overview_limit: options.overviewLimit ?? 4000,
+          show_all_hidden: options.showAllHidden ?? false,
+          node_limit: options.nodeLimit ?? 1000,
+          offset: options.offset,
+          limit: options.limit,
+          sort_by: options.sortBy,
+          sort_order: options.sortOrder,
+          extra_fields: options.extraFields,
+          tags: options.tags,
+          include_tags: options.includeTags || undefined,
+        },
       },
-    });
+    );
+    return {
+      result: envelope.result ?? [],
+      hasMore: envelope.has_more ?? false,
+    };
   }
   /** Return a directory tree. */
-  tree(uri: string, options: TreeOptions = {}): Promise<JsonObject[]> {
-    return this.request("GET", "/api/v1/fs/tree", {
-      query: {
-        uri: normalizeURI(uri),
-        output: options.output ?? "original",
-        abs_limit: options.absLimit ?? 128,
-        show_all_hidden: options.showAllHidden ?? false,
-        node_limit: options.nodeLimit ?? 1000,
-        level_limit: options.levelLimit ?? 3,
-        offset: options.offset,
-        limit: options.limit,
-        tags: options.tags,
-        include_tags: options.includeTags || undefined,
+  async tree(uri: string, options: TreeOptions = {}): Promise<JsonObject[]> {
+    return (await this.treePage(uri, options)).result;
+  }
+  /** Return a directory tree with pagination metadata. */
+  async treePage(uri: string, options: TreeOptions = {}): Promise<TreePage> {
+    const envelope = await this.transport.requestEnvelope<JsonObject[]>(
+      "GET",
+      "/api/v1/fs/tree",
+      {
+        query: {
+          uri: normalizeURI(uri),
+          output: options.output ?? "original",
+          abs_limit: options.absLimit ?? 128,
+          include_abstract: options.includeAbstract,
+          include_overview: options.includeOverview,
+          overview_limit: options.overviewLimit ?? 4000,
+          show_all_hidden: options.showAllHidden ?? false,
+          directories_only: options.directoriesOnly || undefined,
+          node_limit: options.nodeLimit ?? 1000,
+          level_limit: options.levelLimit ?? 3,
+          offset: options.offset,
+          limit: options.limit,
+          extra_fields: options.extraFields,
+          tags: options.tags,
+          include_tags: options.includeTags || undefined,
+        },
       },
-    });
+    );
+    return {
+      result: envelope.result ?? [],
+      hasMore: envelope.has_more ?? false,
+    };
   }
   /** Return URI metadata. */
   stat(uri: string): Promise<JsonObject> {
@@ -525,9 +578,38 @@ export class OpenVikingClient {
     });
   }
   /** Create a directory. */
-  mkdir(uri: string, description?: string): Promise<void> {
+  mkdir(uri: string, description?: string, acl?: AclSpec): Promise<void> {
     return this.request("POST", "/api/v1/fs/mkdir", {
-      body: compact({ uri: normalizeURI(uri), description }),
+      body: compact({ uri: normalizeURI(uri), description, acl }),
+    });
+  }
+  aclGet(uri: string): Promise<JsonObject> {
+    return this.request("GET", "/api/v1/acl", {
+      query: { uri: normalizeURI(uri) },
+    });
+  }
+  aclSet(uri: string, acl: AclSpec): Promise<JsonObject> {
+    return this.request("PUT", "/api/v1/acl", {
+      body: { uri: normalizeURI(uri), ...acl },
+    });
+  }
+  aclGrant(
+    uri: string,
+    principal: string,
+    level: "read" | "write" | "manage",
+  ): Promise<JsonObject> {
+    return this.request("POST", "/api/v1/acl/grant", {
+      body: { uri: normalizeURI(uri), principal, level },
+    });
+  }
+  aclRevoke(uri: string, principal: string): Promise<JsonObject> {
+    return this.request("POST", "/api/v1/acl/revoke", {
+      body: { uri: normalizeURI(uri), principal },
+    });
+  }
+  aclDelete(uri: string): Promise<JsonObject> {
+    return this.request("DELETE", "/api/v1/acl", {
+      query: { uri: normalizeURI(uri) },
     });
   }
   /** Remove a resource or directory. */
@@ -596,8 +678,11 @@ export class OpenVikingClient {
       mode: options.mode,
       processing_mode: options.processingMode,
       tags: options.tags,
+      acl: options.acl,
       tag_mode:
-        options.tags === undefined ? undefined : (options.tagMode ?? "replace"),
+        options.tags !== undefined || options.tagMode === "clear"
+          ? (options.tagMode ?? "replace")
+          : undefined,
       wait: options.wait,
       timeout: options.timeout,
       telemetry: options.telemetry,
@@ -633,7 +718,7 @@ export class OpenVikingClient {
   /** Set retrieval tags. */
   setTags(
     uri: string,
-    tags: string[],
+    tags?: string[],
     options: SetTagsOptions = {},
   ): Promise<JsonObject> {
     const body = compact({
@@ -659,14 +744,16 @@ export class OpenVikingClient {
       uri: normalizeURI(uri),
       mode: options.mode ?? "vectors_only",
       wait: options.wait ?? true,
-      dry_run: options.dryRun ?? false,
+      force: options.force || undefined,
       recursive: options.recursive ?? true,
       tags: options.tags,
       tag_mode:
-        options.tags === undefined ? undefined : (options.tagMode ?? "replace"),
+        options.tags !== undefined || options.tagMode === "clear"
+          ? (options.tagMode ?? "replace")
+          : undefined,
     });
     return this.request("POST", "/api/v1/content/reindex", {
-      body: mergeExtra(body, options.extra, ["tags", "tag_mode"]),
+      body: mergeExtra(body, options.extra, ["force", "tags", "tag_mode"]),
     });
   }
 
@@ -1016,20 +1103,28 @@ export class OpenVikingClient {
     });
   }
   /** Return aggregate observer status. */
-  getStatus(): Promise<JsonObject> {
-    return this.request("GET", "/api/v1/observer/system");
+  getStatus(format?: ObserverFormat): Promise<JsonObject> {
+    return this.request("GET", "/api/v1/observer/system", {
+      query: { format },
+    });
   }
   /** Return queue observer status. */
-  queueStatus(): Promise<JsonObject> {
-    return this.request("GET", "/api/v1/observer/queue");
+  queueStatus(format?: ObserverFormat): Promise<JsonObject> {
+    return this.request("GET", "/api/v1/observer/queue", {
+      query: { format },
+    });
   }
   /** Return VikingDB observer status. */
-  vikingDBStatus(): Promise<JsonObject> {
-    return this.request("GET", "/api/v1/observer/vikingdb");
+  vikingDBStatus(format?: ObserverFormat): Promise<JsonObject> {
+    return this.request("GET", "/api/v1/observer/vikingdb", {
+      query: { format },
+    });
   }
   /** Return model observer status. */
-  modelsStatus(): Promise<JsonObject> {
-    return this.request("GET", "/api/v1/observer/models");
+  modelsStatus(format?: ObserverFormat): Promise<JsonObject> {
+    return this.request("GET", "/api/v1/observer/models", {
+      query: { format },
+    });
   }
   /** Return whether the observer system reports healthy. */
   async isHealthy(): Promise<boolean> {
@@ -1178,7 +1273,12 @@ export class OpenVikingClient {
   /** List users in an account, in creation order. `name` supports wildcard (* and ?) matching. */
   adminListUsers(
     accountId: string,
-    options: { limit?: number; name?: string; role?: string; page?: number } = {},
+    options: {
+      limit?: number;
+      name?: string;
+      role?: string;
+      page?: number;
+    } = {},
   ): Promise<unknown[]> {
     return this.request(
       "GET",

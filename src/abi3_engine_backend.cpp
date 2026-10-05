@@ -799,6 +799,14 @@ bool parse_search_request(PyObject* obj, vdb::SearchRequest* request) {
   }
   Py_XDECREF(value);
 
+  if (!get_named_value(obj, "time_decay", &value, &found)) {
+    return false;
+  }
+  if (found && !py_to_string(value, &request->time_decay, false)) {
+    Py_DECREF(value);
+    return false;
+  }
+  Py_XDECREF(value);
   return true;
 }
 
@@ -1325,13 +1333,14 @@ PyObject* py_init_logging(PyObject*, PyObject* args, PyObject* kwargs) {
 
 PyObject* py_new_index_engine(PyObject*, PyObject* args) {
   const char* path_or_json = nullptr;
-  if (!PyArg_ParseTuple(args, "s", &path_or_json)) {
+  int normalize_vector = 0;
+  if (!PyArg_ParseTuple(args, "s|p", &path_or_json, &normalize_vector)) {
     return nullptr;
   }
 
   try {
-    return PyCapsule_New(new vdb::IndexEngine(path_or_json), kIndexCapsuleName,
-                         index_capsule_destructor);
+    return PyCapsule_New(new vdb::IndexEngine(path_or_json, normalize_vector != 0),
+                         kIndexCapsuleName, index_capsule_destructor);
   } catch (const std::exception& exc) {
     raise_runtime_error(exc.what());
     return nullptr;

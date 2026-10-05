@@ -93,6 +93,17 @@ export const KNOBS = [
   { name: "logRankingDetails", type: "bool", default: false, env: "OPENVIKING_LOG_RANKING_DETAILS", capability: "recall" },
   { name: "recallLedger", type: "bool", default: true, env: "OPENVIKING_RECALL_LEDGER", capability: "recall" },
   { name: "recallQueryFilters", type: "list", default: [], env: "OPENVIKING_RECALL_QUERY_FILTERS", capability: "recall" },
+  // Subtree URIs the recall search must never return. Without this there is no
+  // way to keep generated directory files (viking://user/<space>/skills,
+  // viking://user/<space>/resources, viking://agent/skills) out of the hits:
+  // they match like ordinary content and carry only boilerplate text.
+  {
+    name: "recallExcludeUris",
+    type: "list",
+    default: [],
+    env: "OPENVIKING_RECALL_EXCLUDE_URIS",
+    capability: "recall",
+  },
 
   // Digest compression. Claude Code reads this as the tri-state
   // off/client/server/auto through `normalizeRewriteMode`; Codex reads the same
@@ -133,7 +144,9 @@ export const KNOBS = [
   // conversation extracts noticeably worse.
   { name: "captureAssistantTurns", type: "bool", default: true, env: "OPENVIKING_CAPTURE_ASSISTANT_TURNS", capability: "capture" },
   { name: "captureLastAssistantOnStop", type: "bool", default: true, env: "OPENVIKING_CAPTURE_LAST_ASSISTANT_ON_STOP", capability: "capture" },
-  { name: "captureToolResults", type: "bool", default: false, env: "OPENVIKING_CAPTURE_TOOL_RESULTS", capability: "capture" },
+  // dsh is the only reader. Its Experience usage records need the completed
+  // tool results, so it captures them by default.
+  { name: "captureToolResults", type: "bool", default: false, harness: { dsh: true }, env: "OPENVIKING_CAPTURE_TOOL_RESULTS", capability: "capture" },
   { name: "captureFilters", type: "list", default: [], env: "OPENVIKING_CAPTURE_FILTERS", capability: "capture" },
   // 0 means "derive from timeoutMs": a write gets a longer budget than a read.
   { name: "captureTimeoutMs", type: "int", default: 0, min: 0, max: 600000, env: "OPENVIKING_CAPTURE_TIMEOUT_MS", capability: "capture" },
@@ -243,6 +256,7 @@ export const HARNESS_KEYS = {
   claudeCode: "claude_code",
   codex: "codex",
   cursor: "cursor",
+  kimicode: "kimicode",
   trae: "trae",
   traeCn: "trae_cn",
   zcode: "zcode",

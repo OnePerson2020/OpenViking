@@ -3,6 +3,7 @@
 """Admin endpoints for OpenViking multi-tenant HTTP Server."""
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any, Optional
 
 from fastapi import APIRouter, Body, Depends, Path, Query, Request
@@ -14,10 +15,12 @@ from openviking.server.api_keys.models import validate_account_user_role
 from openviking.server.auth import (
     get_api_key_manager_or_raise,
     get_request_context,
+    registry_watcher_running,
     require_auth_root,
     require_auth_root_or_admin,
+    should_expose_user_key,
 )
-from openviking.server.config import ServerConfig, UserConfig
+from openviking.server.config import UserConfig
 from openviking.server.dependencies import get_service
 from openviking.server.identity import RequestContext, Role
 from openviking.server.models import Response
@@ -137,6 +140,34 @@ class ConfigPatchRequest(BaseModel):
     settings: dict[str, Any] = Field(default_factory=dict)
 
 
+_ROOT_ONLY_ACCOUNT_CONFIG_SECTIONS = frozenset({"vlm", "query_planner", "embedding", "vectordb"})
+
+
+def _authorize_account_config_patch(
+    ctx: RequestContext,
+    settings: Mapping[str, object],
+) -> None:
+    restricted = _ROOT_ONLY_ACCOUNT_CONFIG_SECTIONS.intersection(settings)
+    if restricted and ctx.role != Role.ROOT:
+        fields = ", ".join(sorted(restricted))
+        raise PermissionDeniedError(
+            f"Only ROOT can modify account configuration fields: {fields}"
+        )
+
+
+def _visible_account_config(
+    ctx: RequestContext,
+    settings: Mapping[str, object],
+) -> dict[str, object]:
+    if ctx.role == Role.ROOT:
+        return dict(settings)
+    return {
+        key: value
+        for key, value in settings.items()
+        if key not in _ROOT_ONLY_ACCOUNT_CONFIG_SECTIONS
+    }
+
+
 class UserSettingsPatch(BaseModel):
     memory_policy: Optional[dict]
 
@@ -206,19 +237,6 @@ def _get_runtime_config_manager():
     return manager
 
 
-def _should_expose_user_key(request: Request) -> bool:
-    config = getattr(request.app.state, "config", None)
-    if not isinstance(config, ServerConfig):
-        return True
-    return config.get_effective_auth_mode() != "trusted"
-
-
-def _registry_watcher_running(request: Request) -> bool:
-    plugin = getattr(request.app.state, "auth_plugin", None)
-    watch_task = getattr(plugin, "_watch_task", None)
-    return watch_task is not None and not watch_task.done()
-
-
 def _check_account_access(ctx: RequestContext, account_id: str) -> None:
     """ADMIN can only operate on their own account."""
     if ctx.role == Role.ADMIN and ctx.account_id != account_id:
@@ -231,7 +249,7 @@ async def _check_account_exists(
     manager = getattr(request.app.state, "api_key_manager", None)
     if manager is None:
         return None
-    watcher_running = _registry_watcher_running(request)
+    watcher_running = registry_watcher_running(request)
     if not watcher_running:
         await manager.refresh_accounts_from_store()
     accounts = manager.get_accounts()
@@ -338,6 +356,11 @@ async def _rollback_account_creation(
             return
 
     rollback_errors: list[Exception] = []
+    try:
+        await service.release_account_vector_resources(account_id)
+    except Exception as exc:
+        rollback_errors.append(exc)
+        logger.exception("Failed to release vector resources for account %s", account_id)
     if runtime_config is not None:
         try:
             await runtime_config.delete_account(account_id)
@@ -441,14 +464,12 @@ async def create_account(
     await _validate_initial_user_config(service, account_ctx, body.user_config)
     # Reject bad initial config before any storage is created, so a failed
     # create leaves nothing behind. This validates the active account runtime
-    # field surface without persisting. Only needed when initial settings exist.
-    runtime_config = None
-    if body.settings:
-        runtime_config = _get_runtime_config_manager()
-        try:
-            runtime_config.validate_initial_settings(body.account_id, body.settings)
-        except (ConfigPatchError, ValueError) as exc:
-            raise InvalidArgumentError(str(exc)) from exc
+    # field surface and inherited vector configuration without persisting.
+    runtime_config = _get_runtime_config_manager()
+    try:
+        runtime_config.validate_initial_settings(body.account_id, body.settings or {})
+    except (ConfigPatchError, ValueError) as exc:
+        raise InvalidArgumentError(str(exc)) from exc
     manager = _get_api_key_manager(request)
     user_key = await manager.create_account(
         body.account_id,
@@ -456,8 +477,6 @@ async def create_account(
         seed=body.seed,
     )
     try:
-        await service.initialize_account_workspace(account_ctx)
-        await _write_initial_user_config(service, account_ctx, body.user_config)
         if body.settings and runtime_config is not None:
             # Persist the pre-validated override.
             await runtime_config.patch_account(
@@ -465,6 +484,8 @@ async def create_account(
                 body.settings,
                 creating=True,
             )
+        await service.initialize_account_workspace(account_ctx)
+        await _write_initial_user_config(service, account_ctx, body.user_config)
     except BaseException:
         await _rollback_account_creation(
             service,
@@ -479,7 +500,7 @@ async def create_account(
         "account_id": body.account_id,
         "admin_user_id": body.admin_user_id,
     }
-    if _should_expose_user_key(request):
+    if should_expose_user_key(request):
         result["user_key"] = user_key
     return Response(status="ok", result=result)
 
@@ -496,7 +517,7 @@ async def list_accounts(
 ):
     """List accounts in creation order. `name` supports wildcard (* and ?) matching."""
     manager = _get_api_key_manager(request)
-    if not _registry_watcher_running(request):
+    if not registry_watcher_running(request):
         await manager.refresh_accounts_from_store()
     accounts = manager.get_accounts(name_filter=name, limit=limit, page=page, query_filter=query)
     return Response(status="ok", result=accounts)
@@ -637,7 +658,10 @@ async def get_account_configuration(
     )
     return Response(
         status="ok",
-        result={"account_id": account_id, "settings": settings},
+        result={
+            "account_id": account_id,
+            "settings": _visible_account_config(ctx, settings),
+        },
     )
 
 
@@ -759,6 +783,7 @@ async def patch_account_configuration(
     """Apply a three-state PATCH to the account configuration layer."""
     _check_account_access(ctx, account_id)
     await _check_account_exists(request, account_id)
+    _authorize_account_config_patch(ctx, body.settings)
     try:
         await _get_runtime_config_manager().patch_account(account_id, body.settings)
     except (ConfigPatchError, ValueError) as exc:
@@ -768,7 +793,10 @@ async def patch_account_configuration(
     )
     return Response(
         status="ok",
-        result={"account_id": account_id, "settings": settings},
+        result={
+            "account_id": account_id,
+            "settings": _visible_account_config(ctx, settings),
+        },
     )
 
 
@@ -834,7 +862,7 @@ async def register_user(
         "account_id": account_id,
         "user_id": body.user_id,
     }
-    if _should_expose_user_key(request):
+    if should_expose_user_key(request):
         result["user_key"] = user_key
     return Response(status="ok", result=result)
 
@@ -861,9 +889,9 @@ async def list_users(
     """List users in an account, in creation order. `name` supports wildcard (* and ?) matching."""
     _check_account_access(ctx, account_id)
     manager = _get_api_key_manager(request)
-    if not _registry_watcher_running(request):
+    if not registry_watcher_running(request):
         await manager.refresh_account_users_from_store(account_id)
-    expose_key = _should_expose_user_key(request)
+    expose_key = should_expose_user_key(request)
     users = manager.get_users_page(
         account_id,
         limit=limit,

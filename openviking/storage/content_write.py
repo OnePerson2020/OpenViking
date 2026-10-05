@@ -9,7 +9,7 @@ import binascii
 import hashlib
 import os
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional
 
 from openviking.core.namespace import (
@@ -38,7 +38,7 @@ from openviking.storage.abstract_overview import (
     plan_abstract_overview_refresh,
     prepare_abstract_overview_write,
 )
-from openviking.storage.acl import AclAction, CreatorAclGrant
+from openviking.storage.acl import AclAction, AclSpec
 from openviking.storage.errors import LockAcquisitionError, ResourceBusyError
 from openviking.storage.internal_names import is_storage_internal_name
 from openviking.storage.queuefs import SemanticMsg, get_queue_manager
@@ -51,7 +51,10 @@ from openviking.telemetry.resource_summary import build_queue_status_payload
 from openviking.utils.content_hash import content_md5
 from openviking.utils.embedding_utils import vectorize_directory_meta, vectorize_file
 from openviking.utils.ingest_options import IngestOptions
-from openviking.utils.path_safety import validate_safe_viking_uri_path
+from openviking.utils.path_safety import (
+    normalize_storage_target_uri,
+    validate_safe_viking_uri_path,
+)
 from openviking.utils.tags import normalize_search_tags
 from openviking_cli.exceptions import (
     AlreadyExistsError,
@@ -130,13 +133,21 @@ class ContentWriteCoordinator:
         processing_mode: ProcessingMode = DEFAULT_PROCESSING_MODE,
         tags: list[str] | None = None,
         tag_mode: str = "replace",
+        acl: AclSpec | Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         self._validate_mode(mode)
         processing_mode = normalize_processing_mode(processing_mode)
-        normalized_uri = self._validate_uri_path(uri, field_name="uri")
+        normalized_uri = normalize_storage_target_uri(
+            self._validate_uri_path(uri, field_name="uri")
+        )
         self._ensure_content_write_policy(normalized_uri)
         await self._viking_fs._ensure_access(normalized_uri, ctx, action=AclAction.WRITE)
         ingest_options = IngestOptions.from_search_tags(tags, mode=tag_mode)
+        if acl is not None:
+            ingest_options = replace(
+                ingest_options,
+                acl_update=await self._viking_fs.prepare_acl_update(normalized_uri, acl, ctx),
+            )
 
         if mode == "create":
             return await self._create_and_write(
@@ -734,24 +745,45 @@ class ContentWriteCoordinator:
     ) -> Dict[str, Any]:
         self._validate_tag_mode(mode)
         normalized_uri = self._validate_uri_path(uri, field_name="uri")
-        normalized_tags = normalize_search_tags(tags, discard_invalid=True)
+        requested_mode = mode
+        normalized_tags = (
+            [] if requested_mode == "clear" else normalize_search_tags(tags, discard_invalid=True)
+        )
         await self._viking_fs._ensure_access(normalized_uri, ctx, action=AclAction.WRITE)
         stat = await self._safe_stat(normalized_uri, ctx=ctx)
+        context_type = context_type_for_uri(normalized_uri)
+        root_uri = await self._resolve_root_uri(normalized_uri, ctx=ctx)
+        if requested_mode == "replace" and not normalized_tags:
+            return self._build_tags_result(
+                uri=normalized_uri,
+                updated_uris=[],
+                skipped_count=1,
+                failed_count=0,
+                root_uri=root_uri,
+                context_type=context_type,
+                tags=normalized_tags,
+                mode=requested_mode,
+            )
+        storage_mode = "replace" if requested_mode == "clear" else requested_mode
         if stat.get("isDir"):
-            return await self._set_directory_tags(
+            result = await self._set_directory_tags(
                 uri=normalized_uri,
                 tags=normalized_tags,
-                mode=mode,
+                mode=storage_mode,
                 recursive=recursive,
                 ctx=ctx,
             )
-        return await self._set_single_uri_tags(
-            uri=normalized_uri,
-            tags=normalized_tags,
-            mode=mode,
-            recursive=recursive,
-            ctx=ctx,
-        )
+        else:
+            result = await self._set_single_uri_tags(
+                uri=normalized_uri,
+                tags=normalized_tags,
+                mode=storage_mode,
+                recursive=recursive,
+                ctx=ctx,
+            )
+        result["mode"] = requested_mode
+        result["tags"] = normalized_tags
+        return result
 
     def _build_write_result(
         self,
@@ -906,7 +938,6 @@ class ContentWriteCoordinator:
                     uri=uri,
                     context_type=context_type,
                     ctx=ctx,
-                    creator_acl_grant=(CreatorAclGrant.DIRECT if mode == "create" else None),
                     ingest_options=ingest_options,
                     file_md5=content_md5(final_content),
                 )
@@ -924,6 +955,10 @@ class ContentWriteCoordinator:
                     file_abstract=file_abstract,
                 )
                 post_process_started = True
+            if ingest_options and ingest_options.acl_update:
+                await self._viking_fs.acl_manager.apply_indexed_update(
+                    ingest_options.acl_update, ctx
+                )
             await self._viking_fs._async_agfs.pathlock_release(lease)
             lock_released = True
             queue_status = (
@@ -1019,7 +1054,6 @@ class ContentWriteCoordinator:
         uri: str,
         context_type: str,
         ctx: RequestContext,
-        creator_acl_grant: CreatorAclGrant | None = None,
         ingest_options: IngestOptions | None = None,
         file_md5: str | None = None,
     ) -> bool:
@@ -1033,7 +1067,6 @@ class ContentWriteCoordinator:
             parent_uri=parent.uri,
             context_type=context_type,
             ctx=ctx,
-            creator_acl_grant=creator_acl_grant,
             ingest_options=ingest_options,
             file_md5=file_md5,
         )
@@ -1096,7 +1129,7 @@ class ContentWriteCoordinator:
             raise InvalidArgumentError(f"unsupported batch-write mode: {mode}")
 
     def _validate_tag_mode(self, mode: str) -> None:
-        if mode not in {"replace", "append"}:
+        if mode not in {"replace", "append", "clear"}:
             raise InvalidArgumentError(f"unsupported tag mode: {mode}")
 
     def _ensure_content_write_policy(self, uri: str) -> None:

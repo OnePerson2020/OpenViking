@@ -8,6 +8,7 @@ Provides file system operations: ls, mkdir, rm, mv, tree, stat, read, abstract, 
 
 import asyncio
 from collections.abc import Coroutine
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Literal, Optional
 
 from openviking.core.context import ContextLevel
@@ -33,7 +34,7 @@ from openviking.storage.abstract_overview import (
     plan_abstract_overview_refresh,
     render_abstract_overview,
 )
-from openviking.storage.acl import AclAction, AclMode, CreatorAclGrant
+from openviking.storage.acl import AclAction, AclMode, AclSpec
 from openviking.storage.content_write import ContentWriteCoordinator
 from openviking.storage.expr import And, Eq, In, Or
 from openviking.storage.internal_names import is_storage_internal_name
@@ -47,16 +48,25 @@ from openviking.telemetry import get_current_telemetry
 from openviking.telemetry.request_wait_tracker import get_request_wait_tracker
 from openviking.telemetry.resource_summary import build_queue_status_payload
 from openviking.utils.embedding_utils import vectorize_directory_meta
+from openviking.utils.ingest_options import IngestOptions
+from openviking.utils.path_safety import validate_safe_viking_uri_path
 from openviking.utils.tags import normalize_search_tags
 from openviking_cli.exceptions import (
     DeadlineExceededError,
     InvalidArgumentError,
+    NotFoundError,
     NotInitializedError,
 )
 from openviking_cli.utils import VikingURI, get_logger
 from openviking_cli.utils.config import get_openviking_config
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class ListingPage:
+    entries: List[Any]
+    has_more: bool
 
 
 def _may_include_memory_content(uri: str) -> bool:
@@ -199,7 +209,7 @@ class FSService:
         include_tags: bool,
         offset: int,
         node_limit: int,
-    ) -> List[Dict[str, Any]]:
+    ) -> ListingPage:
         """Collect a visible page after tag filtering.
 
         Args:
@@ -211,31 +221,32 @@ class FSService:
             node_limit: Maximum matched entries to return.
 
         Returns:
-            The requested page of tag-filtered entries.
+            The requested page and whether more matched entries are available.
         """
         if node_limit <= 0:
             entries = await fetch_page(0, None)
             entries = await self._attach_and_filter_tags(entries, ctx, tags, include_tags)
-            return entries[offset:]
+            return ListingPage(entries=entries[offset:], has_more=False)
 
         batch_size = max(node_limit, 256)
+        probe_limit = node_limit + 1
         source_offset = 0
         remaining_offset = offset
         result: List[Dict[str, Any]] = []
-        while len(result) < node_limit:
+        while len(result) < probe_limit:
             entries = await fetch_page(source_offset, batch_size)
             filtered = await self._attach_and_filter_tags(entries, ctx, tags, include_tags)
             if remaining_offset >= len(filtered):
                 remaining_offset -= len(filtered)
             else:
                 result.extend(
-                    filtered[remaining_offset : remaining_offset + node_limit - len(result)]
+                    filtered[remaining_offset : remaining_offset + probe_limit - len(result)]
                 )
                 remaining_offset = 0
             if len(entries) < batch_size:
                 break
             source_offset += len(entries)
-        return result
+        return ListingPage(entries=result[:node_limit], has_more=len(result) > node_limit)
 
     async def ls(
         self,
@@ -245,6 +256,9 @@ class FSService:
         simple: bool = False,
         output: str = "original",
         abs_limit: int = 256,
+        include_abstract: Optional[bool] = None,
+        include_overview: Optional[bool] = None,
+        overview_limit: int = 4000,
         show_all_hidden: bool = False,
         node_limit: int = 1000,
         level_limit: int = 3,
@@ -254,7 +268,7 @@ class FSService:
         tags: Optional[List[str]] = None,
         include_tags: bool = False,
         offset: int = 0,
-    ) -> List[Any]:
+    ) -> ListingPage:
         """List directory contents.
 
         Args:
@@ -262,7 +276,10 @@ class FSService:
             recursive: List all subdirectories recursively
             simple: Return only relative path list
             output: str = "original" or "agent"
-            abs_limit: int = 256 if output == "agent" else ignore
+            abs_limit: Maximum returned abstract length
+            include_abstract: Include directory L0 abstracts; defaults to the output format
+            include_overview: Include directory L1 overviews
+            overview_limit: Maximum returned overview length
             show_all_hidden: bool = False (list all hidden files, like -a)
             node_limit: int = 1000 (maximum number of nodes to list)
             sort_by: Optional sort field for non-recursive listings
@@ -279,31 +296,37 @@ class FSService:
                 return await viking_fs.tree(
                     uri,
                     ctx=ctx,
-                    output="original" if tags or use_simple_paths else output,
+                    output="original",
                     abs_limit=abs_limit,
+                    include_abstract=None,
+                    include_overview=False,
+                    overview_limit=overview_limit,
                     show_all_hidden=show_all_hidden,
                     node_limit=page_limit,
                     level_limit=level_limit,
                     offset=page_offset,
                     sort_by=sort_by,
                     sort_order=sort_order,
-                    extra_fields=None if tags or use_simple_paths else extra_fields,
+                    extra_fields=None,
                 )
             return await viking_fs.ls(
                 uri,
                 ctx=ctx,
-                output="original" if tags or use_simple_paths else output,
+                output="original",
                 abs_limit=abs_limit,
+                include_abstract=None,
+                include_overview=False,
+                overview_limit=overview_limit,
                 show_all_hidden=show_all_hidden,
                 node_limit=page_limit,
                 offset=page_offset,
                 sort_by=sort_by,
                 sort_order=sort_order,
-                extra_fields=None if tags or use_simple_paths else extra_fields,
+                extra_fields=None,
             )
 
         if tags:
-            entries = await self._collect_tagged_page(
+            page = await self._collect_tagged_page(
                 fetch_page,
                 ctx,
                 tags,
@@ -312,22 +335,41 @@ class FSService:
                 node_limit,
             )
         else:
-            entries = await fetch_page(offset, node_limit)
+            fetch_limit = node_limit + 1 if node_limit > 0 else node_limit
+            entries = await fetch_page(offset, fetch_limit)
             entries = await self._attach_and_filter_tags(
                 entries, ctx, None, include_tags or "tags" in extra_fields
             )
-        if use_simple_paths:
-            return [entry.get("uri", "") for entry in entries]
-        if tags and (output != "original" or extra_fields):
-            return await viking_fs._finalize_listing_entries(
-                entries,
-                output,
-                abs_limit,
-                extra_fields,
-                recursive,
-                ctx=ctx,
+            page = ListingPage(
+                entries=entries[:node_limit] if node_limit > 0 else entries,
+                has_more=node_limit > 0 and len(entries) > node_limit,
             )
-        return entries
+        if use_simple_paths:
+            return ListingPage(
+                entries=[entry.get("uri", "") for entry in page.entries],
+                has_more=page.has_more,
+            )
+        if (
+            output != "original"
+            or extra_fields
+            or include_abstract is True
+            or include_overview is True
+        ):
+            return ListingPage(
+                entries=await viking_fs._finalize_listing_entries(
+                    page.entries,
+                    output,
+                    abs_limit,
+                    extra_fields,
+                    recursive,
+                    ctx=ctx,
+                    include_abstract=include_abstract,
+                    include_overview=include_overview is True,
+                    overview_limit=overview_limit,
+                ),
+                has_more=page.has_more,
+            )
+        return page
 
     @staticmethod
     def _reject_storage_internal_target(uri: str) -> None:
@@ -340,50 +382,60 @@ class FSService:
         uri: str,
         ctx: RequestContext,
         description: Optional[str] = None,
+        acl: AclSpec | Dict[str, Any] | None = None,
     ) -> None:
         """Create directory."""
         viking_fs = self._ensure_initialized()
         self._reject_storage_internal_target(uri)
         directory_uri, abstract_uri = self._resolve_directory_uris(uri)
-        directory_preexisting = await viking_fs.exists(directory_uri, ctx=ctx)
-        await viking_fs.mkdir(uri, ctx=ctx)
+        async with self._uri_mutation_coordinator.mutation(ctx.account_id, [directory_uri]):
+            acl_update = (
+                await viking_fs.prepare_acl_update(directory_uri, acl, ctx)
+                if acl is not None
+                else None
+            )
+            await viking_fs.mkdir(uri, ctx=ctx)
 
-        abstract = self._normalize_directory_description(description)
-        if not abstract:
-            if await viking_fs.exists(abstract_uri, ctx=ctx):
-                return
-            abstract = f"# {uri_leaf_name(directory_uri)}"
+            lock_path = viking_fs._uri_to_path(abstract_uri, ctx=ctx)
+            lease = await viking_fs._async_agfs.pathlock_acquire_exact(lock_path)
+            try:
+                abstract = self._normalize_directory_description(description)
+                if not abstract:
+                    abstract = f"# {uri_leaf_name(directory_uri)}"
 
-        await viking_fs.write_file(
-            abstract_uri,
-            render_abstract_overview(
-                ContextLevel.ABSTRACT,
-                directory_uri,
-                abstract,
-                {
-                    "generated_by": {
-                        "component": "FSService",
-                        "trigger": "mkdir",
-                    },
-                    "freshness": {
-                        "total_entries": 0,
-                        "sampled_entries": 0,
-                        "unsampled_entries": 0,
-                        "pending_child_changes": 0,
-                    },
-                },
-            ),
-            ctx=ctx,
-        )
-        await vectorize_directory_meta(
-            uri=directory_uri,
-            abstract=abstract,
-            overview="",
-            context_type=context_type_for_uri(directory_uri),
-            ctx=ctx,
-            creator_acl_grant=(CreatorAclGrant.DIRECT if not directory_preexisting else None),
-            include_overview=False,
-        )
+                await viking_fs.write_file(
+                    abstract_uri,
+                    render_abstract_overview(
+                        ContextLevel.ABSTRACT,
+                        directory_uri,
+                        abstract,
+                        {
+                            "generated_by": {
+                                "component": "FSService",
+                                "trigger": "mkdir",
+                            },
+                            "freshness": {
+                                "total_entries": 0,
+                                "sampled_entries": 0,
+                                "unsampled_entries": 0,
+                                "pending_child_changes": 0,
+                            },
+                        },
+                    ),
+                    ctx=ctx,
+                    lease_ref=lease,
+                )
+                await vectorize_directory_meta(
+                    uri=directory_uri,
+                    abstract=abstract,
+                    overview="",
+                    context_type=context_type_for_uri(directory_uri),
+                    ctx=ctx,
+                    ingest_options=IngestOptions(acl_update=acl_update),
+                    include_overview=False,
+                )
+            finally:
+                await viking_fs._async_agfs.pathlock_release(lease)
 
     @staticmethod
     def _normalize_directory_description(description: Optional[str]) -> Optional[str]:
@@ -922,7 +974,11 @@ class FSService:
         tags: Optional[List[str]] = None,
         include_tags: bool = False,
         offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+        directories_only: bool = False,
+        include_abstract: Optional[bool] = None,
+        include_overview: Optional[bool] = None,
+        overview_limit: int = 4000,
+    ) -> ListingPage:
         """Get directory tree."""
         viking_fs = self._ensure_initialized()
 
@@ -933,7 +989,11 @@ class FSService:
                 ctx=ctx,
                 output="original" if tags else output,
                 abs_limit=abs_limit,
+                include_abstract=None if tags else include_abstract,
+                include_overview=False if tags else include_overview is True,
+                overview_limit=overview_limit,
                 show_all_hidden=show_all_hidden,
+                directories_only=directories_only,
                 node_limit=page_limit,
                 level_limit=level_limit,
                 extra_fields=None if tags else extra_fields,
@@ -941,7 +1001,7 @@ class FSService:
             )
 
         if tags:
-            result = await self._collect_tagged_page(
+            page = await self._collect_tagged_page(
                 fetch_page,
                 ctx,
                 tags,
@@ -949,20 +1009,36 @@ class FSService:
                 offset,
                 node_limit,
             )
-            if output != "original" or extra_fields:
-                return await viking_fs._finalize_listing_entries(
-                    result,
-                    output,
-                    abs_limit,
-                    extra_fields,
-                    True,
-                    ctx=ctx,
+            if (
+                output != "original"
+                or extra_fields
+                or include_abstract is True
+                or include_overview is True
+            ):
+                return ListingPage(
+                    entries=await viking_fs._finalize_listing_entries(
+                        page.entries,
+                        output,
+                        abs_limit,
+                        extra_fields,
+                        True,
+                        ctx=ctx,
+                        include_abstract=include_abstract,
+                        include_overview=include_overview is True,
+                        overview_limit=overview_limit,
+                    ),
+                    has_more=page.has_more,
                 )
-            return result
+            return page
 
-        result = await fetch_page(offset, node_limit)
-        return await self._attach_and_filter_tags(
-            result, ctx, None, include_tags or "tags" in (extra_fields or [])
+        fetch_limit = node_limit + 1 if node_limit > 0 else node_limit
+        entries = await fetch_page(offset, fetch_limit)
+        entries = await self._attach_and_filter_tags(
+            entries, ctx, None, include_tags or "tags" in (extra_fields or [])
+        )
+        return ListingPage(
+            entries=entries[:node_limit] if node_limit > 0 else entries,
+            has_more=node_limit > 0 and len(entries) > node_limit,
         )
 
     async def stat(
@@ -1003,7 +1079,14 @@ class FSService:
         # always see a real viking:// URI. VikingFS.read_file also resolves, which
         # is harmless defense-in-depth when the input was already a URI.
         resolved_uri = await self._resolve_uri(uri, ctx)
-        content = await viking_fs.read_file(resolved_uri, ctx=ctx)
+        try:
+            content = await viking_fs.read_file(resolved_uri, ctx=ctx)
+        except NotFoundError:
+            if "%20" not in resolved_uri:
+                raise
+            legacy_uri = validate_safe_viking_uri_path(resolved_uri.replace("%20", " "))
+            content = await viking_fs.read_file(legacy_uri, ctx=ctx)
+            resolved_uri = legacy_uri
         skill_name = get_skill_name_from_uri(resolved_uri)
         if skill_name and self._privacy_config_service:
             current = await self._privacy_config_service.get_current(
@@ -1150,6 +1233,7 @@ class FSService:
         processing_mode: str = "semantic_and_vectors",
         tags: Optional[List[str]] = None,
         tag_mode: str = "replace",
+        acl: AclSpec | Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Write to an existing file and refresh semantics/vectors."""
         viking_fs = self._ensure_initialized()
@@ -1164,6 +1248,7 @@ class FSService:
             processing_mode=processing_mode,
             tags=tags,
             tag_mode=tag_mode,
+            acl=acl,
         )
 
     async def batch_write(
