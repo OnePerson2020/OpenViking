@@ -16,6 +16,7 @@ import json_repair
 from loguru import logger
 from pydantic import BaseModel, ValidationError
 
+from openviking.utils.token_estimation import estimate_text_tokens
 from vikingbot.compile.hashing import digest
 from vikingbot.compile.models import COMPILE_STAGING_ROOT
 from vikingbot.compile.results import FileResponse, RouteBatchResponse
@@ -27,7 +28,7 @@ T = TypeVar("T")
 R = TypeVar("R", bound=BaseModel)
 ROOT = f"{COMPILE_STAGING_ROOT}/pipeline"
 # Cache identity for the processing rules used by model calls.
-PROCESSING_VERSION = "compile-pipeline-34"
+PROCESSING_VERSION = "compile-pipeline-36"
 # Output-token fallback when the configured VLM provides no value.
 DEFAULT_MAX_TOKENS = 32_000
 
@@ -255,6 +256,13 @@ class JsonModel:
         Diagnostics contain budgets, usage and failure categories, never reasoning.
         A cancelled or timed-out request cannot be accepted as a partial response.
         """
+        if stage == "compile":
+            # ponytail: estimated tokens; use an endpoint tokenizer for exact accounting.
+            tokens = estimate_text_tokens(json.dumps([messages, tools], ensure_ascii=False))
+            if tokens > self.limits.direct_input_tokens:
+                raise ValueError("Direct Compile input exceeds token budget")
+            # Leave output space with 110k input on a 128k-context endpoint.
+            max_tokens = min(max_tokens, 18_000)
         self.metrics[f"{stage}_calls"] += 1
         number = self.metrics[f"{stage}_calls"]
         started = time.monotonic()
@@ -534,10 +542,12 @@ class JsonModel:
                     },
                 )
                 self.metrics["validation_failures"] += 1
+                if stage == "compile" and category == "truncated":
+                    raise ModelCallError(f"{stage}: {error}") from exc
                 # Routing owns retries per primary record, including malformed responses.
                 if schema is RouteBatchResponse or (
                     failures > 3
-                    if stage == "review"
+                    if stage in {"review", "compile"}
                     else failures >= 3
                     if stage == "skill_repair"
                     else not retry_allowed(retries, error)

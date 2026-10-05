@@ -212,7 +212,11 @@ async def run(runtime: Pipeline, references: list[str]) -> RenderedBundle:
             operation["expected_sha256"] = revision
         rendered.operations.append(operation)
         (rendered.updated if revision else rendered.created).append(uri)
-        if file_ops.is_wiki(runtime, path, payload):
+        if (
+            not runtime.skill_target
+            and path.lower().endswith(".md")
+            and (runtime.output_format == "wiki" or runtime.request.wiki_links)
+        ):
             rendered.wiki_uris.append(uri)
     if finalized:
         rendered.link_count, rendered.link_report = finalized.link_count, finalized.link_report

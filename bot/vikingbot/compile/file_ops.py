@@ -18,7 +18,6 @@ from vikingbot.compile.hashing import content_hash, digest
 from vikingbot.compile.renderer import (
     _split_frontmatter,
     validate_relative_file_path,
-    validate_resource_file,
 )
 from vikingbot.compile.results import FileDraft, FileResponse, Group, InputReferenceError
 
@@ -109,40 +108,8 @@ def validate_files(runtime: Pipeline, response, group, records, old):
             raise ValueError("Artifact content hash mismatch")
         if len(value.encode()) > 8 * 1024 * 1024:
             raise ValueError("Assembled output exceeds 8 MiB")
-        wiki = is_wiki(runtime, draft.path, value.encode())
         if draft.path.endswith(".json"):
             json.loads(value)
-        if (
-            runtime.contract.output_format == "wiki"
-            and draft.path.lower().endswith(".md")
-            and not wiki
-        ):
-            raise ValueError("Declared Wiki output requires valid OKF frontmatter")
-
-
-def is_wiki(runtime: Pipeline, path, payload):
-    """Apply OKF validation only to declared Wiki output or recognized OKF page types.
-
-    Generic Markdown may use its own frontmatter, including a different type.
-    Such files and Skill package files do not acquire Wiki navigation or citations.
-    """
-    if runtime.skill_target:
-        return False
-    if runtime.contract.output_format == "files" and path.lower().endswith(".md"):
-        try:
-            metadata, _ = _split_frontmatter(payload.decode())
-        except (ValueError, UnicodeError, yaml.YAMLError):
-            return False
-        if metadata.get("type") not in {
-            "entity",
-            "concept",
-            "method",
-            "comparison",
-            "analysis",
-            "index",
-        }:
-            return False
-    return validate_resource_file(path, payload)
 
 
 async def save_files(runtime: Pipeline, response, group, records, old, *, origin=None):
@@ -190,23 +157,25 @@ async def save_replacements(runtime: Pipeline, response, group, records, *, orig
 
 
 async def accept_files(runtime: Pipeline, references):
-    """Select saved references for publication and update their catalog entries together."""
+    """Accept artifacts and optional display metadata; Markdown schemas belong to the Skill."""
     for reference in references:
         artifact = await runtime.files.get(reference)
-        metadata = (
-            _split_frontmatter(artifact["content"])[0]
-            if is_wiki(runtime, artifact["path"], artifact["content"].encode())
-            else {}
-        )
+        metadata = {}
+        if artifact["path"].lower().endswith(".md"):
+            try:
+                metadata, _ = _split_frontmatter(artifact["content"])
+            except (ValueError, yaml.YAMLError):
+                pass
         owner = runtime.owners.get(artifact["path"])
         previous = f"artifacts/{digest([owner, artifact['path']])}"
         runtime.artifacts = [ref for ref in runtime.artifacts if ref != previous]
         runtime.artifacts.append(reference)
         runtime.owners[artifact["path"]] = artifact["owner"]
+        title, description = metadata.get("title"), metadata.get("description")
         runtime.catalog[artifact["path"]] = {
             "path": artifact["path"],
-            "title": metadata.get("title", artifact["path"]),
-            "description": metadata.get("description", ""),
+            "title": title if isinstance(title, str) and title.strip() else artifact["path"],
+            "description": description if isinstance(description, str) else "",
             "source_refs": artifact["source_refs"],
         }
 

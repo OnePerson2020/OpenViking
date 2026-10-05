@@ -289,27 +289,6 @@ def _link_wiki_mentions(
     return prefix + rendered, count
 
 
-def validate_resource_file(path: str, payload: bytes) -> bool:
-    """Validate one Resource artifact; return whether it declares a valid OKF Wiki page."""
-    if validate_declared_okf_markdown(path, payload) is None:
-        return False
-    frontmatter, _body = _split_frontmatter(payload.decode("utf-8"))
-    missing = [
-        field
-        for field in ("type", "title", "description")
-        if not isinstance(frontmatter.get(field), str) or not str(frontmatter[field]).strip()
-    ]
-    if missing:
-        raise ValueError(
-            f'OKF Markdown file "{path}" must have non-empty YAML frontmatter fields: '
-            + ", ".join(missing)
-        )
-    description = str(frontmatter["description"]).strip()
-    if "\n" in description or "\r" in description:
-        raise ValueError(f'OKF Markdown file "{path}" frontmatter description must be one line')
-    return True
-
-
 def _markdown_link(label: str, target: str) -> str:
     """Escape labels, whitespace and unsafe ASCII while preserving Unicode and URI delimiters."""
     label = " ".join(label.split()).replace("\\", "\\\\").replace("[", r"\[").replace("]", r"\]")
@@ -1002,6 +981,5 @@ __all__ = [
     "validate_declared_okf_markdown",
     "validate_relative_file_path",
     "validate_relative_page_path",
-    "validate_resource_file",
     "wiki_page_path_from_title",
 ]

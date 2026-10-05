@@ -218,8 +218,8 @@ class Contract(PlanModel):
     )
     output_format: Literal["wiki", "files"] = Field(
         default="files",
-        description="Use files for ordinary text or Markdown outputs. Choose wiki when the task "
-        "requires OpenViking Knowledge Format (OKF) wiki pages with its page metadata and link rules.",
+        description="Use files for ordinary file outputs or wiki for Markdown knowledge pages. "
+        "The Skill defines page metadata, types and structure.",
     )
 
     @field_validator("distinguish", mode="before")

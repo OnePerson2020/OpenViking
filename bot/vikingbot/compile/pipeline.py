@@ -11,6 +11,7 @@ from typing import Any
 
 from openviking.core.namespace import classify_uri
 from openviking.utils.path_safety import safe_join_viking_uri
+from vikingbot.compile import entry
 from vikingbot.compile.hashing import content_hash, digest
 from vikingbot.compile.models import CompileFailure, utc_now
 from vikingbot.compile.ops import finalize as finalize_op
@@ -96,6 +97,7 @@ class Pipeline:
         self.resources = SkillResources(client, request.skill, self.files)
         self.model.resources = self.resources
         self.contract: Contract
+        self.direct_output_format: str | None = None
         self.system = ""
         self.records: dict[str, Record] = {}
         self.evidence: dict[str, dict] = {}
@@ -107,6 +109,11 @@ class Pipeline:
         self.catalog: dict[str, dict] = {}  # Accepted task outputs, never historical enumeration.
         # Each output path belongs to the group whose file is accepted last.
         self.owners: dict[str, str] = {}
+
+    @property
+    def output_format(self) -> str:
+        """Return the direct submission's format or the current planner contract's format."""
+        return self.direct_output_format or self.contract.output_format
 
     @property
     def output_instructions(self) -> str:
@@ -133,6 +140,7 @@ class Pipeline:
         self.artifacts.clear()
         self.catalog.clear()
         self.owners.clear()
+        self.direct_output_format = None
         try:
             sources = await self.seed(batches)
             runtime = await self.files.get("runtime")
@@ -170,6 +178,12 @@ class Pipeline:
                 "source_summary": source_summary,
                 "target_has_content": target_has_content,
             }
+            direct = await entry.run(self, sources, planning_context)
+            if direct is not None:
+                result = await finalize_op.run(self, direct)
+                complete = not self.failures
+                self.metrics["direct_completed"] = 1
+                return result
             proposal = await self.model.ask(
                 "plan",
                 planner_prompt,

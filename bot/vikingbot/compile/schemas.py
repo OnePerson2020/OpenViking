@@ -50,7 +50,7 @@ def result_schema(schema, data):
         ids = [item["record"] for item in data["records"]]
         result["properties"]["decisions"].update(minItems=len(ids), maxItems=len(ids))
         result["$defs"]["RouteDecision"]["properties"]["record"]["enum"] = ids
-    if schema is FileResponse and data.get("inputs"):
+    if issubclass(schema, FileResponse) and data.get("inputs"):
         # Limit file lineage to supplied inputs without requiring exhaustive coverage.
         ids = [item["id"] for item in data["inputs"]]
         inputs = result["$defs"]["FileDraft"]["properties"]["inputs"]
