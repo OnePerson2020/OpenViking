@@ -317,9 +317,6 @@ class SessionMeta:
     # Timestamp of the most recent add_message, used by the idle scan to decide
     # whether an idle-timeout commit is due.
     last_message_at: str = ""
-    # Timestamp of the most recent successful auto-commit, surfaced via session
-    # GET and used to throttle auto-commit frequency.
-    last_auto_commit_at: str = ""
     # Default custom scalar tags applied to event memories extracted from this
     # session. Maps to config.memory_extraction_config.events.tags in the API.
     # None means no session default; a commit may still override per-call.
@@ -349,7 +346,6 @@ class SessionMeta:
                 dict(self.auto_commit_policy) if self.auto_commit_policy is not None else None
             ),
             "last_message_at": self.last_message_at,
-            "last_auto_commit_at": self.last_auto_commit_at,
         }
         if self.total_message_count is not None:
             data["total_message_count"] = self.total_message_count
@@ -403,7 +399,6 @@ class SessionMeta:
             memory_policy=data.get("memory_policy"),
             auto_commit_policy=data.get("auto_commit_policy"),
             last_message_at=data.get("last_message_at", ""),
-            last_auto_commit_at=data.get("last_auto_commit_at", ""),
             event_search_tags=data.get("event_search_tags"),
         )
 
@@ -1243,9 +1238,9 @@ class Session:
         retained_message_token_budget: Optional[int] = None,
         min_raw_tail_steps: Optional[int] = None,
         persist_keep_recent_count: bool = True,
-        record_auto_commit_success: bool = False,
         event_tags: Optional[List[str]] = None,
         reset_context: bool = False,
+        pre_commit_check: Optional[Callable[["Session"], Optional[Dict[str, Any]]]] = None,
     ) -> Dict[str, Any]:
         """Archive immediately and enqueue restart-safe Phase 2 processing.
 
@@ -1262,6 +1257,10 @@ class Session:
                 behavior of archiving everything. The plugin's afterTurn path
                 typically passes its configured value (default 10); the compact
                 path passes ``0``.
+            pre_commit_check: Optional synchronous condition, evaluated after an
+                authoritative reload under the Phase 1 lock. Return a result to
+                skip the commit, or None to proceed. Metadata read failures are
+                propagated when a condition is supplied.
             reset_context: Archive all live messages, then append an empty completed
                 archive to stop context and future summaries at this boundary.
             persist_keep_recent_count: When ``True`` (default), ``keep_recent_count``
@@ -1269,9 +1268,6 @@ class Session:
                 The idle full-commit path passes ``False`` with
                 ``keep_recent_count=0`` so a one-off full archive does not wipe
                 the stored keep preference.
-            record_auto_commit_success: When ``True``, clear the auto-commit
-                error fields and stamp ``last_auto_commit_at`` in the same
-                lock-protected meta update as the commit boundary.
             event_tags: Per-commit override for the custom scalar tags applied
                 to event memories. ``None`` uses the session default
                 (``meta.event_search_tags``); an empty list disables default-tag
@@ -1363,9 +1359,16 @@ class Session:
                 ):
                     self._meta.memory_policy = in_memory_default_memory_policy
             except Exception:
+                if pre_commit_check is not None:
+                    raise
                 # The root JSONL remains authoritative for message correctness;
                 # legacy sessions may not have metadata yet.
                 pass
+
+            if pre_commit_check is not None:
+                skip_result = pre_commit_check(self)
+                if skip_result is not None:
+                    return skip_result
 
             effective_event_tags = _resolve_event_search_tags(
                 event_tags, self._meta.event_search_tags
@@ -1508,7 +1511,6 @@ class Session:
                 archive_uri=archive_uri,
                 user=self.ctx.user.to_dict(),
                 memory_policy=effective_memory_policy,
-                record_auto_commit_success=record_auto_commit_success,
                 event_search_tags=list(effective_event_tags),
                 auto_commit_policy=dict(self._meta.auto_commit_policy or {}),
             )
@@ -1591,11 +1593,6 @@ class Session:
                     self._compression.compression_index,
                 )
                 self._meta.last_commit_at = get_current_timestamp()
-                if record_auto_commit_success:
-                    # Stamp success in the same lock-protected meta write as the
-                    # commit boundary, so an idle scan and a concurrent worker
-                    # never see a stale state.
-                    self._meta.last_auto_commit_at = get_current_timestamp()
                 await self._save_meta()
                 await self._write_phase1_ready_marker(archive_uri)
             except Exception as e:
@@ -1807,7 +1804,6 @@ class Session:
             agent_evolution_enabled=agent_evolution_enabled,
             agent_memory_skip_reason=agent_memory_skip_reason,
             user_config_error=user_config_error,
-            record_auto_commit_success=msg.record_auto_commit_success,
             event_search_tags=list(msg.event_search_tags or []),
             auto_commit_policy=msg.auto_commit_policy,
         )
@@ -1936,7 +1932,6 @@ class Session:
         agent_evolution_enabled: bool = True,
         agent_memory_skip_reason: Optional[str] = None,
         user_config_error: Optional[str] = None,
-        record_auto_commit_success: bool = False,
         event_search_tags: Optional[List[str]] = None,
         auto_commit_policy: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -2339,7 +2334,6 @@ class Session:
                 archive_index=archive_index,
                 memories_extracted=memories_extracted,
                 telemetry_snapshot=snapshot,
-                record_auto_commit_success=record_auto_commit_success,
             )
 
             # Write .done last so a recovered queue item can skip completed work.
@@ -2761,8 +2755,6 @@ class Session:
         archive_index: int,
         memories_extracted: Dict[str, int],
         telemetry_snapshot: Any,
-        *,
-        record_auto_commit_success: bool = False,
     ) -> None:
         """Merge Phase 2 results without overwriting concurrent root updates."""
         session_path = self._viking_fs._uri_to_path(self._session_uri, ctx=self.ctx)
@@ -2802,10 +2794,6 @@ class Session:
                 )
             latest_meta.last_commit_at = get_current_timestamp()
             latest_meta.message_count = await self._read_live_message_count()
-            if record_auto_commit_success:
-                # Mirror the Phase 1 success stamp so the persisted meta reflects
-                # a clean auto-commit even after Phase 2 reloads the latest meta.
-                latest_meta.last_auto_commit_at = get_current_timestamp()
             self._meta = latest_meta
             await self._save_meta()
         finally:

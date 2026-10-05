@@ -159,14 +159,12 @@ class _FakeSessionMeta:
         message_count: int = 0,
         keep_recent_count: int = 0,
         last_message_at: str = "",
-        last_auto_commit_at: str = "",
     ) -> None:
         self.auto_commit_policy = auto_commit_policy
         self.pending_tokens = pending_tokens
         self.message_count = message_count
         self.keep_recent_count = keep_recent_count
         self.last_message_at = last_message_at
-        self.last_auto_commit_at = last_auto_commit_at
 
     def to_dict(self) -> dict:
         return {
@@ -175,14 +173,13 @@ class _FakeSessionMeta:
             "message_count": self.message_count,
             "keep_recent_count": self.keep_recent_count,
             "last_message_at": self.last_message_at,
-            "last_auto_commit_at": self.last_auto_commit_at,
         }
 
 
 class _FakeAutoCommitSession:
     def __init__(self, meta: _FakeSessionMeta) -> None:
         self.meta = meta
-        self.commit_calls: list[tuple[int, bool, bool]] = []
+        self.commit_calls: list[tuple[int, bool]] = []
         self.save_calls = 0
 
     async def commit_async(
@@ -190,10 +187,14 @@ class _FakeAutoCommitSession:
         *,
         keep_recent_count: int = 0,
         persist_keep_recent_count: bool = True,
-        record_auto_commit_success: bool = False,
+        pre_commit_check=None,
     ):
+        if pre_commit_check is not None:
+            skipped = pre_commit_check(self)
+            if skipped is not None:
+                return skipped
         self.commit_calls.append(
-            (keep_recent_count, persist_keep_recent_count, record_auto_commit_success)
+            (keep_recent_count, persist_keep_recent_count)
         )
         return {"archived": True}
 
@@ -260,6 +261,43 @@ def _session_entry(session_id: str) -> dict[str, object]:
     return {"name": session_id, "isDir": True}
 
 
+@pytest.mark.asyncio
+async def test_auto_commit_failure_propagates_but_background_adapter_releases_claim(monkeypatch):
+    session = _FakeAutoCommitSession(_FakeSessionMeta(
+        auto_commit_policy={"idle_timeout_seconds": 1}, message_count=1,
+        last_message_at="2000-01-01T00:00:00+00:00",
+    ))
+    service = _session_service_for_auto_commit_test(monkeypatch, session)
+
+    async def fail(**kwargs):
+        raise OSError("commit failed")
+
+    monkeypatch.setattr(session, "commit_async", fail)
+    with pytest.raises(OSError, match="commit failed"):
+        await service.run_auto_commit("session_a", _auto_commit_ctx(), reason="idle_timeout")
+    claim = ("acct_a", "user_b", "session_a")
+    service._auto_commit_inflight.add(claim)
+    await service._run_auto_commit_background("session_a", _auto_commit_ctx(), "idle_timeout")
+    assert claim not in service._auto_commit_inflight
+
+
+def test_idle_schedule_hint_requires_enabled_policy_and_content(monkeypatch):
+    session = _FakeAutoCommitSession(_FakeSessionMeta(
+        auto_commit_policy={"idle_timeout_seconds": 60}, message_count=1,
+        last_message_at="2026-10-05T12:00:00+00:00",
+    ))
+    service = _session_service_for_auto_commit_test(monkeypatch, session)
+    assert service.idle_auto_commit_at(session) == "2026-10-05T12:01:00+00:00"
+    session.meta.message_count = 0
+    assert service.idle_auto_commit_at(session) is None
+    session.meta.message_count = 1
+    session.meta.auto_commit_policy = None
+    assert service.idle_auto_commit_at(session) is None
+    session.meta.auto_commit_policy = {"idle_timeout_seconds": 60}
+    service.set_session_auto_commit_config(SessionAutoCommitConfig(enabled=False))
+    assert service.idle_auto_commit_at(session) is None
+
+
 def test_compute_next_check_at_parses_utc_z_timestamps_on_python310(monkeypatch):
     monkeypatch.setattr(auto_commit_module, "datetime", _Python310LikeDateTime)
 
@@ -277,7 +315,6 @@ async def test_run_auto_commit_skips_when_below_token_threshold(monkeypatch):
                 "pending_token_threshold": 100,
                 "message_count_threshold": 50,
                 "keep_recent_count": 0,
-                "min_commit_interval_seconds": 0,
             },
             pending_tokens=10,
             message_count=1,
@@ -372,7 +409,6 @@ async def test_maybe_schedule_auto_commit_swallows_scheduling_errors(monkeypatch
                 "pending_token_threshold": 100,
                 "message_count_threshold": 500,
                 "keep_recent_count": 3,
-                "min_commit_interval_seconds": 0,
             },
             pending_tokens=101,
             message_count=5,
@@ -383,32 +419,7 @@ async def test_maybe_schedule_auto_commit_swallows_scheduling_errors(monkeypatch
     await service.run_auto_commit("session_a", _auto_commit_ctx(), reason="message_write")
 
     # message_write reserves the configured keep_recent tail and persists it.
-    assert session.commit_calls == [(3, True, True)]
-    assert session.save_calls == 0
-    assert session.meta.last_auto_commit_at == ""
-
-
-@pytest.mark.asyncio
-async def test_run_auto_commit_throttles_with_utc_z_last_auto_commit_at_on_python310(monkeypatch):
-    monkeypatch.setattr(session_service_module, "datetime", _Python310LikeDateTime)
-    session = _FakeAutoCommitSession(
-        _FakeSessionMeta(
-            auto_commit_policy={
-                "pending_token_threshold": 100,
-                "message_count_threshold": 500,
-                "keep_recent_count": 0,
-                "min_commit_interval_seconds": 60,
-            },
-            pending_tokens=101,
-            message_count=5,
-            last_auto_commit_at="2099-01-01T00:00:00.000Z",
-        )
-    )
-    service = _session_service_for_auto_commit_test(monkeypatch, session)
-
-    await service.run_auto_commit("session_a", _auto_commit_ctx(), reason="message_write")
-
-    assert session.commit_calls == []
+    assert session.commit_calls == [(3, True)]
     assert session.save_calls == 0
 
 
@@ -451,7 +462,7 @@ async def test_run_auto_commit_idle_commits_full_backlog_without_persisting_keep
     await service.run_auto_commit("session_a", _auto_commit_ctx(), reason="idle_timeout")
 
     # Idle commits the full backlog and must not overwrite the stored keep pref.
-    assert session.commit_calls == [(0, False, True)]
+    assert session.commit_calls == [(0, False)]
     assert session.save_calls == 0
 
 

@@ -291,12 +291,6 @@ def get_message_count_threshold(policy: Optional[Dict[str, Any]]) -> Optional[in
     return threshold if threshold > 0 else None
 
 
-def get_min_commit_interval_seconds(policy: Optional[Dict[str, Any]]) -> int:
-    if policy is None:
-        return 0
-    return max(0, resolve_policy(policy).min_commit_interval_seconds)
-
-
 def get_keep_recent_count(policy: Optional[Dict[str, Any]]) -> int:
     if policy is None:
         return 0

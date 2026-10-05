@@ -54,7 +54,13 @@ Create a new session. Sessions are containers for conversations, storing message
 | `message_count_threshold` | int | 100 | 1000 | When the uncommitted live message count exceeds this value (strictly greater-than), an auto commit is triggered after a message write. |
 | `idle_timeout_seconds` | int | 86400 | 604800 | After this many idle seconds, a session with uncommitted content becomes eligible for the server-side idle scheduler. An idle-timeout commit archives the full backlog and ignores `keep_recent_count`. |
 | `keep_recent_count` | int | 0 | 500 | Number of recent live messages to keep (not archived) on a threshold-triggered auto commit. Idle-timeout commits ignore this and commit everything. |
-| `min_commit_interval_seconds` | int | 0 | 604800 | Minimum seconds between two automatic commits (throttle). |
+
+Successful message writes (single and batch), session creation and config updates return
+`result.idle_auto_commit_at`: the earliest idle check time as an ISO 8601 UTC timestamp,
+or `null` when idle auto-commit is disabled or there is no pending content. The time
+is computed from the current session's last message time and idle timeout. It is a
+scheduling hint; automatic commits revalidate the latest state before archiving.
+
 
 All fields have a minimum of `0` and are clamped into `[0, max]`. Unknown keys are rejected with `InvalidArgumentError`. Idle commits also require `memory.session_auto_commit.enabled` on the server; setting `idle_timeout_seconds` alone does not start the scanner.
 
@@ -87,8 +93,7 @@ curl -X POST http://localhost:1933/api/v1/sessions \
       "pending_token_threshold": 8000,
       "message_count_threshold": 40,
       "idle_timeout_seconds": 600,
-      "keep_recent_count": 10,
-      "min_commit_interval_seconds": 0
+      "keep_recent_count": 10
     }
   }'
 ```
@@ -117,8 +122,7 @@ result = client.create_session(
             "pending_token_threshold": 8000,
             "message_count_threshold": 40,
             "idle_timeout_seconds": 600,
-            "keep_recent_count": 10,
-            "min_commit_interval_seconds": 0,
+            "keep_recent_count": 10
         },
     },
 )
@@ -393,8 +397,7 @@ ov session get a1b2c3d4
       "pending_token_threshold": 150000,
       "message_count_threshold": 100,
       "idle_timeout_seconds": 86400,
-      "keep_recent_count": 0,
-      "min_commit_interval_seconds": 0
+      "keep_recent_count": 0
     }
   }
 }
@@ -520,8 +523,7 @@ ov session config set a1b2c3d4 --no-auto-commit
       "pending_token_threshold": 150000,
       "message_count_threshold": 25,
       "idle_timeout_seconds": 86400,
-      "keep_recent_count": 0,
-      "min_commit_interval_seconds": 0
+      "keep_recent_count": 0
     },
     "memory_extraction_config": {
       "events": {

@@ -9,7 +9,6 @@ from openviking.session.auto_commit_policy import (
     DEFAULT_IDLE_TIMEOUT_SECONDS,
     DEFAULT_KEEP_RECENT_COUNT,
     DEFAULT_MESSAGE_COUNT_THRESHOLD,
-    DEFAULT_MIN_COMMIT_INTERVAL_SECONDS,
     DEFAULT_PENDING_TOKEN_THRESHOLD,
     MAX_IDLE_TIMEOUT_SECONDS,
     MAX_MESSAGE_COUNT_THRESHOLD,
@@ -26,7 +25,6 @@ def test_default_matches_prd_recommended_values():
     assert policy.message_count_threshold == DEFAULT_MESSAGE_COUNT_THRESHOLD == 100
     assert policy.idle_timeout_seconds == DEFAULT_IDLE_TIMEOUT_SECONDS == 86400
     assert policy.keep_recent_count == DEFAULT_KEEP_RECENT_COUNT == 0
-    assert policy.min_commit_interval_seconds == DEFAULT_MIN_COMMIT_INTERVAL_SECONDS == 0
 
 
 def test_from_dict_none_returns_defaults():
@@ -40,7 +38,6 @@ def test_from_dict_fills_missing_fields_with_defaults():
     assert policy.message_count_threshold == DEFAULT_MESSAGE_COUNT_THRESHOLD
     assert policy.idle_timeout_seconds == DEFAULT_IDLE_TIMEOUT_SECONDS
     assert policy.keep_recent_count == DEFAULT_KEEP_RECENT_COUNT
-    assert policy.min_commit_interval_seconds == DEFAULT_MIN_COMMIT_INTERVAL_SECONDS
 
 
 def test_from_dict_clamps_to_upper_bounds():
@@ -50,7 +47,6 @@ def test_from_dict_clamps_to_upper_bounds():
             "message_count_threshold": 10_000,
             "idle_timeout_seconds": 999_999_999,
             "keep_recent_count": 10_000,
-            "min_commit_interval_seconds": 999_999_999,
         }
     )
 
@@ -58,7 +54,6 @@ def test_from_dict_clamps_to_upper_bounds():
     assert policy.message_count_threshold == MAX_MESSAGE_COUNT_THRESHOLD
     assert policy.idle_timeout_seconds == MAX_IDLE_TIMEOUT_SECONDS
     assert policy.keep_recent_count == MAX_MESSAGE_COUNT_THRESHOLD
-    assert policy.min_commit_interval_seconds == MAX_IDLE_TIMEOUT_SECONDS
     assert MAX_PENDING_TOKEN_THRESHOLD == 1_000_000
     assert MAX_MESSAGE_COUNT_THRESHOLD == 1_000
 
@@ -70,7 +65,6 @@ def test_from_dict_clamps_negatives_to_zero():
             "message_count_threshold": -1,
             "idle_timeout_seconds": -100,
             "keep_recent_count": -3,
-            "min_commit_interval_seconds": -9,
         }
     )
 
@@ -79,7 +73,6 @@ def test_from_dict_clamps_negatives_to_zero():
         "message_count_threshold": 0,
         "idle_timeout_seconds": 0,
         "keep_recent_count": 0,
-        "min_commit_interval_seconds": 0,
     }
 
 
@@ -113,7 +106,6 @@ def test_to_dict_round_trips():
         "message_count_threshold": 40,
         "idle_timeout_seconds": 600,
         "keep_recent_count": 10,
-        "min_commit_interval_seconds": 30,
     }
 
     assert AutoCommitPolicy.from_dict(payload).to_dict() == payload

@@ -20,7 +20,6 @@ DEFAULT_PENDING_TOKEN_THRESHOLD = 150000
 DEFAULT_MESSAGE_COUNT_THRESHOLD = 100
 DEFAULT_IDLE_TIMEOUT_SECONDS = 86400  # 1 day
 DEFAULT_KEEP_RECENT_COUNT = 0
-DEFAULT_MIN_COMMIT_INTERVAL_SECONDS = 0
 
 # PRD upper bounds.
 MAX_PENDING_TOKEN_THRESHOLD = 1000000
@@ -32,7 +31,6 @@ _POLICY_KEYS = {
     "message_count_threshold",
     "idle_timeout_seconds",
     "keep_recent_count",
-    "min_commit_interval_seconds",
 }
 
 
@@ -56,7 +54,6 @@ class AutoCommitPolicy:
     message_count_threshold: int = DEFAULT_MESSAGE_COUNT_THRESHOLD
     idle_timeout_seconds: int = DEFAULT_IDLE_TIMEOUT_SECONDS
     keep_recent_count: int = DEFAULT_KEEP_RECENT_COUNT
-    min_commit_interval_seconds: int = DEFAULT_MIN_COMMIT_INTERVAL_SECONDS
 
     @classmethod
     def default(cls) -> "AutoCommitPolicy":
@@ -102,14 +99,7 @@ class AutoCommitPolicy:
                 minimum=0,
                 maximum=MAX_MESSAGE_COUNT_THRESHOLD,
             ),
-            min_commit_interval_seconds=_coerce_int(
-                data.get(
-                    "min_commit_interval_seconds", default.min_commit_interval_seconds
-                ),
-                field="min_commit_interval_seconds",
-                minimum=0,
-                maximum=MAX_IDLE_TIMEOUT_SECONDS,
-            ),
+
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -118,5 +108,4 @@ class AutoCommitPolicy:
             "message_count_threshold": self.message_count_threshold,
             "idle_timeout_seconds": self.idle_timeout_seconds,
             "keep_recent_count": self.keep_recent_count,
-            "min_commit_interval_seconds": self.min_commit_interval_seconds,
         }

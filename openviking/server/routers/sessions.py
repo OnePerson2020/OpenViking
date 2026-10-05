@@ -87,7 +87,6 @@ class AutoCommitPolicyRequest(BaseModel):
     message_count_threshold: Optional[int] = None
     idle_timeout_seconds: Optional[int] = None
     keep_recent_count: Optional[int] = None
-    min_commit_interval_seconds: Optional[int] = None
 
     model_config = {"extra": "forbid"}
 
@@ -323,6 +322,7 @@ async def create_session(
             "uri": session.uri,
             "user": session.user.to_dict(),
             "auto_commit_policy": service.sessions.effective_auto_commit_policy(session),
+            "idle_auto_commit_at": service.sessions.idle_auto_commit_at(session),
             "memory_extraction_config": service.sessions.effective_memory_extraction_config(
                 session
             ),
@@ -421,6 +421,7 @@ async def update_session_config(
         return {
             "session_id": session.session_id,
             "auto_commit_policy": service.sessions.effective_auto_commit_policy(session),
+            "idle_auto_commit_at": service.sessions.idle_auto_commit_at(session),
             "memory_extraction_config": service.sessions.effective_memory_extraction_config(
                 session
             ),
@@ -767,6 +768,7 @@ async def add_message(
             # Post-write value so a commit policy can decide without a
             # follow-up get_session round trip.
             "pending_tokens": _session_pending_tokens(session),
+            "idle_auto_commit_at": service.sessions.idle_auto_commit_at(session),
         }
 
     execution = await run_operation(
@@ -824,6 +826,7 @@ async def batch_add_messages(
             # Post-write value so a commit policy can decide without a
             # follow-up get_session round trip.
             "pending_tokens": _session_pending_tokens(session),
+            "idle_auto_commit_at": service.sessions.idle_auto_commit_at(session),
         }
 
     execution = await run_operation(
