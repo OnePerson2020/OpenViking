@@ -274,3 +274,52 @@ async def test_find_filters_expired_vectors_and_returns_each_owner_expiry(client
         },
     )
     assert {row["uri"]: row["expires_at"] for row in result["memories"]} == expected
+
+
+@pytest.mark.asyncio
+async def test_root_patch_updates_existing_event_and_session_before_return(client, service):
+    ctx = root_ctx()
+    event = ROOT + "/memories/events/2026/10/01"
+    await service.viking_fs.write_file(event + "/body.txt", "historical body", ctx=ctx)
+    created = await request(client, "post", "/api/v1/sessions", json={"session_id": "existing"})
+    assert created["expires_at"] is None
+    await request(
+        client,
+        "patch",
+        CONFIG,
+        json={"settings": {"ttl": {"global": {"mode": "days", "ttl_days": 7}}}},
+    )
+    event_fields = await request(client, "get", "/api/v1/content/ttl", params={"uri": event})
+    session_fields = await request(client, "get", "/api/v1/sessions/existing")
+    assert event_fields["expires_at"] and session_fields["expires_at"]
+    await request(client, "patch", CONFIG, json={"settings": {"ttl": {"global": {"ttl_days": 30}}}})
+    extended = await request(client, "get", "/api/v1/content/ttl", params={"uri": event})
+    from datetime import timedelta
+
+    from openviking.utils.time_utils import parse_iso_datetime
+
+    assert parse_iso_datetime(extended["expires_at"]) - parse_iso_datetime(
+        event_fields["expires_at"]
+    ) == timedelta(days=23)
+    await request(
+        client,
+        "patch",
+        CONFIG,
+        json={
+            "settings": {
+                "ttl": {
+                    "directories": {
+                        ROOT + "/memories/events": {"mode": "absolute", "ttl_absolute": 1000000000}
+                    }
+                }
+            }
+        },
+    )
+    assert (
+        await client.get("/api/v1/content/read", params={"uri": event + "/body.txt"})
+    ).status_code == 404
+    assert (await request(client, "get", "/api/v1/sessions/existing"))["ttl_days"] == 30
+    await request(
+        client, "patch", CONFIG, json={"settings": {"ttl": {"global": {"mode": "disabled"}}}}
+    )
+    assert (await request(client, "get", "/api/v1/sessions/existing"))["expires_at"] is None

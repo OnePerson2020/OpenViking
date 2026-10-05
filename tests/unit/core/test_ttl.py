@@ -103,15 +103,15 @@ def test_event_directory_is_not_an_object_even_with_a_file_extension():
         assert ttl.ttl_object_for_uri(f"viking://user/u1/memories/events/{name}") is None
 
 
-# ── resolve_ttl_days / freeze_ttl_fields ────────────────────────────────────
+# ── resolve_ttl_days / initial_ttl_fields ────────────────────────────────────
 
 
-def test_freeze_ttl_fields_snapshot(monkeypatch):
+def test_initial_ttl_fields_snapshot(monkeypatch):
     config = TTLConfig(user_events={"mode": "days", "ttl_days": 10})
     _install_config(monkeypatch, config)
 
     received = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    snap = ttl.freeze_ttl_fields(
+    snap = ttl.initial_ttl_fields(
         "viking://user/u1/memories/events/2026/09/28", received_at=received
     )
     assert snap is not None
@@ -122,20 +122,20 @@ def test_freeze_ttl_fields_snapshot(monkeypatch):
     }
 
 
-def test_freeze_ttl_fields_none_when_out_of_scope(monkeypatch):
+def test_initial_ttl_fields_none_when_out_of_scope(monkeypatch):
     config = TTLConfig(**{"global": {"mode": "days", "ttl_days": 5}})
     _install_config(monkeypatch, config)
     # Only events and sessions inherit global; resources require a separate policy.
-    assert ttl.freeze_ttl_fields("viking://user/u1/skills/r.md") is None
-    assert ttl.freeze_ttl_fields("viking://user/u1/resources/r.md") is None
-    assert ttl.freeze_ttl_fields("viking://user/u1/sessions/s1") is not None
+    assert ttl.initial_ttl_fields("viking://user/u1/skills/r.md") is None
+    assert ttl.initial_ttl_fields("viking://user/u1/resources/r.md") is None
+    assert ttl.initial_ttl_fields("viking://user/u1/sessions/s1") is not None
 
 
-def test_freeze_ttl_fields_naive_received_at_treated_as_utc(monkeypatch):
+def test_initial_ttl_fields_naive_received_at_treated_as_utc(monkeypatch):
     config = TTLConfig(sessions={"mode": "days", "ttl_days": 1})
     _install_config(monkeypatch, config)
     naive = datetime(2026, 5, 1, 12, 0, 0)  # no tzinfo
-    snap = ttl.freeze_ttl_fields("viking://user/u1/sessions/s1", received_at=naive)
+    snap = ttl.initial_ttl_fields("viking://user/u1/sessions/s1", received_at=naive)
     assert snap["received_at"] == "2026-05-01T12:00:00.000Z"
     assert snap["expires_at"] == "2026-05-02T12:00:00.000Z"
 
@@ -175,7 +175,7 @@ def test_is_expired_naive_expiry_treated_as_utc():
 def test_disabled_config_stops_creation_but_does_not_revive_snapshots(monkeypatch):
     _install_config(monkeypatch, TTLConfig())  # default OFF
     assert ttl.ttl_enabled() is False
-    assert ttl.freeze_ttl_fields("viking://user/u1/sessions/new") is None
+    assert ttl.initial_ttl_fields("viking://user/u1/sessions/new") is None
     # A snapshot frozen while an earlier policy was active stays authoritative.
     assert ttl.hidden_by_ttl("2000-01-01T00:00:00.000Z") is True
 

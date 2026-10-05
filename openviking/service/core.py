@@ -671,6 +671,9 @@ class OpenVikingService:
                     "MinerU preflight failed (fallback will retry on first parse): %s", exc
                 )
 
+        from openviking.service.ttl_policy import apply_startup_ttl
+
+        await apply_startup_ttl(self._viking_fs)
         if self._runtime_config_manager is not None:
             self._runtime_config_manager.start_refresh_loop()
         self._initialized = True

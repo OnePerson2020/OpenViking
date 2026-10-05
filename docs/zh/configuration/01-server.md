@@ -470,7 +470,7 @@ Parser 或 Understanding API 后端自身的限制和上传行为。
 
 TTL 默认关闭，仅用于 events 日期目录和 Session。`ov.conf` 中的 `ttl` 提供启动基线，沿用已有集群/account 运行时配置表达库覆盖；account、user 身份不增加 TTL 优先级。resources 不提供 TTL 配置。
 
-新生命周期目录按「具体根目录策略 → 类型默认值 → 库全局默认值 → 关闭」解析。`inherit` 继续向上查找，`disabled` 阻断继承。`days` 要求正整数 `ttl_days`。events 类型/目录默认策略另支持 `absolute`，以 Unix 秒数 `ttl_absolute` 指定时间；全局和 Session 默认值支持相对天数或关闭。目录键只接受用户或 peer 的 events 根目录、用户的 sessions 根目录；年月、日期、单 Session 及其内部路径均只读。
+生命周期目录按「具体根目录策略 → 类型默认值 → 库全局默认值 → 关闭」解析。`inherit` 继续向上查找，`disabled` 阻断继承。`days` 要求正整数 `ttl_days`。events 和 Session 类型/目录默认策略另支持 `absolute`，以 Unix 秒数 `ttl_absolute` 指定时间；全局默认值支持相对天数或关闭。目录键只接受用户或 peer 的 events 根目录、用户的 sessions 根目录；年月、日期、单 Session 及其内部路径均只读。
 
 ```json
 {
@@ -486,14 +486,14 @@ TTL 默认关闭，仅用于 events 日期目录和 Session。`ov.conf` 中的 `
 }
 ```
 
-运行时 HTTP 接口：`GET/PATCH /api/v1/admin/configuration` 修改集群覆盖（ROOT）；`GET/PATCH /api/v1/admin/accounts/{account_id}/configuration` 修改库覆盖（本库 ADMIN 或 ROOT）。PATCH 请求体为 `{"settings": {"ttl": ...}}`；省略字段保持原值，`null` 删除该层覆盖并回退至基线，修改单个目录不会清空其他目录。GET 返回该层显式覆盖，不是对象的冻结期限。
+运行时 HTTP 接口：`GET/PATCH /api/v1/admin/configuration` 修改集群覆盖（ROOT）；`GET/PATCH /api/v1/admin/accounts/{account_id}/configuration` 修改库覆盖（本库 ADMIN 或 ROOT）。PATCH 请求体为 `{"settings": {"ttl": ...}}`；省略字段保持原值，`null` 删除该层覆盖并回退至基线，修改单个目录不会清空其他目录。GET 返回该层显式覆盖，不是具体对象的期限。
 
 ```bash
 ov admin get-configuration --account-id default
 ov admin patch-configuration --account-id default --settings '{"ttl":{"global":{"mode":"days","ttl_days":90}}}'
 ```
 
-CLI 省略 `--account-id` 时操作集群层。Python HTTP SDK 对应 `admin_get_configuration(account_id)`、`admin_patch_configuration(settings, account_id)`。默认策略仅影响新建的日期目录和 Session；已有纳管目录保留冻结的时长，历史未纳管目录继续不生效，向其中新增文件也不会自动纳管。已有目录期限只读。Session 相对期限在成功追加消息或完成非空 commit 后续期；events 的相对和绝对期限都保持固定。
+CLI 省略 `--account-id` 时操作集群层。Python HTTP SDK 对应 `admin_get_configuration(account_id)`、`admin_patch_configuration(settings, account_id)`。首次启用或修改策略也会按原业务时间重算仍有效的已有目录，历史未纳管目录也会补 TTL；更具体的覆盖仍按优先级生效。已过期或已删除的对象不会恢复，关闭有效策略会清除仍有效目录的期限。配置请求按页、限制并发更新元数据和到期索引，部分失败时返回未完成信息，重试相同配置即可继续；相对策略下，缺少可靠原始时间的历史目录会报告并跳过。Session 相对期限在成功追加消息或完成非空 commit 后续期；绝对期限与 event 正文写入不自动续期。具体目录期限仍只读，用户通过修改根策略延长期限。详见[目录 TTL](../concepts/17-ttl.md)。
 
 `ttl_cleanup` 独立控制物理删除执行器。它默认 `enabled: true`，但所有 TTL 策略默认关闭时没有到期任务。关闭执行器会暂停新的物理删除并保留重试状态；已到期目录及其内容 仍会立即逻辑不可见。调度器同时使用扫描抖动和稳定的逐对象清理偏移，避免所有租户集中在 UTC 0 点删除。
 

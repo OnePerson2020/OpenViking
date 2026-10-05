@@ -479,11 +479,10 @@ TTL is disabled by default and applies only to event date directories and sessio
 configuration supplies library overrides; user and account identities do not add
 extra retention levels. Resources have no TTL configuration.
 
-New lifecycle directories resolve concrete root policy → type default
+Lifecycle directories resolve concrete root policy → type default
 → library global default → disabled. `inherit` continues upward; `disabled` stops
-inheritance. `days` requires positive whole `ttl_days`. Event type/directory defaults
-also accept `absolute` with a Unix-seconds `ttl_absolute`; global and session
-defaults accept relative days or disabled. Directory keys accept only user/peer events roots or a user's sessions root.
+inheritance. `days` requires positive whole `ttl_days`. Event and Session type/directory defaults
+also accept `absolute` with a Unix-seconds `ttl_absolute`; global defaults accept relative days or disabled. Directory keys accept only user/peer events roots or a user's sessions root.
 Year/month/date directories, individual sessions and descendants are read-only.
 
 ```json
@@ -500,7 +499,7 @@ Year/month/date directories, individual sessions and descendants are read-only.
 }
 ```
 
-Runtime endpoints: `GET/PATCH /api/v1/admin/configuration` for cluster overrides (ROOT), and `GET/PATCH /api/v1/admin/accounts/{account_id}/configuration` for library overrides (that account's ADMIN or ROOT). PATCH bodies use `{"settings": {"ttl": ...}}`. Omitted fields stay unchanged; `null` removes the current layer's override and restores fallback. Updating one directory preserves other policies. GET returns explicit overrides for that layer, not frozen object deadlines.
+Runtime endpoints: `GET/PATCH /api/v1/admin/configuration` for cluster overrides (ROOT), and `GET/PATCH /api/v1/admin/accounts/{account_id}/configuration` for library overrides (that account's ADMIN or ROOT). PATCH bodies use `{"settings": {"ttl": ...}}`. Omitted fields stay unchanged; `null` removes the current layer's override and restores fallback. Updating one directory preserves other policies. GET returns explicit overrides for that layer, not individual object deadlines.
 
 ```bash
 ov admin get-configuration --account-id default
@@ -509,11 +508,8 @@ ov admin patch-configuration --account-id default --settings '{"ttl":{"global":{
 
 Omitting `--account-id` selects the cluster layer. Python HTTP SDK methods are
 `admin_get_configuration(account_id)` and `admin_patch_configuration(settings, account_id)`.
-Defaults affect newly created date directories and sessions only. Existing managed
-directories keep their saved duration, and unmanaged historical directories remain
-unmanaged, even when new files are added. Existing deadlines are read-only.
-Sessions renew after successful appends or completed nonempty commits.
-Both relative and absolute event deadlines stay fixed.
+Enabling or changing policy also recalculates existing live directories, including historical ones, using their original business timestamps. Explicit higher-priority overrides remain effective. Expired/deleted objects stay expired/deleted. Disabling the effective policy clears live deadlines. Configuration requests await bounded, paginated metadata/index updates and report partial failures; retrying the same settings repairs incomplete application. For relative policies, history without a reliable original content timestamp is reported and skipped.
+Sessions renew relative TTL after successful appends or completed nonempty commits. Absolute TTL and event content writes do not automatically renew deadlines. Individual directory deadlines remain read-only; modify the root policy to extend live objects. See [Directory TTL](../concepts/17-ttl.md).
 
 `ttl_cleanup` controls the physical deletion executor independently from TTL policy. It defaults to `enabled: true`, but with every TTL policy disabled there is no expiry work to perform. Turning the executor off pauses new physical deletes and preserves retry state; expired directories and descendants remain logically invisible. The scheduler uses a small scan jitter and a stable per-object cleanup offset so tenants do not all delete at UTC midnight.
 

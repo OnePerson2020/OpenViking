@@ -270,6 +270,9 @@ async def test_cleanup_reconciles_persisted_phase2_completion_after_crash(monkey
             }
         ),
     }
+    files[archive + "/.meta.json"] = json.dumps(
+        {"phase1": {"queue_message": {"task_id": "task-1"}}}
+    )
     storage = _MemoryVikingFS(files)
     session = Session(viking_fs=storage, session_id="s1", session_uri=uri)
     await session.load(include_expired=True)
@@ -283,6 +286,7 @@ async def test_cleanup_reconciles_persisted_phase2_completion_after_crash(monkey
     storage.write_file = crash_on_root_save
     with pytest.raises(ProcessCrash):
         await session._merge_and_save_commit_meta(
+            task_id="task-1",
             archive_uri=archive,
             archive_index=1,
             memories_extracted={},

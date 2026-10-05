@@ -153,6 +153,10 @@ async def test_resume_queued_commit_continues_phase2(monkeypatch):
         ),
         f"{archive_uri}/messages.jsonl": f"{archived.to_jsonl()}\n",
     }
+    files.setdefault(f"{session_uri}/.meta.json", json.dumps({"session_id": "session-1"}))
+    marker = json.loads(files.get(f"{archive_uri}/.meta.json", "{}"))
+    marker["phase1"] = {"status": "ready", "queue_message": {"task_id": "task-1"}}
+    files[f"{archive_uri}/.meta.json"] = json.dumps(marker)
     viking_fs = _MemoryVikingFS(files)
     session = Session(viking_fs=viking_fs, session_id="session-1", session_uri=session_uri)
     tracker = TaskTracker(_TaskStore())
@@ -227,6 +231,10 @@ async def test_phase2_completion_renews_from_one_persisted_timestamp():
             {"phase2_completed_at": "2999-02-03T04:05:06.000Z"}
         ),
     }
+    files.setdefault(f"{session_uri}/.meta.json", json.dumps({"session_id": "session-1"}))
+    marker = json.loads(files.get(f"{archive_uri}/.meta.json", "{}"))
+    marker["phase1"] = {"status": "ready", "queue_message": {"task_id": "task-1"}}
+    files[f"{archive_uri}/.meta.json"] = json.dumps(marker)
     session = Session(
         viking_fs=_MemoryVikingFS(files),
         session_id="session-1",
@@ -235,6 +243,7 @@ async def test_phase2_completion_renews_from_one_persisted_timestamp():
     await session.load(include_expired=True)
 
     completed_at = await session._merge_and_save_commit_meta(
+        task_id="task-1",
         archive_uri=archive_uri,
         archive_index=1,
         memories_extracted={},
@@ -258,6 +267,7 @@ async def test_phase2_final_meta_read_outage_is_not_stale(error_type):
     session = Session(viking_fs=storage, session_id="session-1", session_uri=uri)
     with pytest.raises(error_type, match="endpoint not found"):
         await session._merge_and_save_commit_meta(
+            task_id="task-1",
             archive_index=1,
             memories_extracted={},
             telemetry_snapshot=None,
@@ -269,15 +279,15 @@ async def test_phase2_final_meta_read_outage_is_not_stale(error_type):
 async def test_done_recovery_repairs_ttl_with_original_completion_time():
     session_uri = "viking://user/default/sessions/session-1"
     archive_uri = f"{session_uri}/history/archive_001"
-    completed_at = "2026-02-03T04:05:06.000Z"
+    completed_at = "2999-02-03T04:05:06.000Z"
     files = {
         f"{session_uri}/messages.jsonl": "",
         f"{session_uri}/.meta.json": json.dumps(
             {
                 "session_id": "session-1",
                 "ttl_days": 2,
-                "received_at": "2026-01-01T00:00:00.000Z",
-                "expires_at": "2026-01-03T00:00:00.000Z",
+                "received_at": "2999-01-01T00:00:00.000Z",
+                "expires_at": "2999-01-03T00:00:00.000Z",
                 "ttl_generation": "generation-1",
             }
         ),
@@ -288,6 +298,10 @@ async def test_done_recovery_repairs_ttl_with_original_completion_time():
             }
         ),
     }
+    files.setdefault(f"{session_uri}/.meta.json", json.dumps({"session_id": "session-1"}))
+    marker = json.loads(files.get(f"{archive_uri}/.meta.json", "{}"))
+    marker["phase1"] = {"status": "ready", "queue_message": {"task_id": "task-done"}}
+    files[f"{archive_uri}/.meta.json"] = json.dumps(marker)
     storage = _MemoryVikingFS(files)
     session = Session(viking_fs=storage, session_id="session-1", session_uri=session_uri)
     await session.load(include_expired=True)
@@ -308,7 +322,7 @@ async def test_done_recovery_repairs_ttl_with_original_completion_time():
 
     persisted = json.loads(files[f"{session_uri}/.meta.json"])
     assert persisted["received_at"] == completed_at
-    assert persisted["expires_at"] == "2026-02-05T04:05:06.000Z"
+    assert persisted["expires_at"] == "2999-02-05T04:05:06.000Z"
 
 
 @pytest.mark.asyncio
@@ -321,6 +335,10 @@ async def test_resume_queued_commit_fails_terminally_for_unreadable_archive(
     files = {}
     if archive_content is not None:
         files[f"{archive_uri}/messages.jsonl"] = archive_content
+    files.setdefault(f"{session_uri}/.meta.json", json.dumps({"session_id": "session-1"}))
+    marker = json.loads(files.get(f"{archive_uri}/.meta.json", "{}"))
+    marker["phase1"] = {"status": "ready", "queue_message": {"task_id": "task-1"}}
+    files[f"{archive_uri}/.meta.json"] = json.dumps(marker)
     viking_fs = _MemoryVikingFS(files)
     session = Session(viking_fs=viking_fs, session_id="session-1", session_uri=session_uri)
     tracker = TaskTracker(_TaskStore())
@@ -389,6 +407,10 @@ async def test_resume_queued_commit_uses_agent_evolution_archive_snapshot(monkey
             }
         ),
     }
+    files.setdefault(f"{session_uri}/.meta.json", json.dumps({"session_id": "session-1"}))
+    marker = json.loads(files.get(f"{archive_uri}/.meta.json", "{}"))
+    marker["phase1"] = {"status": "ready", "queue_message": {"task_id": "task-1"}}
+    files[f"{archive_uri}/.meta.json"] = json.dumps(marker)
     session = Session(
         viking_fs=_MemoryVikingFS(files),
         session_id="session-1",

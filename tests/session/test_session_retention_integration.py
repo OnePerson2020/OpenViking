@@ -68,6 +68,13 @@ def _text_message(message_id: str, role: str, text: str) -> Message:
     return Message(id=message_id, role=role, parts=[TextPart(text)])
 
 
+async def _prepare_phase2(session, archive_uri: str, task_id: str) -> None:
+    await session._merge_archive_meta(
+        archive_uri,
+        {"phase1": {"status": "ready", "queue_message": {"task_id": task_id}}},
+    )
+
+
 def test_checkpoint_record_respects_remaining_retained_budget():
     records = CheckpointPlanner.build_records(
         [
@@ -399,6 +406,7 @@ async def test_phase2_processes_only_current_archive(
         user_id=session.ctx.user.user_id,
         task_id=task_id,
     )
+    await _prepare_phase2(session, current_uri, task_id)
     await session._run_memory_extraction(
         task_id=task_id,
         archive_uri=current_uri,
@@ -476,6 +484,7 @@ async def test_phase2_retry_does_not_repeat_completed_current_archive_steps(
         user_id=session.ctx.user.user_id,
         task_id=task_id,
     )
+    await _prepare_phase2(session, current_uri, task_id)
     await session._run_memory_extraction(
         task_id=task_id,
         archive_uri=current_uri,
@@ -666,6 +675,7 @@ async def test_phase2_persists_checkpoint_from_same_summary_call(
         user_id=session.ctx.user.user_id,
         task_id=task_id,
     )
+    await _prepare_phase2(session, archive_uri, task_id)
     await session._run_memory_extraction(
         task_id=task_id,
         archive_uri=archive_uri,
@@ -1178,6 +1188,7 @@ async def test_missing_required_checkpoint_keeps_archive_raw_uncovered(
         user_id=session.ctx.user.user_id,
         task_id=task_id,
     )
+    await _prepare_phase2(session, archive_uri, task_id)
     await session._run_memory_extraction(
         task_id=task_id,
         archive_uri=archive_uri,
@@ -1247,6 +1258,7 @@ async def test_working_memory_disabled_does_not_generate_or_restore_checkpoint(
         user_id=session.ctx.user.user_id,
         task_id=task_id,
     )
+    await _prepare_phase2(session, archive_uri, task_id)
     await session._run_memory_extraction(
         task_id=task_id,
         archive_uri=archive_uri,
@@ -1620,6 +1632,8 @@ async def test_session_state_lock_serializes_root_meta_without_blocking_archive_
     appending = client(session_id=initial.session_id)
     await phase2.load()
     await appending.load()
+    task_id = str(uuid4())
+    await _prepare_phase2(phase2, f"{initial.uri}/history/archive_001", task_id)
 
     phase2_inside_save = asyncio.Event()
     allow_phase2_save = asyncio.Event()
@@ -1633,6 +1647,7 @@ async def test_session_state_lock_serializes_root_meta_without_blocking_archive_
     monkeypatch.setattr(phase2, "_save_meta", delayed_save_meta)
     merge_task = asyncio.create_task(
         phase2._merge_and_save_commit_meta(
+            task_id=task_id,
             archive_index=1,
             memories_extracted={},
             telemetry_snapshot=None,

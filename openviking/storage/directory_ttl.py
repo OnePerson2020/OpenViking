@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""One immutable lifetime per event date bucket; sessions own their renewal."""
+"""Directory lifetimes and short write admission locks."""
 
 import hashlib
 import json
@@ -11,14 +11,15 @@ from openviking.config.ttl import resolve_ttl_config
 from openviking.core.ttl import (
     OBJECT_TYPE_EVENT,
     OBJECT_TYPE_SESSION,
-    freeze_ttl_fields,
     hidden_by_ttl,
+    initial_ttl_fields,
     ttl_metadata_uri,
     ttl_object_for_uri,
 )
 from openviking.server.error_mapping import is_storage_not_found
 from openviking.storage.abstract_overview import is_abstract_overview_uri
 from openviking.storage.internal_names import is_storage_internal_name, is_ttl_metadata_name
+from openviking.utils.time_utils import get_current_timestamp
 from openviking_cli.exceptions import NotFoundError
 
 
@@ -96,7 +97,7 @@ async def _has_content(fs, path):
 
 
 @asynccontextmanager
-async def content_update(fs, uri, content, *, ctx, lease_ref=None):
+async def content_update(fs, uri, content, *, ctx, lease_ref=None, allow_empty_directory=False):
     """Initialize a new bucket only after its first successful content write.
 
     A durable intent lets readers and cleanup recover the write if metadata
@@ -111,18 +112,25 @@ async def content_update(fs, uri, content, *, ctx, lease_ref=None):
         yield lease_ref
         return
     content_file = is_ttl_content(uri)
-    # Serialize the shared metadata, while an exact body lock fences directory
-    # cleanup. This also composes with callers already holding a file lease:
-    # upgrading two sibling file locks to tree locks would deadlock.
-    lease = await fs._async_agfs.pathlock_acquire_batch(
-        [
-            {"path": fs._uri_to_path(uri, ctx=ctx), "kind": "exact"},
-            {"path": fs._uri_to_path(ttl_metadata_uri(kind, root), ctx=ctx), "kind": "exact"},
-        ],
-        owner_lease_ref=lease_ref,
-        timeout_secs=30.0,
+    # Every writer takes a body lock before admission. Once admitted, ordinary
+    # body I/O runs in parallel; cleanup checks these outstanding file leases
+    # while holding the metadata lock, including not-yet-materialized files.
+    body_lease = await fs._async_agfs.pathlock_acquire_exact(
+        fs._uri_to_path(uri, ctx=ctx), owner_lease_ref=lease_ref, timeout_secs=30.0
     )
+    lease = None
+
+    async def release_admission():
+        nonlocal lease
+        await fs._async_agfs.pathlock_release(lease)
+        lease = None
+
     try:
+        lease = await fs._async_agfs.pathlock_acquire_exact(
+            fs._uri_to_path(ttl_metadata_uri(kind, root), ctx=ctx),
+            owner_lease_ref=body_lease,
+            timeout_secs=30.0,
+        )
         previous = await read_directory_fields(fs, root, ctx=ctx)
         if not previous:
             record = await fs.ttl_registry.get(ctx.account_id, root)
@@ -143,16 +151,18 @@ async def content_update(fs, uri, content, *, ctx, lease_ref=None):
                         await fs._remove_empty_lock_directory(fs._uri_to_path(root, ctx=ctx))
                         raise NotFoundError(root, "session") from exc
                     raise
-            yield lease
+            await release_admission()
+            yield body_lease
             return
         if not content_file:
             # Derived summaries never initialize a new event bucket. Checking
             # under the metadata lock also prevents a late summary resurrecting it.
-            if not previous:
+            if not previous and not allow_empty_directory:
                 if not await _has_content(fs, fs._uri_to_path(root, ctx=ctx)):
                     await fs._remove_empty_lock_directory(fs._uri_to_path(root, ctx=ctx))
                     raise NotFoundError(root, "directory")
-            yield lease
+            await release_admission()
+            yield body_lease
             return
         existed = True
         try:
@@ -163,18 +173,19 @@ async def content_update(fs, uri, content, *, ctx, lease_ref=None):
             existed = False
         if existed and not previous:
             existed = await _has_content(fs, fs._uri_to_path(root, ctx=ctx))
-        # A managed event bucket never renews. An existing unmanaged bucket
-        # remains unmanaged even when its root policy has since changed.
-        if previous.get("expires_at") or existed:
-            yield lease
+        # Content writes do not renew events. Explicit root policy application
+        # updates existing lifetimes separately.
+        if previous.get("received_at") or previous.get("expires_at") or existed:
+            await release_admission()
+            yield body_lease
             return
         desired = {
             **previous,
-            **(freeze_ttl_fields(root, config=await resolve_ttl_config(fs, ctx.account_id)) or {}),
+            **(
+                initial_ttl_fields(root, config=await resolve_ttl_config(fs, ctx.account_id))
+                or {"received_at": get_current_timestamp()}
+            ),
         }
-        if not desired.get("expires_at"):
-            yield lease
-            return
         try:
             old = fs._handle_agfs_read(await fs._async_agfs.read(fs._uri_to_path(uri, ctx=ctx)))
         except Exception as exc:
@@ -183,7 +194,8 @@ async def content_update(fs, uri, content, *, ctx, lease_ref=None):
             old = None
         raw = content.encode("utf-8") if isinstance(content, str) else content
         if old == raw:
-            yield lease
+            await release_admission()
+            yield body_lease
             return
         journal = {
             **(previous or desired),
@@ -195,28 +207,60 @@ async def content_update(fs, uri, content, *, ctx, lease_ref=None):
         }
         await write_directory_fields(fs, root, journal, ctx=ctx, lease_ref=lease)
         try:
-            yield lease
+            yield body_lease
         except BaseException:
             await write_directory_fields(fs, root, previous, ctx=ctx, lease_ref=lease)
             raise
         await write_directory_fields(fs, root, desired, ctx=ctx, lease_ref=lease)
     finally:
-        await fs._async_agfs.pathlock_release(lease)
+        if lease is not None:
+            await fs._async_agfs.pathlock_release(lease)
+        await fs._async_agfs.pathlock_release(body_lease)
 
 
 def directory_content_write(method):
     """Share the lifecycle boundary across text and binary file writes."""
 
     @wraps(method)
-    async def wrapped(self, uri, content, ctx=None, lease_ref=None, auto_pathlock=True):
+    async def wrapped(
+        self,
+        uri,
+        content,
+        ctx=None,
+        lease_ref=None,
+        auto_pathlock=True,
+        *,
+        allow_empty_directory=False,
+    ):
         from openviking.storage.acl import AclAction
 
         await self._ensure_access(uri, ctx, action=AclAction.WRITE)
-        async with content_update(
-            self, uri, content, ctx=self._ctx_or_default(ctx), lease_ref=lease_ref
-        ) as lease:
-            return await method(
-                self, uri, content, ctx=ctx, lease_ref=lease, auto_pathlock=auto_pathlock
-            )
+        from openviking.session.commit_lifetime import commit_write
+
+        async with commit_write(self, self._ctx_or_default(ctx), lease_ref) as source_lease:
+            file_lease = None
+            try:
+                if source_lease is not lease_ref:
+                    # A session guard proves source ownership; AGFS still needs
+                    # explicit coverage of the target file, including metadata.
+                    file_lease = await self._async_agfs.pathlock_acquire_exact(
+                        self._uri_to_path(uri, ctx=ctx),
+                        owner_lease_ref=source_lease,
+                        timeout_secs=30.0,
+                    )
+                async with content_update(
+                    self,
+                    uri,
+                    content,
+                    ctx=self._ctx_or_default(ctx),
+                    lease_ref=file_lease or source_lease,
+                    allow_empty_directory=allow_empty_directory,
+                ) as lease:
+                    return await method(
+                        self, uri, content, ctx=ctx, lease_ref=lease, auto_pathlock=auto_pathlock
+                    )
+            finally:
+                if file_lease is not None:
+                    await self._async_agfs.pathlock_release(file_lease)
 
     return wrapped

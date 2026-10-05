@@ -128,7 +128,7 @@ def test_non_root_event_paths_reject_policy(suffix):
         )
 
 
-def test_session_defaults_reject_absolute_retention():
+def test_session_defaults_accept_absolute_retention():
     for value in (
         {"sessions": {"mode": "absolute", "ttl_absolute": 2000000000}},
         {
@@ -137,8 +137,8 @@ def test_session_defaults_reject_absolute_retention():
             }
         },
     ):
-        with pytest.raises(ValueError, match="relative retention only"):
-            TTLConfig.model_validate(value)
+        config = TTLConfig.model_validate(value)
+        assert config.resolve_uri_policy("viking://user/u1/sessions/s1", "sessions").mode == "absolute"
 
 
 @pytest.mark.parametrize("suffix", ["/2026", "/2026/09", "/2026/09/30", "/2026/09/30/a.md"])

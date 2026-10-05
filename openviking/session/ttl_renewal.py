@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""Recover a saved Session completion before applying its frozen TTL."""
+"""Recover a saved Session completion before evaluating its persisted TTL."""
 
 from __future__ import annotations
 

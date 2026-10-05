@@ -3,8 +3,8 @@
 """Resolve event-date and session directory lifetimes in one place.
 
 TTL is off by default. Each events/YYYY/MM/DD directory or session owns one
-expires_at shared by all descendants. Event deadlines stay fixed; sessions
-renew their saved relative duration after successful content updates.
+expires_at shared by all descendants. Root policy changes apply to existing
+directories; only sessions also renew after successful content updates.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from typing import Any, Mapping, Optional
 from openviking.core.namespace import uri_parts
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 from openviking_cli.utils.config import TTLConfig, TTLScope, get_openviking_config
+from openviking_cli.utils.config.ttl_config import TTLPolicy
 
 # Object-type tags used by lifecycle records / cleanup, kept next to the scope
 # rules so callers do not re-derive them.
@@ -90,24 +91,45 @@ def ttl_object_for_uri(uri: str) -> Optional[tuple[str, str]]:
 
 
 def compute_expires_at(received_at: datetime, ttl_days: int) -> datetime:
-    """Return the frozen expiry: ``received_at`` plus ``ttl_days`` whole days."""
+    """Return ``received_at`` plus ``ttl_days`` whole days."""
     if received_at.tzinfo is None:
         received_at = received_at.replace(tzinfo=timezone.utc)
     return received_at + timedelta(days=ttl_days)
 
 
-def freeze_ttl_fields(
+def policy_ttl_fields(policy: TTLPolicy, received_at: Optional[datetime] = None) -> dict:
+    """Compute a directory's fields without replacing its business timestamp.
+
+    Creation and explicit policy application use the same calculation. Policy
+    application may shorten a deadline, unlike ordinary session renewal.
+    """
+    if received_at is not None and received_at.tzinfo is None:
+        received_at = received_at.replace(tzinfo=timezone.utc)
+    days = policy.ttl_days if policy.mode == "days" else None
+    if policy.mode == "absolute":
+        expires = datetime.fromtimestamp(policy.ttl_absolute, timezone.utc)
+    elif days is not None:
+        if received_at is None:
+            raise ValueError("relative TTL requires the original content timestamp")
+        expires = compute_expires_at(received_at, days)
+    else:
+        expires = None
+    fields = {
+        "ttl_days": days,
+        "expires_at": format_iso8601(expires) if expires is not None else "",
+    }
+    if received_at is not None:
+        fields["received_at"] = format_iso8601(received_at)
+    return fields
+
+
+def initial_ttl_fields(
     uri: str,
     *,
     received_at: Optional[datetime] = None,
     config: Optional[TTLConfig] = None,
 ) -> Optional[dict]:
-    """Compute the initial TTL snapshot for a new object, or ``None`` when off.
-
-    Returns a dict with RFC 3339 ``received_at``/``expires_at`` strings and the
-    integer ``ttl_days`` actually applied. Later config changes do not alter the
-    snapshot duration; sessions renew it from successful content updates.
-    """
+    """Initialize a new owner's deadline, or return ``None`` when TTL is off."""
     scope = ttl_scope_for_uri(uri)
     target = ttl_object_for_uri(uri)
     if target is None or target[1] != uri.rstrip("/"):
@@ -116,21 +138,9 @@ def freeze_ttl_fields(
     if ttl_config is None:
         return None
     policy = ttl_config.resolve_uri_policy(uri, scope)
-    ttl_days = policy.ttl_days if policy.mode == "days" else None
-    received = received_at or datetime.now(timezone.utc)
-    if received.tzinfo is None:
-        received = received.replace(tzinfo=timezone.utc)
-    if policy.mode == "absolute":
-        expires = datetime.fromtimestamp(policy.ttl_absolute, timezone.utc)
-    elif ttl_days is not None:
-        expires = compute_expires_at(received, ttl_days)
-    else:
+    if policy.mode not in {"days", "absolute"}:
         return None
-    return {
-        "ttl_days": ttl_days,
-        "received_at": format_iso8601(received),
-        "expires_at": format_iso8601(expires),
-    }
+    return policy_ttl_fields(policy, received_at or datetime.now(timezone.utc))
 
 
 def strip_ttl_fields(metadata: Mapping[str, Any]) -> dict[str, Any]:
@@ -163,13 +173,7 @@ def is_expired(expires_at: Optional[str], *, now: Optional[datetime] = None) -> 
 
 
 def ttl_enabled() -> bool:
-    """Whether current policy creates TTL snapshots for new objects.
-
-    This switch is deliberately not consulted by visibility checks. Policy
-    changes only affect objects created afterwards; an object that already has
-    a frozen ``expires_at`` must not become visible again when policy is later
-    disabled.
-    """
+    """Whether policy enables TTL; reads always use persisted object deadlines."""
     config = _current_ttl_config()
     return config is not None and config.enabled
 
@@ -178,9 +182,8 @@ def hidden_by_ttl(expires_at: Optional[str], *, now: Optional[datetime] = None) 
     """Whether a read/compute path should treat ``expires_at`` as logically gone.
 
     Used by filesystem reads and vector candidate validation against source
-    metadata. Visibility follows the frozen object snapshot, not
-    current policy: disabling TTL stops new snapshots but cannot revive an
-    already-expired object. Objects without ``expires_at`` remain visible.
+    metadata. Visibility follows the persisted object deadline. Policy updates
+    can change a live object's deadline but cannot revive an expired object.
     """
     return is_expired(expires_at, now=now)
 

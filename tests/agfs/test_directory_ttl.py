@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""Real filesystem coverage of root policies and immutable event lifetimes."""
+"""Real filesystem coverage of root policies and event content-write lifetimes."""
 
 import asyncio
 import json
@@ -45,7 +45,7 @@ async def test_event_deadline_is_frozen_on_first_content_write(binding_fs, prefi
 
 
 @pytest.mark.asyncio
-async def test_only_new_buckets_inherit_changed_policy(binding_fs, enabled):
+async def test_content_writes_do_not_implicitly_reapply_policy(binding_fs, enabled):
     fs, ctx = binding_fs, root_ctx()
     root = "viking://user/default/memories/events"
     enabled.global_default.mode = "disabled"

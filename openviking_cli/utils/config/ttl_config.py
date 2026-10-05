@@ -3,7 +3,7 @@
 """Default-off TTL policies for event date directories and sessions.
 
 Priority: events/sessions root > type default > library global > off.
-A disabled node stops inheritance. Existing directories keep their snapshots.
+A disabled node stops inheritance. Policy application updates live directories.
 """
 
 from typing import Dict, Literal, Optional
@@ -46,7 +46,7 @@ class TTLPolicy(BaseModel):
     - ``inherit``: defer to the next explicit ancestor, then scope -> global ->
       off. Valid for directories and scope defaults, never for the library global.
     - ``disabled``: explicitly no TTL; blocks inheritance from the global level.
-    - ``days``: initialize retention for a new lifecycle directory. ``ttl_days`` is then a required positive integer (minimum 1 day). "Off" is expressed with
+    - ``days``: set directory retention. ``ttl_days`` is then a required positive integer (minimum 1 day). "Off" is expressed with
       ``disabled``, never with ``0`` or a negative value.
     """
 
@@ -73,9 +73,8 @@ class TTLConfig(BaseModel):
 
     The default instance leaves the global policy ``disabled``
     and the event/session scopes ``inherit``, so nothing expires unless an
-    operator opts in. Changing this config only affects objects created
-    afterwards. Existing managed objects retain their snapshotted duration,
-    and only sessions renew after successful content changes.
+    operator opts in. Policy application also updates existing live directories;
+    only sessions renew automatically after successful content changes.
     """
 
     global_default: TTLPolicy = RuntimeField(
@@ -115,8 +114,6 @@ class TTLConfig(BaseModel):
                 "ttl.global mode must be 'disabled' or 'days' ('inherit' is not "
                 "allowed at the global level)"
             )
-        if self.sessions.mode == "absolute":
-            raise ValueError("sessions support relative retention only")
         normalized: Dict[str, TTLPolicy] = {}
         for raw_uri, policy in self.directories.items():
             uri = raw_uri.rstrip("/")
@@ -125,8 +122,6 @@ class TTLConfig(BaseModel):
                     "ttl.directories keys must be concrete user events, peer events, "
                     "or sessions roots; child directories are read-only"
                 )
-            if uri.endswith("/sessions") and policy.mode == "absolute":
-                raise ValueError("sessions support relative retention only")
             if uri in normalized:
                 raise ValueError(f"duplicate ttl directory after normalization: {uri}")
             normalized[uri] = policy

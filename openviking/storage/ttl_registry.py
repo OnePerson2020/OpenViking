@@ -114,7 +114,9 @@ class TTLRegistry:
         """Register/revise expiry using the existing task store's delayed index."""
         marker = self.marker_path(record.account_id)
         await self._agfs.ensure_parent_dirs(marker)
-        await self._agfs.write(marker, b"1")
+        # Only presence matters, and every publisher writes the same value.
+        # Do not contend on a shared account lock when applying TTL in parallel.
+        await self._agfs.write(marker, b"1", auto_pathlock=False)
         fields = asdict(record)
         await self._tasks.schedule(
             _TASK_KIND,

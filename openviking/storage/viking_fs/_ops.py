@@ -358,6 +358,8 @@ class _OpsMixin:
                 raise ResourceBusyError(f"Resource is being processed: {uri}", uri=uri)
 
         try:
+            if file_locks and is_dir:
+                await self._async_agfs.pathlock_check_descendants(path, lease)
             uris_to_delete = (
                 await self._collect_uris(
                     path,
@@ -2535,7 +2537,7 @@ class _OpsMixin:
         *,
         ctx: Optional[RequestContext],
     ) -> Optional["TTLRecord"]:
-        """Parse a frozen TTL snapshot without changing the registry."""
+        """Parse persisted TTL metadata without changing the registry."""
         target = self._ttl_metadata_target(uri)
         if target is None:
             return None

@@ -441,6 +441,7 @@ class FSService:
                     ),
                     ctx=ctx,
                     lease_ref=lease,
+                    allow_empty_directory=True,
                 )
                 await vectorize_directory_meta(
                     uri=directory_uri,

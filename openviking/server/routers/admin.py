@@ -39,6 +39,7 @@ from openviking.service.task_store import (
 from openviking.service.task_tracker import (
     get_task_tracker,
 )
+from openviking.service.ttl_policy import patch_ttl_configuration
 from openviking.session.memory.account_templates import (
     EDITABLE_MEMORY_TEMPLATE_FIELDS,
     default_memory_template,
@@ -785,7 +786,12 @@ async def patch_account_configuration(
     await _check_account_exists(request, account_id)
     _authorize_account_config_patch(ctx, body.settings)
     try:
-        await _get_runtime_config_manager().patch_account(account_id, body.settings)
+        await patch_ttl_configuration(
+            get_service().viking_fs,
+            _get_runtime_config_manager(),
+            body.settings,
+            account_id=account_id,
+        )
     except (ConfigPatchError, ValueError) as exc:
         raise InvalidArgumentError(str(exc)) from exc
     settings = await _get_runtime_config_manager().get_settings(
@@ -822,7 +828,7 @@ async def patch_cluster_configuration(
     """Apply a three-state PATCH to the cluster configuration layer."""
     runtime_config = _get_runtime_config_manager()
     try:
-        await runtime_config.patch_cluster(body.settings)
+        await patch_ttl_configuration(get_service().viking_fs, runtime_config, body.settings)
     except (ConfigPatchError, ValueError) as exc:
         raise InvalidArgumentError(str(exc)) from exc
     settings = await runtime_config.get_settings(ConfigScope.cluster())
