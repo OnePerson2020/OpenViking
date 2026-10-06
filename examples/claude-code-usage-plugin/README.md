@@ -43,7 +43,9 @@ claude plugin marketplace add https://raw.githubusercontent.com/volcengine/OpenV
 claude plugin install ov-usage@openviking
 ```
 
-If you already added the marketplace, run `claude plugin marketplace update openviking` first. Then start a new session.
+If you already added this marketplace, run `claude plugin marketplace update openviking` first. Then start a new session.
+
+If you installed openviking-memory with the one-line installer, you already have a marketplace named `openviking` that points at the installer's local copy. Adding the marketplace above replaces it, so openviking-memory then updates from the repository's `main` branch instead of the installer's release.
 
 ## What it reads and stores
 

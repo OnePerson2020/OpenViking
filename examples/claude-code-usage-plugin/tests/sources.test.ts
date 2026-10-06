@@ -83,6 +83,11 @@ describe("one answer", () => {
     expect(titleOf(EVENT)).toBe("10/3 web版本未更新排查请求");
   });
 
+  test("a title with a literal % does not throw", () => {
+    expect(titleOf("viking://resources/docs/50% off.md")).toBe("50% off");
+    expect(titleOf("viking://resources/docs/a%20b.md")).toBe("a b");
+  });
+
   test("secrets are redacted", () => {
     expect(redact("Bearer abcdefghijklmnopqrstuvwxyz sk-abcdefghijklmnopqrstuvwx")).toBe(
       "Bearer [REDACTED] [REDACTED]",

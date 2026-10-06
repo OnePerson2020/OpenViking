@@ -45,6 +45,8 @@ claude plugin install ov-usage@openviking
 
 如果之前已经添加过这个 marketplace，先运行 `claude plugin marketplace update openviking`。装好后开一个新会话。
 
+如果 openviking-memory 是用一键安装器装的，本机已经有一个名为 `openviking`、指向安装器本地副本的 marketplace。再执行上面的 add 会替换它，之后 openviking-memory 会改为从仓库 `main` 分支更新，而不是跟随安装器的发布版本。
+
 ## 读取和保存的内容
 
 - **自动召回**：openviking-memory 的 `UserPromptSubmit` hook 加进提示的 `<openviking-context>` 块。读取每个 `<memory>` 的 `uri` 和 `score`；digest 格式则读取每行里的 `viking://` URI。不读 openviking-memory 的任何文件或配置。如果 openviking-memory 改了这个块的格式，自动召回的条目就不会再显示。

@@ -144,9 +144,18 @@ const NOUN: Record<Group, [string, string]> = {
 
 const plural = (n: number, [one, many]: [string, string]) => `${n} ${n === 1 ? one : many}`;
 
+// URIs can hold a literal "%" (a title like "50% off"), which decodeURIComponent rejects.
+function decodeUri(uri: string): string {
+  try {
+    return decodeURIComponent(uri);
+  } catch {
+    return uri;
+  }
+}
+
 // A short name for a source: its file name, with the date of a dated event.
 export function titleOf(uri: string): string {
-  const parts = decodeURIComponent(uri).split("/").filter(Boolean);
+  const parts = decodeUri(uri).split("/").filter(Boolean);
   let name = (parts.at(-1) ?? uri).replace(/\.md$/, "");
   if (/^(\.|summary$|index$|prompts$)/i.test(name)) name = `${parts.at(-2) ?? ""}/${name}`;
   const d = /\/(\d{4})\/(\d{2})\/(\d{2})\//.exec(uri);
