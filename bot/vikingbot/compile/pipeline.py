@@ -9,6 +9,8 @@ from collections import Counter
 from dataclasses import asdict
 from typing import Any
 
+from loguru import logger
+
 from openviking.core.namespace import classify_uri
 from openviking.utils.path_safety import safe_join_viking_uri
 from vikingbot.compile import entry
@@ -141,6 +143,7 @@ class Pipeline:
         self.catalog.clear()
         self.owners.clear()
         self.direct_output_format = None
+        failed = False
         try:
             sources = await self.seed(batches)
             runtime = await self.files.get("runtime")
@@ -303,6 +306,7 @@ class Pipeline:
                 active_stage = None
             return result
         except BaseException as exc:
+            failed = True
             self.failures.append(str(exc)[:800] or type(exc).__name__)
             if isinstance(exc, Exception) and not isinstance(exc, CompileFailure):
                 raise CompileFailure(
@@ -314,22 +318,31 @@ class Pipeline:
                 self.metrics[f"{active_stage}_milliseconds"] = round(
                     (time.monotonic() - stage_start) * 1000
                 )
-            await self.write_coverage()
-            self.metrics["total_milliseconds"] = round((time.monotonic() - started) * 1000)
-            self.metrics["pending"] = sum(s == "pending" for s in self.status.values())
-            self.metrics["unreferenced"] = sum(s == "unreferenced" for s in self.status.values())
-            self.metrics["failed"] = sum(s == "failed" for s in self.status.values())
-            await self.files.put(
-                "summary",
-                {
-                    "prepared": complete,
-                    "committed": False,
-                    "metrics": dict(self.metrics),
-                    "states": self.status,
-                    "errors": self.failures,
-                    "warnings": self.warnings,
-                },
-            )
+            try:
+                await self.write_coverage()
+                self.metrics["total_milliseconds"] = round((time.monotonic() - started) * 1000)
+                self.metrics["pending"] = sum(s == "pending" for s in self.status.values())
+                self.metrics["unreferenced"] = sum(
+                    s == "unreferenced" for s in self.status.values()
+                )
+                self.metrics["failed"] = sum(s == "failed" for s in self.status.values())
+                await self.files.put(
+                    "summary",
+                    {
+                        "prepared": complete,
+                        "committed": False,
+                        "metrics": dict(self.metrics),
+                        "states": self.status,
+                        "errors": self.failures,
+                        "warnings": self.warnings,
+                    },
+                )
+            except Exception:
+                if not failed:
+                    raise
+                logger.exception(
+                    "Compile state finalization failed; preserving the execution error"
+                )
 
     async def write_coverage(self, published=()):
         """Record every input's lineage disposition and acknowledged final files with hashes.

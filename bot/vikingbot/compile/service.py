@@ -123,6 +123,28 @@ def _consume_background_result(future: asyncio.Future[Any], *, label: str) -> No
         logger.warning("Compile {} failed after its grace deadline: {}", label, exc)
 
 
+async def _renew_compile_sandbox(
+    sandbox: WorkspaceSandbox, interval: float, owner: asyncio.Task[Any]
+) -> None:
+    """Renew the current sandbox immediately and every interval seconds until cancelled.
+
+    Each health/renewal request is bounded by interval; failure interrupts owner,
+    which retrieves this coroutine's exception before reporting the task failure.
+    """
+    while True:
+        try:
+            if not await asyncio.wait_for(sandbox.is_healthy(), timeout=interval):
+                raise RuntimeError("Sandbox is not healthy")
+        except Exception as exc:
+            owner.cancel()
+            raise CompileFailure(
+                "UNAVAILABLE",
+                f"Sandbox renewal failed: {str(exc) or type(exc).__name__}",
+                stage="sandbox",
+            ) from exc
+        await asyncio.sleep(interval)
+
+
 async def _await_with_hard_timeout(
     awaitable: Awaitable[Any],
     *,
@@ -695,6 +717,7 @@ class BotCompileService:
         child_usage: dict[str, int] = {}
         subagents: SubagentManager | None = None
         preserve_workspace = False
+        renewal_task = None
         try:
             await self._set_state(task_id, status="running", stage="collecting_context")
             client = await VikingClient.create(connection=connection, config=self.config)
@@ -725,6 +748,11 @@ class BotCompileService:
             # An empty task workspace prevents bootstrap files from becoming outputs.
             workspace.mkdir(parents=True, exist_ok=True)
             sandbox = await sandbox_manager.get_sandbox(session_key)
+            if task_config.sandbox.backend == SandboxBackend.OPENSANDBOX:
+                interval = task_config.sandbox.backends.opensandbox.runtime.timeout / 3
+                renewal_task = asyncio.create_task(
+                    _renew_compile_sandbox(sandbox, interval, asyncio.current_task())
+                )
             if target_type in {"resource", "skill"}:
                 focused_loop = None
 
@@ -915,11 +943,20 @@ class BotCompileService:
                 task.error = None
 
             await self.store.update(task_id, complete)
-        except BaseException:
+        except BaseException as exc:
             # Source and merge evidence must survive failed or cancelled pipeline execution.
             preserve_workspace = preserve_workspace or target_type in {"resource", "skill"}
+            if (
+                isinstance(exc, asyncio.CancelledError)
+                and renewal_task is not None
+                and renewal_task.done()
+            ):
+                renewal_task.result()
             raise
         finally:
+            if renewal_task is not None:
+                renewal_task.cancel()
+                await asyncio.gather(renewal_task, return_exceptions=True)
             if subagents is not None:
                 await subagents.cancel_all()
             agent_usage = _merge_usage(agent_usage, child_usage)
