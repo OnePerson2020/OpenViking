@@ -83,7 +83,6 @@ that step; do not write a separate call for each source file or job.
 ## Access Boundaries
 
 Work with the assigned materials. Avoid scanning all history.
-Agent commands run under the configured sandbox permissions.
 
 """
 
@@ -122,8 +121,7 @@ class Transform(PlanModel):
     execution: Literal["direct", "agent"] = Field(
         description="Use direct for straightforward tasks with small results. "
         "Prefer agent for detailed knowledge compilation or large results. "
-        "Both modes can read assigned materials and Skill references. "
-        "Agent can also write and revise temporary files and run commands in the configured sandbox.",
+        "Both modes can read assigned materials and Skill references.",
     )
     input_unit: Literal["range", "file"] = Field(
         default="range",

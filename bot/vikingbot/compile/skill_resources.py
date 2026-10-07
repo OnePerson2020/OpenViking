@@ -27,7 +27,7 @@ class SkillResources(Tool):
 
     name = "read_skill_resource"
     description = (
-        "Read a script, configuration, reference or template inside the selected Skill package. "
+        "Read existing files provided with the Skill that defines this task. "
         "Path is relative to that Skill, or a full Viking URI inside it. "
         "Omit offset/limit to read the complete file. "
         "Line offsets are zero-based; use explicit non-overlapping ranges for long files."

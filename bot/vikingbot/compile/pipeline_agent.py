@@ -247,9 +247,17 @@ def agent_runner(loop, session_key, connection, limits):
             if tool is not None:
                 registry.register(CompileChildTool(tool, root, merge_only=True))
         tool = loop.tools.get("exec")
+        if (
+            loop.config.sandbox.backend == "direct"
+            and not loop.config.sandbox.backends.direct.allow_compile_exec
+        ):
+            tool = None
         if tool is not None:
             await model.files.sandbox.write_file(f"{root}/.keep", "")
             registry.register(CompileChildTool(tool, root))
+            system += (
+                "\nUse exec with pipelines, Python or shell commands when they improve efficiency."
+            )
         child = copy(loop)
         child.provider = ChildProvider(model, schema, stage, submit=submit)
         child._preview_tool_result = complete_tool_result

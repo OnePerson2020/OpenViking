@@ -17,6 +17,7 @@ from loguru import logger
 from pydantic import BaseModel, ValidationError
 
 from openviking.utils.token_estimation import estimate_text_tokens
+from openviking_cli.exceptions import NotFoundError
 from vikingbot.compile.hashing import digest
 from vikingbot.compile.models import COMPILE_STAGING_ROOT
 from vikingbot.compile.results import FileResponse, RouteBatchResponse
@@ -489,7 +490,7 @@ class JsonModel:
                     for call in calls:
                         try:
                             value = await readers[call.name].execute(**call.arguments)
-                        except (ValueError, OSError) as exc:
+                        except (ValueError, OSError, NotFoundError) as exc:
                             value = "Error: " + str(exc)[:800]
                         messages.append({"role": "tool", "tool_call_id": call.id, "content": value})
                     continue
