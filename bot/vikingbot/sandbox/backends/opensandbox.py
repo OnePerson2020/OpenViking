@@ -3,6 +3,7 @@
 import json
 import posixpath
 import shlex
+from collections.abc import AsyncIterator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -216,9 +217,7 @@ class OpenSandboxBackend(SandboxBackend):
         return None
 
     async def read_file(self, path: str) -> str:
-        if not self._sandbox:
-            raise SandboxNotStartedError()
-        return await self._sandbox.files.read_file(self._sandbox_path(path))
+        return (await self.read_file_bytes(path)).decode("utf-8")
 
     async def write_file(self, path: str, content: str) -> None:
         if not self._sandbox:
@@ -349,15 +348,29 @@ class OpenSandboxBackend(SandboxBackend):
             files.append(SandboxFileInfo(path=relative, size=size))
         return sorted(files, key=lambda item: item.path)
 
+    async def _read_bytes_stream(self, path: str, max_bytes: int | None) -> AsyncIterator[bytes]:
+        """Open a file on the started sandbox, requesting at most max_bytes + 1 bytes.
+
+        None requests the full file. HTTP 404 raises FileNotFoundError for path;
+        other SDK failures propagate unchanged.
+        """
+        from opensandbox.exceptions import SandboxApiException
+
+        range_header = None if max_bytes is None else f"bytes=0-{max_bytes}"
+        try:
+            return await self._sandbox.files.read_bytes_stream(
+                self._sandbox_path(path), range_header=range_header
+            )
+        except SandboxApiException as exc:
+            if exc.status_code == 404:
+                raise FileNotFoundError(f"File not found: {path}") from exc
+            raise
+
     async def read_file_bytes(self, path: str, *, max_bytes: int | None = None) -> bytes:
         if not self._sandbox:
             raise SandboxNotStartedError()
         self._validate_max_bytes(max_bytes)
-        range_header = None if max_bytes is None else f"bytes=0-{max_bytes}"
-        stream = await self._sandbox.files.read_bytes_stream(
-            self._sandbox_path(path),
-            range_header=range_header,
-        )
+        stream = await self._read_bytes_stream(path, max_bytes)
         return await self._collect_stream_bytes(stream, path, max_bytes)
 
     async def export_file(
@@ -370,9 +383,5 @@ class OpenSandboxBackend(SandboxBackend):
         if not self._sandbox:
             raise SandboxNotStartedError()
         self._validate_max_bytes(max_bytes)
-        range_header = None if max_bytes is None else f"bytes=0-{max_bytes}"
-        stream = await self._sandbox.files.read_bytes_stream(
-            self._sandbox_path(path),
-            range_header=range_header,
-        )
+        stream = await self._read_bytes_stream(path, max_bytes)
         return await self._export_stream_to_local(stream, destination, path, max_bytes)
