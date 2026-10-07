@@ -973,6 +973,11 @@ class AgentLoop:
         openviking_connection: dict[str, Any] | None = None,
         actor_peer_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        if get_openviking_state(session).get("working_memory_confirmed") is False:
+            # A rejected WM request must not replace local history with an OV tail.
+            return session.get_history(
+                max_messages=len(session.messages), provider_name=provider_name
+            )
         if not self._ov_session_context_enabled():
             return session.get_history(provider_name=provider_name)
 
