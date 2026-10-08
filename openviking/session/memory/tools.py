@@ -10,7 +10,7 @@ import json
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
-from openviking.session.memory.utils import add_line_numbers, line_count, slice_content_lines
+from openviking.session.memory.utils import line_count
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking.telemetry import tracer
 from openviking.utils.token_estimation import estimate_text_tokens
@@ -206,6 +206,16 @@ class MemoryReadTool(MemoryTool):
                     "default": -1,
                     "minimum": -1,
                 },
+                "field": {
+                    "type": "string",
+                    "description": "Exact string field to read instead of the rendered file",
+                },
+                "text_offset": {
+                    "type": "integer",
+                    "description": "Character offset for an exact field read",
+                    "default": 0,
+                    "minimum": 0,
+                },
             },
             "required": ["uri"],
         }
@@ -218,6 +228,16 @@ class MemoryReadTool(MemoryTool):
         uri = kwargs.get("uri", "")
         offset = kwargs.get("offset", 0)
         limit = kwargs.get("limit", -1)
+        field = kwargs.get("field")
+        text_offset = kwargs.get("text_offset", 0)
+        if not isinstance(offset, int) or offset < 0 or not isinstance(limit, int) or limit < -1:
+            return {"error": "Invalid read offset or limit"}
+        if (
+            not isinstance(text_offset, int)
+            or text_offset < 0
+            or (field is not None and not isinstance(field, str))
+        ):
+            return {"error": "Invalid field or text offset"}
         try:
             content = await ctx.viking_fs.read_file(
                 uri,
@@ -225,9 +245,37 @@ class MemoryReadTool(MemoryTool):
             )
             # Parse MEMORY_FIELDS from comment and return dict directly
             mf = MemoryFileUtils.read(content, uri=uri)
+            previous_file = ctx.read_file_contents.get(uri)
             ctx.read_file_contents[uri] = mf
+            from openviking.session.memory.context_budget import memory_read_view
+            from openviking_cli.utils.config import get_openviking_config
+
+            memory_config = get_openviking_config().memory
+            llm_result, constraints = memory_read_view(
+                mf,
+                getattr(memory_config, "extraction_read_token_budget", 3000),
+                query=ctx.read_query if "offset" not in kwargs and field is None else "",
+                offset=offset,
+                limit=limit,
+                field=field,
+                text_offset=text_offset,
+            )
+            previous = ctx.partial_read_fields.get(uri)
+            if previous is not None and previous_file == mf:
+                for field_name in list(constraints):
+                    if field_name not in previous:
+                        constraints.pop(field_name)
+                    else:
+                        constraints[field_name] = list(
+                            dict.fromkeys(previous[field_name] + constraints[field_name])
+                        )
+            ctx.partial_read_fields[uri] = constraints
+            llm_result["_partial"] = bool(constraints)
+            if constraints:
+                llm_result["_omitted_fields"] = list(constraints)
+            else:
+                llm_result.pop("_omitted_fields", None)
             # Remove links/backlinks from LLM-visible output (not needed for extraction)
-            llm_result = mf.to_metadata()
             llm_result.pop("links", None)
             llm_result.pop("backlinks", None)
             for hidden_field in _LLM_HIDDEN_MEMORY_FIELDS:
@@ -241,14 +289,11 @@ class MemoryReadTool(MemoryTool):
             maintenance_notice = memory_maintenance_notice(plain_content)
             if maintenance_notice is not None:
                 llm_result["memory_maintenance_notice"] = maintenance_notice
-            visible_content = slice_content_lines(plain_content, offset=offset, limit=limit)
-            if visible_content:
-                llm_result["content"] = add_line_numbers(visible_content, start_line=offset + 1)
-            elif line_count(plain_content) == 0:
+            if not llm_result.get("content") and line_count(plain_content) == 0:
                 llm_result["content"] = (
                     "<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>"
                 )
-            else:
+            elif not llm_result.get("content") and offset >= line_count(plain_content):
                 llm_result["content"] = (
                     "<system-reminder>Warning: the file exists but is shorter than the provided "
                     f"offset ({offset + 1}). The file has {line_count(plain_content)} lines.</system-reminder>"

@@ -352,6 +352,8 @@ class ResolvedOperation(BaseModel):
     # operation's memories in the vector index. None means "no tags"; used by
     # event-memory auto-tagging. Not persisted in the memory file content.
     search_tags: Optional[List[str]] = None
+    # Runtime-only proof of which snippets were visible from partially read fields.
+    partial_read_fields: Dict[str, List[str]] = Field(default_factory=dict, exclude=True)
 
     def is_edit(self):
         return self.old_memory_file_content is not None

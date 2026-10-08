@@ -1385,13 +1385,10 @@ class MemoryUpdater:
             except ConflictError:
                 raise
             except (NotFoundError, FileNotFoundError):
-                # File doesn't exist yet, that's okay
-                pass
-            except Exception:
-                if is_uri_migration:
-                    raise
-                # Preserve the legacy in-place update fallback to the prefetched
-                # snapshot when a fresh disk read is unavailable.
+                # A confirmed missing file may be created from the resolved
+                # operation. Transient storage failures must propagate: using
+                # a stale pre-fetched snapshot after an uncertain read could
+                # overwrite a concurrent update.
                 pass
             if is_uri_migration:
                 try:
@@ -1405,6 +1402,27 @@ class MemoryUpdater:
             # Fall back to pre-fetched content if disk read failed
             if old_content is None:
                 old_content = source_content
+
+            from openviking.session.memory.context_budget import (
+                memory_file_field_value,
+                validate_partial_fields,
+            )
+
+            partial_read_fields = getattr(resolved_op, "partial_read_fields", {}) or {}
+            if partial_read_fields:
+                if old_content is None:
+                    raise ValueError(f"Partially read memory disappeared before write: {uri}")
+                read_uri = getattr(resolved_op.old_memory_file_content, "uri", None)
+                expected_read_uri = source_content.uri if is_uri_migration else uri
+                if read_uri != expected_read_uri:
+                    raise ValueError(
+                        f"Partially read memory URI changed before write: {read_uri} -> {uri}"
+                    )
+                validate_partial_fields(
+                    old_content,
+                    resolved_op.memory_fields,
+                    partial_read_fields,
+                )
 
             metadata: Dict[str, Any] = {}
             if is_uri_migration:
@@ -1432,10 +1450,9 @@ class MemoryUpdater:
                     if old_content is None:
                         current_value = None
                     else:
-                        if field.name == "content":
-                            current_value = old_content.plain_content()
-                        else:
-                            current_value = old_content.extra_fields.get(field.name)
+                        current_value = memory_file_field_value(
+                            old_content, field.name
+                        )
                     # Use merge_op to process field value
                     merge_op = MergeOpFactory.from_field(field)
                     try:
