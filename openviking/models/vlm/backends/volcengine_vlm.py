@@ -311,13 +311,13 @@ class VolcEngineVLM(OpenAIVLM):
             )
 
     async def _complete_async_with_deadline(self, client, kwargs, has_tools, observation):
-        # Hard wall-clock ceiling across all retries. The Ark SDK's own per-call
-        # timeout does not reliably fire on a stalled read (connection made, server
-        # never responds), and the retry loop can otherwise stack up to
-        # (max_retries + 1) full per-call timeouts, leaving the task "running" with a
-        # frozen updated_at and the per-session commit lock held. asyncio.wait_for
-        # guarantees each attempt is cancelled, and the shared deadline guarantees the
-        # whole call returns/raises within self.timeout regardless of retries.
+        # Hard wall-clock ceiling across all retries. The SDK/httpx timeout bounds
+        # each socket read, not the request: a response that keeps trickling bytes
+        # never trips it (a fully silent server does). The retry loop could also
+        # stack (max_retries + 1) full timeouts, leaving the task "running" with
+        # the per-session commit lock held. asyncio.wait_for bounds each attempt
+        # and the shared deadline bounds the whole call to self.timeout.
+        # Upstream: volcengine/OpenViking#5759 (per-attempt bound only).
         overall_deadline = time.monotonic() + self.timeout
         last_error = None
         for attempt in range(self.max_retries + 1):
