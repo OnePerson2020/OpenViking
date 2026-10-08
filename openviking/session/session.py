@@ -481,10 +481,26 @@ class Session:
         return MemoryPolicy.from_dict(policy)
 
     async def load(self):
-        """Load session data from storage."""
+        """Read root messages and metadata under the writers' exact path lock.
+
+        Append and Phase 1 rewrite the root files under this same lease. An
+        unlocked read can observe partial JSON and strand a queue consumer.
+        Keep permanent corruption visible; never drop malformed message lines.
+        """
         if self._loaded:
             return
+        session_path = self._viking_fs._uri_to_path(self._session_uri, ctx=self.ctx)
+        lease = await self._viking_fs._async_agfs.pathlock_acquire_exact(
+            session_path, timeout_secs=_SESSION_PHASE1_LOCK_TIMEOUT_SECONDS
+        )
+        try:
+            if not self._loaded:
+                await self._load_unlocked()
+        finally:
+            await self._viking_fs._async_agfs.pathlock_release(lease)
 
+    async def _load_unlocked(self):
+        """Load a coherent root snapshot; caller holds the session path lock."""
         try:
             content = await self._viking_fs.read_file(
                 f"{self._session_uri}/messages.jsonl", ctx=self.ctx
