@@ -2,24 +2,6 @@
 
 Agent Runtime Server executes Agent tasks and currently supports Compile. Applications submit tasks through OpenViking's Compile API. OpenViking validates requests, persists tasks, and manages their lifecycle while calling the Runtime execution API. The bundled VikingBot implements the same execution protocol for local deployments.
 
-The bundled VikingBot Compile agent uses the existing `exec` tool and the runtime's `ov` CLI to read the selected Skill, sources, and existing outputs on demand. The runtime must allow command execution and provide `ov` with a configured connection and identity; Compile uses that CLI configuration. Task startup does not download inputs, preload directory summaries, or inject the Skill body. Generated results still go through the submission tool for validation and server-side writes. Resource outputs are staged under `__compile_staging__/output/` in the task workspace; existing target files omitted from the submission are preserved.
-
-With `bot.agents.subagent_enabled` enabled (default `true`), Compile delegates with `spawn` and collects file lists, summaries, and failures with `wait_subagents`. Each child has an independent context, with writes and the default shell working directory bound to `__compile_staging__/drafts/<id>/`. `read_file` also accepts returned workspace draft paths to read other children’s outputs in the same task. Children write target-relative paths and finish with `submit_compile_draft(summary=...)`; they cannot spawn or submit final output.
-
-Resource compilation uses two stages. Source children submit content pages with stable IDs, actual paths and character counts. The parent groups topics, aliases and relevant existing pages through incremental `merge_compile_drafts(groups=[{name, task, draft_ids, existing_pages, reuse}, ...])` patches. Names are stable; omitted groups, fields and assignments remain unchanged. IDs repeated within a group are deduplicated, cross-group duplicates remain explicit conflicts, and unknown IDs do not discard other valid assignments. Submit only missing or conflicting entries to repair the plan; untouched drafts can move between groups. `run=true` requires all source drafts to have unambiguous owners. The parent does not schedule individual merges or copy results.
-
-There is no file-count limit. Each complete batch assignment is bounded to 60,000 characters, including new ranges, selected existing-page ranges, complete previous checkpoints and JSON overhead; new ranges use at most half the budget. Runtime reuses `split_source` for nonoverlapping character ranges, including large files. Topics run in parallel while batches within one topic update checkpoints sequentially. Input/output receipts and source retention are verified before advancing offsets; failures resume at the last successful checkpoint. An independent singleton marked `reuse=true` is copied only after validation and an absent-destination check. Groups publish after all inputs are covered, and final submission rechecks outputs and citations. If a checkpoint leaves no useful input capacity, the group stops with an explicit budget error and retained progress instead of dispatching unbounded work. These checks do not prove semantic equivalence of every fact. Parent and child limits are 120 and 70 rounds, respectively.
-
-When final Resource validation fails, the parent receives the exact error and remaining repair budget on each of at most eight repair rounds. A second invalid submission also ends repair. The runtime then upserts every file in `__compile_staging__/output/` with its original bytes, without content, link or merge-coverage validation. Successful writing completes the task with no incomplete-output warning; omitted target files are preserved. Filesystem, permission and write failures still fail the task.
-
-Resource compilation with children that reaches the total iteration limit before final submission returns `failed/COMPILE_INCOMPLETE`. Failed or cancelled executions retain drafts and `__compile_staging__/merge-state.json` for recovery.
-
-Resource Compile worker concurrency is configured by `bot.compile.map_concurrency`, `bot.compile.shuffle_concurrency`, and `bot.compile.reduce_concurrency`. Same-path candidate merges reuse the Reduce limit. Omitted or `null` values inherit `vlm.max_concurrent`; explicit values must be positive integers. These per-task worker limits apply to direct model jobs and agent jobs, while model requests also obey the shared service-wide limit. See [configuration](../guides/01-configuration.md#botcompile).
-
-`wait_subagents()` blocks until a child completes, fails, or no children remain. Idle waiting does not trigger further parent model calls or consume additional loop iterations; cancellation interrupts the wait. Use `wait_subagents(block=false)` to collect immediately while the parent has other work to do.
-
-All Compile tasks in one VikingBot service share a model-request limit from `vlm.max_concurrent` (default `32`, must be positive). This includes parents, children, and compaction calls; each streaming response holds a slot until it closes. Tool execution and child waits do not occupy model slots. This limit does not cover ordinary chat, semantic processing, or other server processes, and is not a tokens-per-minute limit.
-
 **Code entry points**:
 
 - `openviking/server/routers/compile.py` - Compile task creation
@@ -207,8 +189,8 @@ The task first enters `cancelling`, then becomes `cancelled` after in-process wo
 | `pending` | `queued` |
 | `running` | Execution stage reported by the backend, such as `agent` or `writing` |
 | `cancelling` | Settling in-process work and resource cleanup |
-| `completed` | `completed` |
-| `failed` | Failure stage or `partial`/`salvaged`; includes `error` and a `result` when partial output was saved |
+| `completed` | `completed`, `salvaged` |
+| `failed` | Stage where the failure occurred; the response contains `error` |
 | `cancelled` | `cancelled` |
 
 ### Legacy endpoints

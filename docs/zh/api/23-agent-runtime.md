@@ -2,24 +2,6 @@
 
 Agent Runtime Server 负责执行 Agent 任务，当前支持 Compile。应用通过 OpenViking 的 Compile API 提交任务，OpenViking 负责校验请求、持久化任务和管理生命周期，再调用 Runtime 执行接口；内置 VikingBot 也实现了同一执行协议，可用于本地部署。
 
-内置 VikingBot 的 Compile 通过现有 `exec` 工具调用运行环境中的 `ov` CLI，按需读取 Skill、来源和已有目标内容。运行环境须启用命令执行、安装 `ov`，并配置好 CLI 的连接和身份；Compile 沿用该配置。任务启动时不下载输入文件、预加载目录摘要或注入 Skill 正文。Agent 生成结果后仍调用统一提交工具，由服务校验并写入目标；Resource 输出暂存于任务工作区的 `__compile_staging__/output/`，未提交的已有目标文件保持不变。
-
-开启 `bot.agents.subagent_enabled`（默认 `true`）时，Compile 使用 `spawn` 分工，通过 `wait_subagents` 领取文件清单、摘要和失败信息。每个子 Agent 独立维护上下文，写入路径和默认 shell 工作目录绑定到 `__compile_staging__/drafts/<id>/`；`read_file` 也支持按返回的完整草稿路径读取同任务的其他子 Agent 产物。子 Agent 使用目标相对路径写入，以 `submit_compile_draft(summary=...)` 提交，不能继续派生或提交最终结果。
-
-Resource 编译采用两阶段分工。来源子任务提交内容页，运行时返回稳定草稿 ID、真实路径和字符数。主 Agent 按主题、别名和相关旧页面分组，通过 `merge_compile_drafts(groups=[{name, task, draft_ids, existing_pages, reuse}, ...])` 增量保存归属。组名稳定，省略的组、字段和草稿分配保持不变；同组重复 ID 自动去重，跨组重复记录为冲突，未知 ID 单独报告，不丢弃其他正确分配。只需补交缺失或冲突项；尚未处理的草稿可移动到另一组。调用 `run=true` 前必须完成全部来源的无歧义分配，主 Agent 不逐个调度或复制成品。
-
-合并不限制文件数量，每批完整任务文本限制为 60,000 字符，包含新输入片段、已有页面片段、上一批完整暂存结果和 JSON 开销；新片段至多使用预算的一半。运行时复用 `split_source` 按字符区间无重叠切片，大文件和已选旧页面也参与预算。不同主题并行，同一主题逐批更新暂存结果；每批校验输入到输出的对应关系及来源保留，成功后保存字符进度，失败重试从上一批继续。标记 `reuse=true` 的独立单稿，仅在校验通过且原目标路径不存在时直接收集。整个组完成后才复制成品；最终提交检查全部输入、输出和来源引用。若暂存结果已占满预算，停止该组并保留进度、报告超出预算，不再派发超大任务。该检查保证流转和引用完整，不等同于逐条事实的语义等价证明。主 Agent 默认 120 轮，子 Agent 70 轮。
-
-Resource 最终校验失败后，主 Agent 在最多 8 轮修复的每一轮收到具体错误和剩余修复轮数；第二次无效提交也会结束修复。修复结束时，运行时将 `__compile_staging__/output/` 中所有文件按原始字节 upsert 到 `to`，不再执行内容、链接或合并覆盖校验。写入成功后任务标为 `completed`，不附加未完成提示；未涉及的目标文件保持不变。文件读取、权限和实际写入失败仍会导致任务失败。
-
-Resource 子任务编译在最终提交前达到总轮次上限时，任务返回 `failed/COMPILE_INCOMPLETE`。失败或取消保留任务工作区中的草稿及 `__compile_staging__/merge-state.json`，供恢复使用。
-
-Resource Compile 通过 `bot.compile.map_concurrency`、`bot.compile.shuffle_concurrency` 和 `bot.compile.reduce_concurrency` 配置各阶段工作并发数，同路径候选的最终 merge 复用 Reduce 上限。省略或设为 `null` 时继承 `vlm.max_concurrent`，显式值必须为正整数。这些单任务工作数限制适用于直接模型调用和 agent 执行，模型请求同时受服务级共享并发限制。参见[配置说明](../guides/01-configuration.md#botcompile)。
-
-`wait_subagents()` 默认等待到有子任务完成、失败或已无子任务；空等期间不再触发主 Agent 的模型调用，也不增加循环轮次，取消可中断等待。主 Agent 还有其他工作可做时，使用 `wait_subagents(block=false)` 立即领取已有结果。
-
-同一个 VikingBot 服务内的所有 Compile 任务共享 `vlm.max_concurrent` 指定的模型请求并发额度（默认 `32`，必须为正数），包含主 Agent、子 Agent 和 compact 请求；流式响应结束或关闭后才释放额度。执行工具和等待子任务不占模型额度。该额度不包含普通聊天、语义处理及其他服务进程，也不限制每分钟 Token 数。
-
 **代码入口**：
 
 - `openviking/server/routers/compile.py` - 创建 Compile 任务
@@ -207,8 +189,8 @@ ov task cancel cmp_01abc
 | `pending` | `queued` |
 | `running` | 执行端返回的执行 Stage，例如 `agent`、`writing` |
 | `cancelling` | 收敛当前进程内工作和清理资源 |
-| `completed` | `completed` |
-| `failed` | 失败 Stage，或 `partial`、`salvaged`；包含 `error`，部分保存时还包含 `result` |
+| `completed` | `completed`、`salvaged` |
+| `failed` | 失败发生时的 Stage；响应包含 `error` |
 | `cancelled` | `cancelled` |
 
 ### 旧接口
