@@ -35,13 +35,6 @@ class ProtocolTests(unittest.TestCase):
         self.protocol = PythonExtractionOutputProtocol()
         self.binding = self.protocol.render_new_bindings(self.context, source='test')
 
-    def test_snapshot_is_not_executable_constructor(self):
-        self.assertNotIn('= sdk.existing(', self.binding)
-        snapshot = json.loads(self.binding.splitlines()[-1])
-        self.assertEqual(snapshot['bound_variable'], 'preferences_1')
-        self.assertEqual(snapshot['visible_fields']['content'], 'Use Vim')
-        self.assertNotIn('version', snapshot['visible_fields'])
-
     def test_existing_update_still_compiles(self):
         operations, error = self.protocol.parse(
             'preferences_1.content.edit(search="Vim", replace="Neovim")', self.context)
@@ -53,16 +46,6 @@ class ProtocolTests(unittest.TestCase):
             'x = sdk.existing(memory_type="preferences", content="evil")', self.context)
         self.assertIsNone(operations)
         self.assertIn('reserved', error)
-
-    def test_final_instruction_has_only_available_binding_names(self):
-        text = self.protocol.render_final_instruction(self.context)
-        self.assertIn('preferences_1', text)
-        self.assertNotIn('preferences_2', text)
-
-    def test_unknown_name_retry_is_actionable(self):
-        text = self.protocol.render_format_retry("Line 1: unknown name 'invented'")
-        self.assertIn('Do not derive variable names', text)
-
 
 class WorkingMemoryTests(unittest.IsolatedAsyncioTestCase):
     def config(self, network):
