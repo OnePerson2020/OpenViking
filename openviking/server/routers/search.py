@@ -67,63 +67,6 @@ router = APIRouter(prefix="/api/v1/search", tags=["search"])
 TimeField = Literal["updated_at", "created_at"]
 
 
-class CompileEmbeddingRequest(BaseModel):
-    """Transient Compile routing text; an empty batch requests model identity only."""
-
-    model_config = ConfigDict(extra="forbid")
-    target_uri: str
-    texts: list[str] = Field(default_factory=list, max_length=32)
-    expected_model: str | None = None
-
-    @model_validator(mode="after")
-    def bound_text(self):
-        """Bound each routing description and the total before contacting the provider."""
-        if any(not text.strip() or len(text) > 1024 for text in self.texts):
-            raise ValueError("Compile embedding texts require 1..1024 characters")
-        return self
-
-
-@router.post("/compile-embeddings")
-async def compile_embeddings(
-    request: CompileEmbeddingRequest,
-    _ctx: RequestContext = Depends(get_request_context),
-):
-    """Embed task-local routing candidates without indexing or retaining their content.
-
-    Target validation uses the same tenant identity and ACL checks as file reads.
-    The configured embedder supplies provider concurrency/rate controls. Only model
-    identity and vectors cross the Bot/Server boundary; credentials never do.
-    """
-    from openviking.core.namespace import classify_uri
-    from openviking.models.embedder.base import embed_compat
-
-    target = _resolve_uri_or_uris(request.target_uri, _ctx)
-    classification = classify_uri(target)
-    if classification.context_type != "resource" and not classification.is_skill_namespace:
-        raise InvalidArgumentError(
-            "Compile embeddings require a resource or Skill namespace target"
-        )
-    fs = get_service().viking_fs
-    await fs.stat(target, ctx=_ctx, skip_count=True)
-    embedder = fs._get_embedder(_ctx)
-    # The account's effective embedding settings identify task-local cached vectors.
-    model = (await get_service().embedding_provider.get_status(_ctx.account_id)).fingerprint
-    if request.expected_model and request.expected_model != model:
-        raise InvalidArgumentError("Compile embedding model changed during the task")
-    # Small chunks also bound providers whose embed_async implementation has no limiter.
-    vectors = []
-    for start in range(0, len(request.texts), 4):
-        batch = await asyncio.gather(
-            *(embed_compat(embedder, text) for text in request.texts[start : start + 4])
-        )
-        for result in batch:
-            vector = result.dense_vector
-            if not vector or len(vector) > 8192 or not all(math.isfinite(x) for x in vector):
-                raise InvalidArgumentError("Compile requires finite dense embedding vectors")
-            vectors.append(vector)
-    return Response(status="ok", result={"model": model, "vectors": vectors}).model_dump()
-
-
 def _resolve_search_limit(limit: int, node_limit: Optional[int]) -> int:
     return node_limit if node_limit is not None else limit
 
