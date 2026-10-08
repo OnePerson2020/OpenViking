@@ -4,62 +4,23 @@
 
 import asyncio
 import json
-from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from openviking.core import ttl
 from openviking.service.ttl_cleanup import TTLCleanupService
 from openviking.storage.abstract_overview import render_abstract_overview
 from openviking.storage.directory_ttl import read_directory_fields
 from openviking.storage.errors import LockAcquisitionError, StorageException
 from openviking.storage.ttl_registry import TTLRegistry
 from openviking.storage.vector_ids import vector_record_id
-from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
 from openviking_cli.exceptions import NotFoundError
-from openviking_cli.utils.config.ttl_config import TTLConfig
 from tests.storage.test_transfer_merge_binding import binding_fs as binding_fs
 from tests.storage.test_transfer_merge_binding import indexed_fs as indexed_fs
 from tests.storage.test_transfer_merge_binding import root_ctx
 from tests.unit.service.test_ttl_cleanup import _cleanup_once
 from tests.unit.storage.ttl_test_storage import read_record
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "policy",
-    [
-        {"mode": "days", "ttl_days": 7},
-        {"mode": "absolute", "ttl_absolute": 32503680000},
-        {"mode": "disabled"},
-    ],
-)
-async def test_session_append_preserves_deadline_despite_new_default(
-    binding_fs, monkeypatch, policy
-):
-    from openviking.message import TextPart
-    from openviking.session import session as session_module
-    from openviking.session.session import Session
-
-    fs, ctx = binding_fs, root_ctx()
-    config = TTLConfig(sessions=policy)
-    monkeypatch.setattr(ttl, "get_openviking_config", lambda: SimpleNamespace(ttl=config))
-    session = Session(viking_fs=fs, session_id="fixed-deadline", ctx=ctx)
-    await session.ensure_exists()
-    initial = await read_directory_fields(fs, session.uri, ctx=ctx)
-    config.sessions = TTLConfig(sessions={"mode": "days", "ttl_days": 30}).sessions
-    completed = format_iso8601(parse_iso_datetime(initial["created_at"]) + timedelta(days=1))
-    monkeypatch.setattr(session_module, "get_current_timestamp", lambda: completed)
-    await asyncio.wait_for(session.add_message_async("user", [TextPart("append")]), timeout=10)
-    current = await read_directory_fields(fs, session.uri, ctx=ctx)
-    assert current.get("expires_at") == initial.get("expires_at")
-    assert current["created_at"] == initial["created_at"]
-    assert current["last_message_at"] == completed
-    assert "ttl_days" not in current and "received_at" not in current
-    await session.add_messages_async([])
-    assert await read_directory_fields(fs, session.uri, ctx=ctx) == current
 
 
 @pytest.mark.asyncio

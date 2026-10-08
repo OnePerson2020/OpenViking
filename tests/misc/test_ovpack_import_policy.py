@@ -40,7 +40,7 @@ from tests.storage.test_transfer_merge_binding import indexed_fs as indexed_fs
 class FakeVikingFS:
     _ensure_restore_target_ttl = VikingFS._ensure_restore_target_ttl
     _ttl_metadata_target = staticmethod(VikingFS._ttl_metadata_target)
-    _ttl_record_for_write = VikingFS._ttl_record_for_write
+    _ttl_expiry_for_write = VikingFS._ttl_expiry_for_write
     _handle_agfs_read = VikingFS._handle_agfs_read
 
     def _ctx_or_default(self, ctx):
@@ -799,7 +799,6 @@ async def test_restore_ovpack_applies_backup_manifest_scalar_metadata(
                     "description": "portable description",
                     "tags": ["portable"],
                     "expires_at": "2030-01-02T00:00:00.000Z",
-                    "ttl_generation": "generation-1",
                     "md5": "portable-md5",
                 },
             }
@@ -825,7 +824,6 @@ async def test_restore_ovpack_applies_backup_manifest_scalar_metadata(
     }
     assert vectorized_files[0]["scalar_override"]["tags"] == ["portable"]
     assert vectorized_files[0]["scalar_override"]["expires_at"] == ("2030-01-02T00:00:00.000Z")
-    assert vectorized_files[0]["scalar_override"]["ttl_generation"] == "generation-1"
     assert vectorized_files[0]["scalar_override"]["md5"] == "portable-md5"
 
 
@@ -859,7 +857,7 @@ async def test_ovpack_prettl_overwrite_preserves_current_lifecycle(
             zf.writestr(f"{root}/files/{scope_root}/", "")
     fs = FakeVikingFS(existing_roots={owner, f"viking://{scope_root}"})
     metadata_path = fs._uri_to_path(ttl_metadata_uri("event", owner), ctx=request_ctx)
-    fields = json.dumps({"expires_at": expires_at, "ttl_generation": "current"})
+    fields = json.dumps({"expires_at": expires_at})
     metadata = fields.encode()
 
     async def stat(path, **kwargs):
@@ -895,9 +893,7 @@ async def test_ovpack_new_target_accepts_live_source(
 ):
     files = {"e.md": "body"}
     if managed_source:
-        files[".ttl.json"] = json.dumps(
-            {"expires_at": "2040-01-01T00:00:00Z", "ttl_generation": "new"}
-        )
+        files[".ttl.json"] = json.dumps({"expires_at": "2040-01-01T00:00:00Z"})
     manifest = _manifest_for_files("28", files)
     manifest["root"].update(uri="viking://user/alice/memories/events/2026/09/28", scope="user")
     _write_ovpack_with_manifest(temp_ovpack_path, "28", files, manifest=manifest)

@@ -4,13 +4,17 @@ TTL is off by default. It covers user and peer `events/YYYY/MM/DD` directories a
 
 ## Configuration and policy application
 
-Configure library defaults, type defaults, or one of these exact policy roots:
+TTL uses instance defaults and Account overrides (a Web Studio "library" is an Account). Configure global defaults, type defaults, or one of these three kinds of policy root:
 
 - `viking://user/{user_id}/memories/events`
 - `viking://user/{user_id}/peers/{peer_id}/memories/events`
 - `viking://user/{user_id}/sessions`
 
-Priority is concrete root → type (`user_events`, `peer_events`, `sessions`) → library global → disabled. `disabled` stops inheritance; `inherit` falls back. Existing account configuration represents the library; user/account identity adds no policy level.
+Each concrete root URI can have its own policy. Different users and peers can use different deadlines; a library is not limited to three entries. Sessions belong to users, with no peer sessions root. Roots without overrides inherit their type default, including roots for newly created users and peers.
+
+For each node, merge Account overrides → instance runtime settings → startup settings. Then select concrete root → type (`user_events`, `peer_events`, `sessions`) → `global`. An Account `global` policy does not override a more specific instance type default: overriding instance `sessions=30 days` requires an Account `sessions` policy. User and peer identities locate roots; they add no configuration layer.
+
+`disabled` stops inheritance at that node; `inherit` skips it. PATCH `null` removes the current layer's override. Unconfigured types inherit `global`, which defaults to disabled. The optional recommended preset is 60 days for User events, 60 days for Peer events, and 30 days for Sessions. It takes effect only when explicitly selected.
 
 Years, months, dates, individual sessions, nested directories and files expose read-only deadlines. Enabling or changing a root policy also updates existing live directories, including previously unmanaged history, while respecting more-specific overrides. Relative expiry uses the original business timestamp plus the new duration; absolute expiry uses the configured deadline. Shortening may expire a directory immediately. Disabling the effective policy clears live deadlines. Expired and deleted objects are never revived.
 

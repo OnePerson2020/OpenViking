@@ -24,6 +24,7 @@ from openviking.storage.viking_vector_index_backend import (
     _SingleAccountBackend,
 )
 from openviking_cli.session.user_id import UserIdentifier
+from tests.unit.storage.ttl_test_storage import MemoryAGFS
 
 ROOT = "viking://user/alice/memories/events"
 PAST = "2000-01-01T00:00:00.000Z"
@@ -63,21 +64,9 @@ def test_vector_writes_strip_lifecycle_fields_even_without_schema_metadata():
 def setup(monkeypatch):
     ctx = RequestContext(user=UserIdentifier("acct", "alice"), role=Role.ROOT)
     fs = VikingFS(agfs=SimpleNamespace())
-    files = {}
-
-    async def stat(path, **kwargs):
-        if path not in files:
-            raise FileNotFoundError(path)
-        return {"isDir": False}
-
-    fs._async_agfs.stat = stat
-
-    async def read(path):
-        if path not in files:
-            raise FileNotFoundError(path)
-        return files[path]
-
-    fs._async_agfs.read = AsyncMock(side_effect=read)
+    fs._async_agfs = MemoryAGFS()
+    files = fs._async_agfs.files
+    fs._async_agfs.read = AsyncMock(wraps=fs._async_agfs.read)
     fs.ttl_registry.account_may_have_records = AsyncMock(return_value=True)
     monkeypatch.setattr("openviking.storage.viking_fs.get_viking_fs", lambda: fs)
     monkeypatch.setattr("openviking.storage.viking_vector_index_backend.ttl_enabled", lambda: False)
@@ -245,27 +234,18 @@ async def test_orphan_vectors_hidden_but_raw_cleanup_query_can_find_them(setup):
 @pytest.mark.parametrize(
     "error", [OSError("storage unavailable"), AGFSNetworkError("endpoint not found")]
 )
-async def test_source_read_error_cannot_return_unverified_vector_content(setup, error):
+@pytest.mark.parametrize("entrypoint", ["vector_query", "file_visibility"])
+async def test_source_read_error_cannot_expose_content(setup, error, entrypoint):
     s = setup
     uri = ROOT + "/2026/09/02/event.md"
     s.source(uri, PAST)
     s.rows.append({"uri": uri, "level": 2})
     s.fs._async_agfs.read = AsyncMock(side_effect=error)
     with pytest.raises(type(error), match=str(error)):
-        await s.backend.query(ctx=s.ctx, include_expired=False)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "error", [OSError("storage unavailable"), AGFSNetworkError("endpoint not found")]
-)
-async def test_source_read_error_cannot_expose_event_name(setup, error):
-    s = setup
-    uri = ROOT + "/2026/09/02/event.md"
-    s.source(uri, PAST)
-    s.fs._async_agfs.read = AsyncMock(side_effect=error)
-    with pytest.raises(type(error), match=str(error)):
-        await s.fs._ttl_uri_visible(uri, s.ctx)
+        if entrypoint == "vector_query":
+            await s.backend.query(ctx=s.ctx, include_expired=False)
+        else:
+            await s.fs._ttl_uri_visible(uri, s.ctx)
 
 
 @pytest.mark.asyncio

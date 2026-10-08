@@ -8,7 +8,7 @@ import math
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
 from openviking.core.context import ContextLevel
 from openviking.core.namespace import (
@@ -52,9 +52,6 @@ from openviking_cli.exceptions import (
     PermissionDeniedError,
 )
 from openviking_cli.utils.uri import VikingURI
-
-if TYPE_CHECKING:
-    from openviking.storage.ttl_registry import TTLRecord
 
 
 def _glob_match_uri(entry_uri: str, is_dir: Optional[bool]) -> str:
@@ -568,6 +565,10 @@ class _OpsMixin:
         ctx: Optional[RequestContext],
     ) -> List[str]:
         """Validate all affected entries under the lease before the first content write."""
+        from openviking.storage.ttl_view import TTLView
+
+        real_ctx = self._ctx_or_default(ctx)
+        ttl_view = TTLView(self, real_ctx)
         source_uris: List[str] = []
 
         async def visit(source: str, target: str, directory: bool) -> None:
@@ -582,12 +583,11 @@ class _OpsMixin:
                 await self._ensure_copy_source_access(source, recursive=directory, ctx=ctx)
             await self._ensure_access(target, ctx, action=AclAction.WRITE)
             if not directory:
-                real_ctx = self._ctx_or_default(ctx)
                 for uri in (source, target):
-                    if not await self._ttl_uri_visible(uri, real_ctx):
+                    if not await self._ttl_uri_visible(uri, real_ctx, ttl_view=ttl_view):
                         raise NotFoundError(uri, "file")
                 await self._ensure_transfer_ttl_scope(
-                    source, target, old_scope=old_uri, new_scope=new_uri, ctx=real_ctx
+                    source, target, old_scope=old_uri, new_scope=new_uri, ttl_view=ttl_view
                 )
             await self._ensure_transfer_target_type(
                 self._uri_to_path(target, ctx=ctx), target, is_dir=directory
@@ -611,7 +611,7 @@ class _OpsMixin:
         return source_uris
 
     async def _ensure_transfer_ttl_scope(
-        self, source: str, target: str, *, old_scope: str, new_scope: str, ctx: RequestContext
+        self, source: str, target: str, *, old_scope: str, new_scope: str, ttl_view
     ) -> None:
         """Reject moves/copies that would detach content from its TTL owner."""
         source_owner = ttl_object_for_uri(source)
@@ -620,27 +620,15 @@ class _OpsMixin:
             return
         object_type, object_uri = source_owner
         compatible = target_owner is not None and target_owner[0] == object_type
-        if source_owner is not None:
-            old_root = old_scope.rstrip("/")
-            compatible = (
-                compatible
-                and (object_uri == old_root or object_uri.startswith(old_root + "/"))
-                and target_owner[1] == new_scope.rstrip("/") + object_uri[len(old_root) :]
-            )
+        old_root = old_scope.rstrip("/")
+        compatible = (
+            compatible
+            and (object_uri == old_root or object_uri.startswith(old_root + "/"))
+            and target_owner[1] == new_scope.rstrip("/") + object_uri[len(old_root) :]
+        )
         if compatible:
             return
-        metadata_uri = ttl_metadata_uri(object_type, object_uri)
-        try:
-            raw = self._handle_agfs_read(
-                await self._async_agfs.read(self._uri_to_path(metadata_uri, ctx=ctx))
-            )
-        except Exception as exc:
-            if not is_storage_not_found(exc):
-                raise
-            record = None
-        else:
-            record = self._ttl_record_for_write(metadata_uri, raw, ctx=ctx)
-        if record is not None:
+        if (await ttl_view.fields(source))["expires_at"]:
             raise InvalidArgumentError("Transfer destination cannot preserve the source TTL owner")
 
     async def _ensure_copy_source_access(
@@ -2117,7 +2105,6 @@ class _OpsMixin:
         automatic pathlock disabled. Only safe for URIs that are never written
         concurrently (e.g. unique-per-request shared upload directories).
         """
-        await self._ensure_access(uri, ctx, action=AclAction.WRITE)
         path = self._uri_to_path(uri, ctx=ctx)
         await self._ensure_parent_dirs(path, ctx=ctx, lease_ref=lease_ref)
 
@@ -2250,7 +2237,6 @@ class _OpsMixin:
                 raise NotFoundError(uri, "file") from exc
             raise
 
-    @directory_content_write
     async def write_file_bytes(
         self,
         uri: str,
@@ -2258,33 +2244,18 @@ class _OpsMixin:
         ctx: Optional[RequestContext] = None,
         lease_ref: Dict[str, Any] | None = None,
         auto_pathlock: bool = True,
+        *,
+        allow_empty_directory: bool = False,
     ) -> None:
-        """Write single binary file. Encryption lock handled internally by EncryptionWrappedFS.
-
-        When ``auto_pathlock`` is False the underlying AGFS write runs with
-        automatic pathlock disabled. Only safe for URIs that are never written
-        concurrently (e.g. unique-per-request shared upload directories).
-        """
-        await self._ensure_access(uri, ctx, action=AclAction.WRITE)
-        path = self._uri_to_path(uri, ctx=ctx)
-        await self._ensure_parent_dirs(path, ctx=ctx, lease_ref=lease_ref)
-
-        owned_lease = None
-        effective_lease = lease_ref
-        if effective_lease is None and auto_pathlock:
-            effective_lease = await self._async_agfs.pathlock_acquire_exact(path)
-            owned_lease = effective_lease
-        try:
-            await self._mark_ttl_write(uri, content, ctx=ctx)
-            await self._async_agfs.write(
-                path,
-                content,
-                fs_ctx=self._pathlock_fs_ctx(ctx, effective_lease),
-                auto_pathlock=False if effective_lease is not None else auto_pathlock,
-            )
-        finally:
-            if owned_lease is not None:
-                await self._async_agfs.pathlock_release(owned_lease)
+        """Write binary content with the same lifecycle and locks as write_file."""
+        await self.write_file(
+            uri,
+            content,
+            ctx=ctx,
+            lease_ref=lease_ref,
+            auto_pathlock=auto_pathlock,
+            allow_empty_directory=allow_empty_directory,
+        )
 
     @staticmethod
     def _ttl_metadata_target(uri: str) -> Optional[tuple[str, str]]:
@@ -2298,7 +2269,7 @@ class _OpsMixin:
         return target
 
     async def _mark_ttl_write(self, uri, content, *, ctx) -> None:
-        if self._ttl_record_for_write(uri, content, ctx=ctx) is not None:
+        if self._ttl_expiry_for_write(uri, content) is not None:
             await self.ttl_registry.mark_account(self._ctx_or_default(ctx).account_id)
 
     async def _mark_transferred_ttl(self, source_uris, old_scope, new_scope, *, ctx, lease_ref):
@@ -2315,28 +2286,11 @@ class _OpsMixin:
                 )
                 await self._mark_ttl_write(target_uri, raw, ctx=ctx)
 
-    def _ttl_record_for_write(
-        self,
-        uri: str,
-        content: bytes,
-        *,
-        ctx: Optional[RequestContext],
-    ) -> Optional["TTLRecord"]:
-        """Parse persisted TTL metadata without changing the registry."""
-        target = self._ttl_metadata_target(uri)
-        if target is None:
+    def _ttl_expiry_for_write(self, uri: str, content: bytes) -> Optional[str]:
+        """Read the saved deadline when writing or restoring owner metadata."""
+        if self._ttl_metadata_target(uri) is None:
             return None
-        object_type, object_uri = target
-        text = content.decode("utf-8")
-        fields = json.loads(text)
-        from openviking.storage.ttl_registry import record_from_fields
-
-        return record_from_fields(
-            uri=object_uri,
-            object_type=object_type,
-            fields=fields,
-            ctx=self._ctx_or_default(ctx),
-        )
+        return str(json.loads(content).get("expires_at") or "") or None
 
     async def _remove_empty_lock_directory(self, path):
         """Remove empty directories recreated by metadata lock acquisition.

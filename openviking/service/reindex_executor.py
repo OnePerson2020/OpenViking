@@ -1334,8 +1334,7 @@ class ReindexExecutor:
                 )
                 return file_counters
             body = body_source.text if body_source.exists else ""
-            memory_file = MemoryFileUtils.read(body) if body else None
-            memory_content = memory_file.content if memory_file else ""
+            memory_content = MemoryFileUtils.read(body).content if body else ""
             existing = await self._fetch_existing_record(
                 uri=file_uri,
                 level=2,

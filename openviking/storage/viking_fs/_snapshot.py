@@ -143,20 +143,14 @@ class _SnapshotMixin:
         target = ttl_object_for_uri(uri)
         if target is None:
             return
-        kind, owner = target
+        _, owner = target
         from openviking.storage.directory_ttl import read_directory_fields
-        from openviking.storage.ttl_registry import record_from_fields
 
-        current = record_from_fields(
-            uri=owner,
-            object_type=kind,
-            fields=await read_directory_fields(self, owner, ctx=ctx),
-            ctx=ctx,
-        )
-        record = current
-        if record is None:
+        fields = await read_directory_fields(self, owner, ctx=ctx)
+        expires_at = str(fields.get("expires_at") or "")
+        if not expires_at:
             return
-        if hidden_by_ttl(record.expires_at):
+        if hidden_by_ttl(expires_at):
             raise NotFoundError(owner, "restore target")
         raise ConflictError(
             "Raw restore cannot preserve an existing TTL lifecycle; "
@@ -184,9 +178,9 @@ class _SnapshotMixin:
             if metadata is None:
                 continue
             metadata_uri, blob = metadata
-            record = self._ttl_record_for_write(metadata_uri, blob["bytes"], ctx=real_ctx)
-            if record is not None:
-                if hidden_by_ttl(record.expires_at):
+            expires_at = self._ttl_expiry_for_write(metadata_uri, blob["bytes"])
+            if expires_at is not None:
+                if hidden_by_ttl(expires_at):
                     raise NotFoundError(target[1], "restore source")
                 await self.ttl_registry.mark_account(real_ctx.account_id)
                 if metadata_uri not in writes:
@@ -666,7 +660,7 @@ class _SnapshotMixin:
                 continue
         return None
 
-    async def _ensure_snapshot_ttl_visible(self, uri, source_ref, content, *, ctx):
+    async def _ensure_snapshot_ttl_visible(self, uri, source_ref, *, ctx):
         """Check source expiry and the selected snapshot's own lifecycle metadata."""
         scope = ttl_scope_for_uri(uri)
         if scope is None:
@@ -676,7 +670,7 @@ class _SnapshotMixin:
         target = ttl_object_for_uri(uri)
         if target is None:
             return
-        kind, owner = target
+        _, owner = target
         metadata = await self._snapshot_ttl_metadata(target, source_ref, ctx=ctx)
         if metadata is None:
             return
@@ -708,7 +702,7 @@ class _SnapshotMixin:
         if not isinstance(response, dict) or "bytes" not in response:
             raise TypeError("git_show returned unexpected blob response")
         if scoped:
-            await self._ensure_snapshot_ttl_visible(path, target_ref, response["bytes"], ctx=ctx)
+            await self._ensure_snapshot_ttl_visible(path, target_ref, ctx=ctx)
         return response
 
     async def show(
@@ -806,7 +800,7 @@ class _SnapshotMixin:
                     f"git_show returned unexpected blob response: {type(response).__name__}"
                 )
             if ttl_scope_for_uri(path) is not None:
-                await self._ensure_snapshot_ttl_visible(path, ref, response["bytes"], ctx=real_ctx)
+                await self._ensure_snapshot_ttl_visible(path, ref, ctx=real_ctx)
             return response["bytes"]
 
         before_bytes = await read_optional(from_oid) if from_ref else None

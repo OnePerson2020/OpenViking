@@ -31,7 +31,9 @@ class TTLView:
         if target:
             root = target[1]
             if root not in self._owners:
-                self._owners[root] = asyncio.create_task(self._read_owner(root))
+                self._owners[root] = asyncio.create_task(
+                    read_directory_fields(self.fs, root, ctx=self.ctx)
+                )
             return lifetime_fields(await self._owners[root])
         if is_dir and uri.rstrip("/").endswith(("/events", "/sessions")):
             if self._config is None:
@@ -53,9 +55,6 @@ class TTLView:
         return (
             {**entry, **await self.fields(uri, is_dir=entry.get("isDir", False))} if uri else entry
         )
-
-    async def _read_owner(self, root):
-        return await read_directory_fields(self.fs, root, ctx=self.ctx)
 
     async def visible(self, uri):
         return not hidden_by_ttl((await self.fields(uri)).get("expires_at"))

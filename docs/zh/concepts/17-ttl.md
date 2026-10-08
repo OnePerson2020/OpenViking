@@ -4,13 +4,17 @@ TTL 默认关闭，作用于用户和 peer 的 `events/YYYY/MM/DD` 日期目录�
 
 ## 配置与全量应用
 
-配置入口保留库全局、类型默认值，以及以下根目录：
+TTL 复用实例默认配置和 Account 配置覆盖（Web Studio 中的“库”对应 Account），支持全局默认、类型默认和以下三类根：
 
 - `viking://user/{user_id}/memories/events`
 - `viking://user/{user_id}/peers/{peer_id}/memories/events`
 - `viking://user/{user_id}/sessions`
 
-优先级为具体根目录 → 类型默认值（`user_events`、`peer_events`、`sessions`）→ 库全局 → 关闭。`disabled` 阻断继承，`inherit` 回退。account 配置沿用现有库配置入口；user/account 身份不增加新的优先级。
+每个具体根 URI 都能独立配置；不同 user、不同 peer 可以使用不同期限，并非全库只有三个配置项。Session 位于 user 下，没有 peer sessions 根。未覆盖的根继承对应类型，新建 user／peer 的目录也自动继承。
+
+先合并同一节点的 Account 覆盖 → 实例运行时配置 → 启动配置，再选择具体根 → 类型（`user_events`、`peer_events`、`sessions`）→ `global`。Account 的 `global` 不会盖掉实例中更具体的类型默认；例如实例 `sessions=30 天`，需要通过 Account 的 `sessions` 节点覆盖该类型。user／peer 身份用于定位根，不增加配置层。
+
+`disabled` 在该节点停止继承，`inherit` 跳过该节点；PATCH 中的 `null` 删除当前层覆盖。类型默认未配置时继承 `global`，全局默认关闭。可选的最佳实践为 User events 60 天、Peer events 60 天、Sessions 30 天，仅在用户主动选择后启用。
 
 年月、日期、单 Session、子目录和文件只展示期限，不支持编辑。首次启用和修改根策略会按优先级更新仍有效的已有目录，并为历史未纳管目录补 TTL。相对期限按原业务时间加新天数重算，绝对期限取配置值；缩短策略可能立即过期。关闭有效策略会清除仍有效目录的期限，已过期或已删除的对象不会恢复。
 

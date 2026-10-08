@@ -13,6 +13,7 @@ from openviking.core import ttl
 from openviking.storage.directory_ttl import read_directory_fields
 from openviking.storage.ttl_view import TTLView
 from openviking.utils.time_utils import parse_iso_datetime
+from openviking_cli.exceptions import InvalidArgumentError, NotFoundError
 from openviking_cli.utils.config.ttl_config import TTLConfig
 from tests.storage.test_transfer_merge_binding import binding_fs as binding_fs
 from tests.storage.test_transfer_merge_binding import root_ctx
@@ -108,12 +109,19 @@ async def test_legacy_event_metadata_preserves_existing_deadline(binding_fs):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["cp", "mv"])
-async def test_transfer_bucket_preserves_deadline(binding_fs, operation):
+@pytest.mark.parametrize("metadata", [".meta.json", ".ttl.json"])
+async def test_transfer_bucket_preserves_deadline(binding_fs, operation, metadata):
     fs, ctx = binding_fs, root_ctx()
     root = "viking://user/default/memories/events/2026/09/28"
     dest = "viking://user/default/memories/events/2026/09/29"
     await fs.write_file(root + "/a.md", "hello", ctx=ctx)
     initial = await read_directory_fields(fs, root, ctx=ctx)
+    if metadata == ".ttl.json":
+        await fs.write_file(root + "/.ttl.json", json.dumps(initial), ctx=ctx)
+        await fs._async_agfs.rm(fs._uri_to_path(root + "/.meta.json", ctx=ctx))
+    await fs.mkdir("viking://resources", ctx=ctx)
+    with pytest.raises(InvalidArgumentError, match="preserve the source TTL owner"):
+        await getattr(fs, operation)(root + "/a.md", "viking://resources/detached.md", ctx=ctx)
     await getattr(fs, operation)(
         root, dest, ctx=ctx, **({"recursive": True} if operation == "cp" else {})
     )
@@ -186,3 +194,39 @@ async def test_batch_projection_reads_one_owner_once(binding_fs, monkeypatch):
     rows = await TTLView(fs, ctx).attach_many([{"uri": f"{root}/{i}.md"} for i in range(100)])
     assert len(rows) == 100 and all(row["expires_at"] == rows[0]["expires_at"] for row in rows)
     reader.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["memories/events/2026/09/28", "sessions/s1"])
+async def test_saved_deadline_hides_reads_but_allows_internal_cleanup_access(binding_fs, owner):
+    fs, ctx = binding_fs, root_ctx()
+    root = "viking://user/default/" + owner
+    uri = root + "/body.md"
+    await fs.write_file(root + "/.meta.json", '{"expires_at":null}', ctx=ctx)
+    await fs.write_file(uri, "body", ctx=ctx)
+    assert await fs.read_file(uri, ctx=ctx) == "body"
+    await fs.write_file(root + "/.meta.json", '{"expires_at":"2000-01-01T00:00:00Z"}', ctx=ctx)
+    for read in (fs.read_file, fs.read_file_bytes, fs.stat):
+        with pytest.raises(NotFoundError):
+            await read(uri, ctx=ctx)
+    assert not await fs.exists(uri, ctx=ctx)
+    assert await fs.read_file(uri, ctx=ctx, include_expired=True) == "body"
+    assert await fs.read_file_bytes(uri, ctx=ctx, include_expired=True) == b"body"
+    assert (await fs.stat(uri, ctx=ctx, include_expired=True))["name"] == "body.md"
+    assert await fs.exists(uri, ctx=ctx, include_expired=True)
+
+
+@pytest.mark.asyncio
+async def test_lists_fill_limit_after_hiding_expired_owners(binding_fs):
+    fs, ctx = binding_fs, root_ctx()
+    root = "viking://user/default/memories/events/2026/09"
+    for day, year in [("28", 2000), ("29", 2999)]:
+        await fs.write_file(f"{root}/{day}/body.md", "body", ctx=ctx)
+        await fs.write_file(
+            f"{root}/{day}/.meta.json",
+            json.dumps({"expires_at": f"{year}-01-01T00:00:00Z"}),
+            ctx=ctx,
+        )
+    for listing in (fs.ls, fs.tree):
+        rows = await listing(root, node_limit=1, ctx=ctx)
+        assert [row["uri"] for row in rows] == [root + "/29"]

@@ -897,9 +897,7 @@ class SessionCompressorV3:
             source_archive_uri=archive_uri,
         )
         return await get_streaming_policy_trainer(
-            key=_skill_trainer_key(
-                ctx,
-            ),
+            key=_skill_trainer_key(ctx),
             policy_set=skill_policy_set,
             rollout_analyzer=self.rollout_analyzer,
             gradient_estimator=_NoopGradientEstimator(),
@@ -1308,7 +1306,6 @@ class SessionCompressorV3:
             content=json.dumps(merged, ensure_ascii=False, indent=4),
             ctx=ctx,
         )
-        return
 
 
 @dataclass(slots=True)
@@ -1733,9 +1730,7 @@ def _skill_root_uri(ctx: RequestContext) -> str:
     return f"viking://user/{user_space}/skills"
 
 
-def _skill_trainer_key(
-    ctx: RequestContext,
-) -> tuple[str, str, str]:
+def _skill_trainer_key(ctx: RequestContext) -> tuple[str, str, str]:
     """Registry key for the skill streaming trainer (separate from exp trainer)."""
     from openviking.session.train.components.policy_trainer import (
         make_streaming_policy_trainer_key,
@@ -2037,7 +2032,6 @@ async def _render_case_links_from_template(
     links: list[StoredLink],
     ctx: RequestContext,
     viking_fs: Any,
-    lease_ref: Any = None,
 ) -> None:
     if not links:
         return
@@ -2060,7 +2054,6 @@ async def _render_case_links_from_template(
         case_uri,
         MemoryFileUtils.write(mf, content_template=content_template),
         ctx=ctx,
-        lease_ref=lease_ref,
     )
 
 

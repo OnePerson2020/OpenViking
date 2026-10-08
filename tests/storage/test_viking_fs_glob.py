@@ -106,11 +106,6 @@ async def _async_true():
     return True
 
 
-def _assert_expiry_barrier(filter_expr, expected_filter):
-    # TTL validation/refill is in the backend, not a new cloud scalar filter.
-    assert filter_expr == expected_filter
-
-
 @pytest.mark.asyncio
 async def test_glob_applies_node_limit_after_ttl_filter(monkeypatch, fs):
     root_uri = "viking://user/default/memories/events"
@@ -241,7 +236,7 @@ async def test_glob_uses_remote_vikingdb_when_count_reaches_threshold(monkeypatc
     assert call["limit"] == 3
     assert call["offset"] == 0
     assert call["output_fields"] == ["uri", "level", "name"]
-    _assert_expiry_barrier(call["filter"], PathScope("uri", "viking://resources/docs", depth=-1))
+    assert call["filter"] == PathScope("uri", "viking://resources/docs", depth=-1)
     assert call["advance"] == {
         "post_process_input_limit": 1000000,
         "post_process_ops": [
@@ -558,7 +553,7 @@ async def test_glob_remote_leading_slash_stays_relative_to_request_uri(monkeypat
 
     assert result == {"matches": ["viking://resources/docs/a.md"], "count": 1}
     call = vector_store.random_calls[0]
-    _assert_expiry_barrier(call["filter"], PathScope("uri", "viking://resources/docs", depth=-1))
+    assert call["filter"] == PathScope("uri", "viking://resources/docs", depth=-1)
     assert call["advance"]["post_process_ops"][0]["pattern"] == "/resources/docs/**/*.md"
 
 
@@ -584,7 +579,7 @@ async def test_glob_remote_normalizes_dot_and_empty_path_segments(fs, pattern):
 
     assert result == {"matches": ["viking://resources/docs/a.md"], "count": 1}
     call = vector_store.random_calls[0]
-    _assert_expiry_barrier(call["filter"], PathScope("uri", "viking://resources/docs", depth=-1))
+    assert call["filter"] == PathScope("uri", "viking://resources/docs", depth=-1)
     assert call["advance"]["post_process_ops"][0]["pattern"] == ("/resources/docs/**/*.md")
 
 
@@ -655,14 +650,8 @@ async def test_glob_remote_pushes_tag_filter_before_limit(fs):
     assert result["count"] == 1
     call = vector_store.random_calls[0]
     assert call["limit"] == 2
-    _assert_expiry_barrier(
-        call["filter"],
-        And(
-            [
-                PathScope("uri", "viking://resources", depth=-1),
-                RawDSL(tag_filter),
-            ]
-        ),
+    assert call["filter"] == And(
+        [PathScope("uri", "viking://resources", depth=-1), RawDSL(tag_filter)]
     )
 
 

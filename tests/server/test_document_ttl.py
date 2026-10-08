@@ -210,7 +210,7 @@ async def test_event_visibility_projection_and_all_public_filters(client, servic
 
 
 @pytest.mark.asyncio
-async def test_expired_session_is_hidden_by_every_session_read(client, service):
+async def test_expired_session_is_hidden_and_rejects_id_reuse(client, service):
     await request(client, "post", "/api/v1/sessions", json={"session_id": "expired"})
     uri = ROOT + "/sessions/expired"
     await service.viking_fs.write_file(
@@ -230,6 +230,8 @@ async def test_expired_session_is_hidden_by_every_session_read(client, service):
         assert response.status_code == 404, response.text
     listed = await request(client, "get", "/api/v1/sessions")
     assert all(row["session_id"] != "expired" for row in listed)
+    recreated = await client.post("/api/v1/sessions", json={"session_id": "expired"})
+    assert recreated.status_code == 409, recreated.text
 
 
 @pytest.mark.asyncio

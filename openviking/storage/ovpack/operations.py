@@ -178,11 +178,11 @@ async def _ensure_package_ttl(
     for uri in sorted(targets):
         await viking_fs._ensure_restore_target_ttl(uri, ctx=ctx)
     for uri, zip_path in files.items():
-        if viking_fs._ttl_metadata_target(uri) is None:
+        target = viking_fs._ttl_metadata_target(uri)
+        if target is None:
             continue
-        record = viking_fs._ttl_record_for_write(uri, zf.read(zip_path), ctx=ctx)
-        if record is not None and hidden_by_ttl(record.expires_at):
-            raise NotFoundError(record.object_uri, "package source")
+        if hidden_by_ttl(viking_fs._ttl_expiry_for_write(uri, zf.read(zip_path))):
+            raise NotFoundError(target[1], "package source")
 
 
 def _exportable_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -532,11 +532,7 @@ async def _write_ovpack_archive(
             else:
                 full_uri = entry.get("uri") or join_uri(root_uri, rel_path)
                 try:
-                    data = (
-                        json.dumps(entry["ttl_fields"]).encode()
-                        if "ttl_fields" in entry
-                        else await viking_fs.read_file_bytes(full_uri, ctx=ctx)
-                    )
+                    data = await viking_fs.read_file_bytes(full_uri, ctx=ctx)
                 except Exception as exc:
                     logger.warning(f"Failed to export file {full_uri}: {exc}")
                     raise

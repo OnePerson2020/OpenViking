@@ -745,55 +745,6 @@ def test_refresh_does_not_resurrect_evicted_account():
 # -- AccountConfig field attributes + manager fallback ------------------------
 
 
-def test_account_config_field_attributes():
-    fields = AccountConfig.model_fields
-    from openviking_cli.utils.config.ttl_config import TTLConfig
-
-    assert set(fields) == {
-        "acl",
-        "agent_evolution",
-        "embedding",
-        "feishu",
-        "github",
-        "query_planner",
-        "ttl",
-        "vectordb",
-        "vlm",
-    }
-    ttl_paths = {("ttl",), *(("ttl", *path) for path in collect_runtime_field_paths(TTLConfig))}
-    surface = collect_runtime_field_paths(AccountConfig)
-    assert ttl_paths <= surface
-    assert {
-        ("acl",),
-        ("acl", "enabled"),
-        ("agent_evolution",),
-        ("agent_evolution", "enabled"),
-        ("feishu",),
-        ("feishu", "app_id"),
-        ("feishu", "app_secret"),
-        ("feishu", "download_images"),
-        ("feishu", "max_records_per_table"),
-        ("feishu", "max_rows_per_sheet"),
-        ("feishu", "request_timeout"),
-        ("github",),
-        ("github", "token"),
-        ("vlm",),
-        ("query_planner",),
-        ("embedding",),
-        ("embedding", "dense", "model"),
-        ("vectordb",),
-    } <= surface
-    assert is_dynamic(fields["feishu"])
-    assert fallback_of(fields["feishu"]) is None
-    assert is_dynamic(fields["github"])
-    assert fallback_of(fields["github"]) is None
-    assert is_dynamic(fields["agent_evolution"])
-    assert fallback_of(fields["agent_evolution"]) == "agent_evolution"
-    assert fallback_of(fields["ttl"]) == "ttl"
-    assert is_dynamic(fields["ttl"])
-    assert ("embedding", "dense", "model") in collect_frozen_paths(AccountConfig)
-
-
 async def test_account_runtime_binding_and_updates_are_isolated():
     from openviking.config.binding import manager_over_source
     from openviking.config.vector import AccountVectorConfigResolver

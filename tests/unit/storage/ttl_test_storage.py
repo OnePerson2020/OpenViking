@@ -8,7 +8,7 @@ from openviking.pyagfs import AsyncAGFSClient
 from openviking.pyagfs.exceptions import AGFSDirectoryNotEmptyError
 
 
-class _MemoryAGFS(AsyncAGFSClient):
+class MemoryAGFS(AsyncAGFSClient):
     def __init__(self):
         self.files = {}
         self.ensure_calls = []
@@ -27,6 +27,8 @@ class _MemoryAGFS(AsyncAGFSClient):
         await lock.acquire()
         return path
 
+    pathlock_acquire_tree = pathlock_acquire_exact
+
     async def pathlock_release(self, lease):
         self.locks[lease].release()
 
@@ -42,9 +44,11 @@ class _MemoryAGFS(AsyncAGFSClient):
 
     async def stat(self, path, **kwargs):
         self.stat_calls.append(path)
-        if path not in self.files:
-            raise FileNotFoundError(path)
-        return {"path": path}
+        if path in self.files:
+            return {"isDir": False, "size": len(self.files[path])}
+        if any(key.startswith(path.rstrip("/") + "/") for key in self.files):
+            return {"isDir": True}
+        raise FileNotFoundError(path)
 
     async def rm(self, path, **kwargs):
         self.rm_calls.append(path)
@@ -66,27 +70,6 @@ class _MemoryAGFS(AsyncAGFSClient):
                 names[name] = {"name": name, "isDir": "/" in suffix}
         values = [names[name] for name in sorted(names)]
         return values[offset:] if limit is None else values[offset : offset + limit]
-
-
-class MemoryAGFS(_MemoryAGFS):
-    async def pathlock_acquire_exact(self, path, **kwargs):
-        return await super().pathlock_acquire_exact(path)
-
-    pathlock_acquire_tree = pathlock_acquire_exact
-
-    async def ensure_parent_dirs(self, path, **kwargs):
-        await super().ensure_parent_dirs(path)
-
-    async def read(self, path, **kwargs):
-        return await super().read(path)
-
-    async def stat(self, path, **kwargs):
-        self.stat_calls.append(path)
-        if path in self.files:
-            return {"isDir": False, "size": len(self.files[path])}
-        if any(key.startswith(path.rstrip("/") + "/") for key in self.files):
-            return {"isDir": True}
-        raise FileNotFoundError(path)
 
 
 async def read_record(fs, account_id, uri):

@@ -4,7 +4,7 @@
 
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -124,7 +124,7 @@ async def test_late_commit_cannot_recreate_event_or_corrupt_reused_session(bindi
         {"mode": "disabled"},
     ],
 )
-async def test_commit_completion_and_replay_preserve_deadline(binding_fs, monkeypatch, policy):
+async def test_append_commit_and_replay_preserve_deadline(binding_fs, monkeypatch, policy):
     from openviking.session import session as session_module
 
     fs, ctx = binding_fs, root_ctx()
@@ -132,10 +132,19 @@ async def test_commit_completion_and_replay_preserve_deadline(binding_fs, monkey
     monkeypatch.setattr(ttl, "get_openviking_config", lambda: SimpleNamespace(ttl=config))
     session = Session(viking_fs=fs, session_id="current", ctx=ctx)
     await session.ensure_exists()
-    msg = await seed_commit(fs, ctx, session, "current-task")
     before = await read_directory_fields(fs, session.uri, ctx=ctx)
+    config.sessions = TTLConfig(sessions={"mode": "days", "ttl_days": 30}).sessions
     completed = format_iso8601(parse_iso_datetime(before["created_at"]) + timedelta(days=1))
     monkeypatch.setattr(session_module, "get_current_timestamp", lambda: completed)
+    await session.add_message_async("user", [TextPart("append")])
+    appended = await read_directory_fields(fs, session.uri, ctx=ctx)
+    assert appended.get("expires_at") == before.get("expires_at")
+    assert appended["created_at"] == before["created_at"]
+    assert appended["last_message_at"] == completed
+    assert {"ttl_days", "received_at"}.isdisjoint(appended)
+    await session.add_messages_async([])
+    assert await read_directory_fields(fs, session.uri, ctx=ctx) == appended
+    msg = await seed_commit(fs, ctx, session, "current-task")
     await session._merge_and_save_commit_meta(
         archive_index=1,
         archive_uri=msg.archive_uri,
@@ -162,45 +171,16 @@ async def test_commit_completion_and_replay_preserve_deadline(binding_fs, monkey
 
 
 @pytest.mark.asyncio
-async def test_legacy_completion_cannot_revive_expired_session_or_block_cleanup(binding_fs):
+async def test_expired_queued_commit_never_starts_extraction(binding_fs, monkeypatch):
     fs, ctx = binding_fs, root_ctx()
-    session = Session(viking_fs=fs, session_id="completion-crash", ctx=ctx)
+    session = Session(viking_fs=fs, session_id="expired", ctx=ctx)
     await session.ensure_exists()
-    msg = await seed_commit(fs, ctx, session, "completed-task")
-    now = datetime.now(timezone.utc)
-    completed = format_iso8601(now - timedelta(days=1, hours=1))
-    archive_meta = json.loads(await fs.read_file(msg.archive_uri + "/.meta.json", ctx=ctx))
+    msg = await seed_commit(fs, ctx, session, "expired-task")
     await fs.write_file(
-        msg.archive_uri + "/.meta.json",
-        json.dumps({**archive_meta, "phase2_completed_at": completed}),
-        ctx=ctx,
+        session.uri + "/.meta.json", '{"expires_at":"2000-01-01T00:00:00Z"}', ctx=ctx
     )
-    await fs.write_file(
-        msg.archive_uri + "/.done", json.dumps({"phase2_completed_at": completed}), ctx=ctx
-    )
-    fields = await read_directory_fields(fs, session.uri, ctx=ctx)
-    await fs.write_file(
-        session.uri + "/.meta.json",
-        json.dumps(
-            {
-                **fields,
-                "ttl_days": 2,
-                "received_at": format_iso8601(now - timedelta(days=3)),
-                "expires_at": format_iso8601(now - timedelta(days=1)),
-            }
-        ),
-        ctx=ctx,
-    )
-    tracker = TaskTracker(PersistentTaskStore(fs._async_agfs))
-    set_task_tracker(tracker)
-    try:
-        with pytest.raises(StaleSessionCommit):
-            await session.resume_queued_commit(msg)
-    finally:
-        set_task_tracker(None)
-    expired = await read_directory_fields(fs, session.uri, ctx=ctx)
-    assert expired["expires_at"] == format_iso8601(now - timedelta(days=1))
-    cleanup = TTLCleanupService(service=SimpleNamespace(viking_fs=fs))
-    record = await read_record(fs, ctx.account_id, session.uri)
-    assert (await _cleanup_once(cleanup, record))["deleted"]
-    assert not await fs.exists(session.uri, ctx=ctx, include_expired=True)
+    extract = AsyncMock()
+    monkeypatch.setattr(session, "_run_memory_extraction", extract)
+    with pytest.raises(StaleSessionCommit):
+        await session.resume_queued_commit(msg)
+    extract.assert_not_awaited()

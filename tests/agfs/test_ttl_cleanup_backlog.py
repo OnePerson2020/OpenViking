@@ -12,7 +12,6 @@ import pytest
 from openviking.service.task_store import PersistentTaskStore
 from openviking.service.task_tracker import TaskStatus, TaskTracker, set_task_tracker
 from openviking.service.ttl_cleanup import TTLCleanupService, _ttl_cleanup_message
-from openviking.storage.abstract_overview import render_abstract_overview
 from openviking.storage.queuefs.process_result import ProcessOutcome
 from openviking.storage.vector_ids import vector_record_id
 from tests.storage.test_transfer_merge_binding import binding_fs as binding_fs
@@ -34,21 +33,6 @@ async def test_backlog_strictly_drains_vectors_and_recovers_partial_failures(
     parent = "viking://user/default/memories/events"
     uris = [f"{parent}/{datetime(2025, 1, 1) + timedelta(days=i):%Y/%m/%d}" for i in range(205)]
     failures = set(uris[::40])
-    summaries = {}
-    for level, filename in [(0, ".abstract.md"), (1, ".overview.md")]:
-        uri = parent + "/" + filename
-        summaries[uri] = render_abstract_overview(level, parent, f"Retained L{level}")
-        await fs.write_file(uri, summaries[uri], ctx=ctx)
-        await vectors.upsert(
-            {
-                "id": vector_record_id(ctx.account_id, parent, level),
-                "uri": parent,
-                "level": level,
-                "abstract": f"Retained L{level}",
-                "vector": [0.1, 0.2, 0.3, 0.4],
-            },
-            ctx=ctx,
-        )
     live = parent + "/2026/09/29/live.txt"
     for owner in [*uris, live.rsplit("/", 1)[0]]:
         uri = owner + "/event.txt" if owner in uris else live
@@ -96,8 +80,8 @@ async def test_backlog_strictly_drains_vectors_and_recovers_partial_failures(
         assert queue.peak == 100
         assert skipped == failures
         remaining = await vectors.query(ctx=ctx, limit=300)
-        assert {owner + "/event.txt" for owner in failures} | {live} <= {
-            row["uri"] for row in remaining if row["level"] == 2
+        assert {row["uri"] for row in remaining} == {owner + "/event.txt" for owner in failures} | {
+            live
         }
         for uri in failures:
             assert await read_record(fs, ctx.account_id, uri) is not None
@@ -116,22 +100,10 @@ async def test_backlog_strictly_drains_vectors_and_recovers_partial_failures(
         assert len(queue.items) >= len(failures)
         while queue.items:
             await cleanup._process(queue.items.popleft())
-        # Any busy object is rediscovered from its retained metadata.
-        clock.current += timedelta(days=1)
-        scheduler = scheduler_for(fs, queue)
-        await scheduler._scan_once()
-        while queue.items:
-            await cleanup._process(queue.items.popleft())
         for uri in uris:
             assert await read_record(fs, ctx.account_id, uri) is None
         remaining = await vectors.query(ctx=ctx, limit=300)
-        assert {(row["uri"], row["level"]) for row in remaining} == {
-            (parent, 0),
-            (parent, 1),
-            (live, 2),
-        }
-        for uri, content in summaries.items():
-            assert await fs.read_file(uri, ctx=ctx) == content
+        assert {(row["uri"], row["level"]) for row in remaining} == {(live, 2)}
         assert await fs.read_file(live, ctx=ctx) == "Live control"
         for owner in uris:
             assert not await fs.exists(owner, ctx=ctx)

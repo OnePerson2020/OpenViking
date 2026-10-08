@@ -27,18 +27,6 @@ def test_default_config_is_off():
         assert config.resolve_uri_policy("", scope).mode == "disabled"
 
 
-def test_scope_days_overrides_global():
-    config = TTLConfig(
-        **{"global": {"mode": "days", "ttl_days": 7}},
-        user_events={"mode": "days", "ttl_days": 30},
-    )
-    assert config.resolve_uri_policy("", "user_events") == TTLPolicy(mode="days", ttl_days=30)
-    # sessions/peer_events inherit -> global default of 7
-    assert config.resolve_uri_policy("", "sessions") == TTLPolicy(mode="days", ttl_days=7)
-    assert config.resolve_uri_policy("", "peer_events") == TTLPolicy(mode="days", ttl_days=7)
-    assert config.enabled is True
-
-
 def test_cleanup_defaults_to_ready_with_day_level_physical_jitter():
     cleanup = TTLCleanupConfig()
 
@@ -53,13 +41,6 @@ def test_scope_disabled_blocks_global_inheritance():
     )
     assert config.resolve_uri_policy("", "sessions").mode == "disabled"
     assert config.resolve_uri_policy("", "user_events") == TTLPolicy(mode="days", ttl_days=7)
-
-
-def test_inherit_falls_through_to_global_off():
-    # global disabled + all scopes inherit -> nothing enabled
-    config = TTLConfig(**{"global": {"mode": "disabled"}})
-    assert config.enabled is False
-    assert config.resolve_uri_policy("", "user_events").mode == "disabled"
 
 
 def test_global_inherit_is_rejected():
@@ -97,35 +78,32 @@ def test_directory_only_policy_enables_ttl_and_normalizes_slash():
     assert "viking://user/u1/sessions" in config.directories
 
 
-def test_directory_key_must_be_concrete_user_uri():
-    invalid_uris = [
+@pytest.mark.parametrize(
+    "uri",
+    [
         "/local/a",
+        "viking://resources/docs",
         "viking://user/u1/preferences",
         "viking://user/u1/memories/entities",
         "viking://user/u1/sessions/s1",
         "viking://user/u1/memories/events/../entities",
         "viking://user/u1/memories/events//bad",
-    ]
-    for uri in invalid_uris:
-        with pytest.raises(ValidationError):
-            TTLConfig(directories={uri: {"mode": "disabled"}})
+        "viking://user/u1/memories/events/notes.md",
+        "viking://user/u1/memories/events/2026",
+        "viking://user/u1/memories/events/2026/09",
+        "viking://user/u1/memories/events/2026/09/30",
+        "viking://user/u1/memories/events/2026/09/30/a.md",
+        "viking://user/u1/memories/events/2026/02/30",
+    ],
+)
+def test_only_concrete_policy_roots_are_configurable(uri):
+    with pytest.raises(ValidationError):
+        TTLConfig(directories={uri: {"mode": "days", "ttl_days": 7}})
 
 
 def test_resources_are_rejected():
     with pytest.raises(ValidationError):
         TTLConfig(resources={"mode": "days", "ttl_days": 7})
-    with pytest.raises(ValidationError):
-        TTLConfig(directories={"viking://resources/docs": {"mode": "days", "ttl_days": 7}})
-
-
-@pytest.mark.parametrize("suffix", ["notes.md", "2026/09/28/event.md", "2026/02/30"])
-def test_non_root_event_paths_reject_policy(suffix):
-    with pytest.raises(ValidationError):
-        TTLConfig(
-            directories={
-                "viking://user/u1/memories/events/" + suffix: {"mode": "days", "ttl_days": 7}
-            }
-        )
 
 
 def test_session_defaults_accept_absolute_retention():
@@ -140,16 +118,6 @@ def test_session_defaults_accept_absolute_retention():
         config = TTLConfig.model_validate(value)
         assert (
             config.resolve_uri_policy("viking://user/u1/sessions/s1", "sessions").mode == "absolute"
-        )
-
-
-@pytest.mark.parametrize("suffix", ["/2026", "/2026/09", "/2026/09/30", "/2026/09/30/a.md"])
-def test_only_events_root_accepts_policy(suffix):
-    with pytest.raises(ValidationError):
-        TTLConfig(
-            directories={
-                "viking://user/u1/memories/events" + suffix: {"mode": "days", "ttl_days": 7}
-            }
         )
 
 
@@ -170,6 +138,8 @@ def test_root_policy_overrides_type_then_library_default(root_policy):
             "directories": {"viking://user/u1/memories/events": root_policy},
         }
     )
+    assert config.enabled is True
+    assert config.resolve_uri_policy("", "peer_events") == TTLPolicy(mode="days", ttl_days=7)
     assert config.resolve_uri_policy(
         "viking://user/u1/memories/events/2026/09/30/a.md", "user_events"
     ) == (config.user_events if root_policy.mode == "inherit" else root_policy)

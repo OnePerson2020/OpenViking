@@ -361,23 +361,8 @@ async def test_diff_does_not_treat_missing_storage_object_as_absent():
         )
 
 
-def _ttl_event(expires_at: str = "2030-01-02T00:00:00.000Z") -> bytes:
-    fields = {
-        "ttl_days": 1,
-        "received_at": "2030-01-01T00:00:00.000Z",
-        "expires_at": expires_at,
-    }
-    return json.dumps(fields).encode()
-
-
-def _ttl_session() -> bytes:
-    return json.dumps(
-        {
-            "ttl_days": 1,
-            "received_at": "2030-01-01T00:00:00.000Z",
-            "expires_at": "2030-01-02T00:00:00.000Z",
-        }
-    ).encode()
+def _ttl_metadata(expires_at: str = "2030-01-02T00:00:00.000Z") -> bytes:
+    return json.dumps({"expires_at": expires_at}).encode()
 
 
 class _RestoreAGFS:
@@ -471,7 +456,7 @@ async def test_restore_marks_account_before_writeback_and_preserves_partial_erro
     )
     agfs = _RestoreAGFS(
         plan=_restore_plan(to_write=(event_path, session_meta)),
-        blobs={event_path: _ttl_event(), session_meta: _ttl_session()},
+        blobs={event_path: _ttl_metadata(), session_meta: _ttl_metadata()},
         result=result,
         error=error,
     )
@@ -501,64 +486,32 @@ async def test_restore_marks_account_before_writeback_and_preserves_partial_erro
 
 
 @pytest.mark.parametrize("scope", ["event", "session"])
-@pytest.mark.parametrize("operation", ["overwrite", "delete"])
-async def test_restore_cannot_detach_existing_expiry(scope, operation):
+@pytest.mark.parametrize(
+    "entry,delete,expires_at",
+    [
+        ("metadata", False, "2040-01-01T00:00:00Z"),
+        ("metadata", True, "2040-01-01T00:00:00Z"),
+        ("body", False, "2000-01-01T00:00:00Z"),
+        ("body", False, "2040-01-01T00:00:00Z"),
+    ],
+)
+async def test_restore_cannot_detach_existing_expiry(scope, entry, delete, expires_at):
+    owner = (
+        "user/user/sessions/s1" if scope == "session" else "user/user/memories/events/2026/09/28"
+    )
+    # Exercise legacy event metadata as well as the current .meta.json format.
+    metadata_path = owner + (
+        "/.ttl.json" if scope == "event" and entry == "metadata" else "/.meta.json"
+    )
     path = (
-        "user/user/sessions/s1/.meta.json"
-        if scope == "session"
-        else "user/user/memories/events/2026/09/28/.ttl.json"
+        metadata_path
+        if entry == "metadata"
+        else owner + ("/messages.jsonl" if scope == "session" else "/body.md")
     )
-    current = {"/local/account/" + path: _ttl_event("2040-01-01T00:00:00Z")}
+    current = {"/local/account/" + metadata_path: _ttl_metadata(expires_at)}
     agfs = _RestoreAGFS(
-        plan=_restore_plan(**{"to_write" if operation == "overwrite" else "to_delete": (path,)}),
-        blobs={path: _ttl_event()},
-        current=current,
-    )
-    vfs = _restore_vfs(agfs)
-    with pytest.raises(ConflictError, match="existing TTL lifecycle"):
-        await vfs.restore(source_commit="source", ctx=_request_context())
-    assert agfs.current == current
-    vfs.ttl_registry.mark_account.assert_not_awaited()
-    assert not any(
-        op == "git_restore" and not args.get("dry_run")
-        for op, args in agfs.calls
-        if isinstance(args, dict)
-    )
-
-
-async def test_restore_dry_run_does_not_write_account_marker():
-    path = "user/user/memories/events/2026/09/28/.ttl.json"
-    agfs = _RestoreAGFS(plan=_restore_plan(to_write=(path,)), blobs={path: _ttl_event()})
-    vfs = _restore_vfs(agfs)
-    result = await vfs.restore(source_commit="source", dry_run=True, ctx=_request_context())
-    assert result["result"] == "dry_run"
-    vfs.ttl_registry.mark_account.assert_not_awaited()
-    assert [call[0] for call in agfs.calls] == ["git_restore"]
-
-
-@pytest.mark.parametrize("scope", ["event", "session"])
-@pytest.mark.parametrize("expires_at", ["2000-01-01T00:00:00Z", "2040-01-01T00:00:00Z"])
-async def test_restore_old_content_preserves_current_lifecycle(scope, expires_at):
-    from openviking.core.ttl import ttl_metadata_uri
-
-    paths = {
-        "event": "user/user/memories/events/2026/09/28/body.md",
-        "session": "user/user/sessions/s1/messages.jsonl",
-    }
-    path = paths[scope]
-    uri = f"viking://{path}".removesuffix("/.ttl.json")
-    kind = scope
-    owner = uri.rsplit("/", 1)[0]
-    metadata_uri = ttl_metadata_uri(kind, owner)
-    metadata = (
-        _ttl_event(expires_at)
-        if scope == "event"
-        else json.dumps({"expires_at": expires_at}).encode()
-    )
-    current = {"/local/account/" + metadata_uri.removeprefix("viking://"): metadata}
-    agfs = _RestoreAGFS(
-        plan=_restore_plan(to_write=(path,)),
-        blobs={path: b"old unmanaged content"},
+        plan=_restore_plan(**{"to_delete" if delete else "to_write": (path,)}),
+        blobs={path: _ttl_metadata() if entry == "metadata" else b"old unmanaged body"},
         current=current,
     )
     vfs = _restore_vfs(agfs)
@@ -574,17 +527,24 @@ async def test_restore_old_content_preserves_current_lifecycle(scope, expires_at
     )
 
 
+async def test_restore_dry_run_does_not_write_account_marker():
+    path = "user/user/memories/events/2026/09/28/.ttl.json"
+    agfs = _RestoreAGFS(plan=_restore_plan(to_write=(path,)), blobs={path: _ttl_metadata()})
+    vfs = _restore_vfs(agfs)
+    result = await vfs.restore(source_commit="source", dry_run=True, ctx=_request_context())
+    assert result["result"] == "dry_run"
+    vfs.ttl_registry.mark_account.assert_not_awaited()
+    assert [call[0] for call in agfs.calls] == ["git_restore"]
+
+
 @pytest.mark.parametrize("operation", ["show", "show_blob_raw", "diff"])
 @pytest.mark.parametrize("scope", ["event", "session"])
 @pytest.mark.parametrize("current_expired", [False, True])
 async def test_snapshot_reads_enforce_historical_and_current_expiry(
     monkeypatch, operation, scope, current_expired
 ):
-    from types import SimpleNamespace
-
     from openviking.core import ttl
     from openviking.storage.ttl_registry import TTLRegistry
-    from openviking_cli.exceptions import NotFoundError
     from openviking_cli.utils.config.ttl_config import TTLConfig
     from tests.unit.storage.ttl_test_storage import MemoryAGFS
 

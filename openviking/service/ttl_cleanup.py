@@ -20,7 +20,6 @@ from openviking.core.ttl import (
     ttl_object_for_uri,
 )
 from openviking.server.identity import RequestContext, Role
-from openviking.service.periodic_task import PeriodicTask
 from openviking.service.task_store import SYSTEM_TASK_ACCOUNT_ID, SYSTEM_TASK_USER_ID
 from openviking.service.task_tracker import get_task_tracker
 from openviking.service.task_tracker_concurrency import run_to_completion
@@ -51,10 +50,10 @@ def _ttl_cleanup_message(*, record: TTLRecord, task_id: Optional[str] = None) ->
 
 
 class TTLCleanupService:
-    def __init__(self, *, service: Any, check_interval: Optional[float] = None) -> None:
+    def __init__(self, *, service: Any) -> None:
         self._service = service
         self._closed = False
-        self._scheduler = TTLCleanupScheduler(service, check_interval=check_interval)
+        self._scheduler = TTLCleanupScheduler(service)
 
     async def initialize(self) -> None:
         manager = self._service._queue_manager
@@ -147,31 +146,40 @@ class TTLCleanupService:
         return {"deleted": True}
 
 
-class TTLCleanupScheduler(PeriodicTask):
+class TTLCleanupScheduler:
     """Finish one paced pass, then wait a day; deadlines are the retry source."""
 
-    DEFAULT_CHECK_INTERVAL = 30.0
-
-    def __init__(
-        self, service: Any, *, check_interval: Optional[float] = None, sleep: Any = asyncio.sleep
-    ):
+    def __init__(self, service: Any):
         self._service = service
-        self._interval_override = check_interval
+        self._task = None
         self._candidates = None
         self._next_scan_at = datetime.min.replace(tzinfo=timezone.utc)
-        super().__init__(
-            interval=self.DEFAULT_CHECK_INTERVAL if check_interval is None else check_interval,
-            sleep=sleep,
-        )
 
-    def _next_interval(self) -> float:
-        config = _cleanup_settings()
-        interval = (
-            config.check_interval_seconds
-            if self._interval_override is None
-            else self._interval_override
-        )
-        return interval + random.uniform(0.0, config.scan_jitter_seconds)
+    async def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(self._run_loop())
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+
+    async def _run_loop(self) -> None:
+        while True:
+            try:
+                config = _cleanup_settings()
+                await asyncio.sleep(
+                    config.check_interval_seconds + random.uniform(0.0, config.scan_jitter_seconds)
+                )
+                await self._scan_once()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("TTL cleanup scan failed")
 
     async def _iter_candidates(self):
         fs = self._service.viking_fs

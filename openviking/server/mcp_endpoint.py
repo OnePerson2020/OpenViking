@@ -1403,36 +1403,6 @@ async def get_ttl(uri: str) -> str:
     return str(await get_service().fs.get_ttl(uri, ctx))
 
 
-@_mcp_error_results()
-@mcp.tool(annotations=_DESTRUCTIVE_TOOL_ANNOTATIONS)
-async def create_session(session_id: Optional[str] = None) -> str:
-    """Create a session inheriting root retention.
-
-    TTL is inherited from the sessions root policy.
-    """
-    from openviking.server.routers.sessions import CreateSessionRequest
-    from openviking.server.routers.sessions import create_session as create
-
-    result = await create(CreateSessionRequest(session_id=session_id), _get_ctx())
-    return str(result.model_dump())
-
-
-@_mcp_error_results()
-@mcp.tool(annotations=_RETRY_SAFE_DESTRUCTIVE_TOOL_ANNOTATIONS)
-async def update_session_config(session_id: str, config: Dict[str, Any]) -> str:
-    """Update session config with the HTTP PATCH contract.
-
-    TTL is read-only and inherited from the sessions root.
-    Changing other config does not count as a content update.
-    """
-    from openviking.server.routers.sessions import UpdateSessionConfigRequest
-    from openviking.server.routers.sessions import update_session_config as update
-
-    return str(
-        await update(session_id, UpdateSessionConfigRequest.model_validate(config), _get_ctx())
-    )
-
-
 def _resource_add_error(result: Any) -> _MCPToolFailure | None:
     if not isinstance(result, dict) or result.get("status") != "error":
         return None

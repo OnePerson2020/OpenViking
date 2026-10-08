@@ -16,10 +16,7 @@ from openviking.core.namespace import (
     is_hidden_by_actor_peer_view,
     may_include_hidden_actor_peers,
 )
-from openviking.core.ttl import (
-    ttl_object_for_uri,
-    ttl_scope_for_uri,
-)
+from openviking.core.ttl import ttl_object_for_uri
 from openviking.resource.watch_storage import is_watch_task_control_uri
 from openviking.server.error_mapping import is_not_found_error, is_storage_not_found
 from openviking.server.identity import RequestContext, Role
@@ -786,14 +783,13 @@ class _AccessMixin:
             visible_uri = (
                 request_root if not relative_path else f"{request_root}{separator}{relative_path}"
             )
-        return await self._ttl_uri_visible(visible_uri, ctx, path=path)
+        return await self._ttl_uri_visible(visible_uri, ctx)
 
     async def _ttl_uri_visible(
         self,
         uri: str,
         ctx: RequestContext,
         *,
-        path: Optional[str] = None,
         require_source: bool = False,
         ttl_view=None,
     ) -> bool:
@@ -802,8 +798,6 @@ class _AccessMixin:
         Source metadata remains authoritative when new TTL policies are off.
         Vector hits additionally require a live source after physical cleanup.
         """
-        if ttl_scope_for_uri(uri) is None:
-            return True
         target = ttl_object_for_uri(uri)
         if target is None:
             return True
@@ -1062,10 +1056,7 @@ class _AccessMixin:
                     entry_path=f"{path.rstrip('/')}/{entry.get('name', '')}",
                     ctx=ctx,
                 )
-                entry_path = f"{path.rstrip('/')}/{entry.get('name', '')}"
-                if not await self._ttl_uri_visible(
-                    entry_uri, real_ctx, path=entry_path, ttl_view=ttl_view
-                ):
+                if not await self._ttl_uri_visible(entry_uri, real_ctx, ttl_view=ttl_view):
                     continue
                 by_uri.setdefault(entry_uri, (entry, entry_uri))
             if not merge_paths:

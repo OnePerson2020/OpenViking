@@ -121,11 +121,6 @@ async def _fake_stat(uri, ctx=None, skip_count=False):
     return {"name": uri.rsplit("/", 1)[-1], "isDir": True}
 
 
-def _assert_expiry_barrier(filter_expr, expected_filter):
-    # TTL validation/refill is in the backend, not a new cloud scalar filter.
-    assert filter_expr == expected_filter
-
-
 @pytest.mark.asyncio
 async def test_collect_grep_files_skips_directory_vector_count(monkeypatch):
     viking_fs = VikingFS(agfs=_DummyAgfs())
@@ -723,14 +718,11 @@ async def test_grep_vikingdb_tagged_remote_error_falls_back_with_tag_allowlist(m
         tag_filter={"op": "must", "field": "search_tags", "conds": ["env=prod"]},
     )
 
-    _assert_expiry_barrier(
-        vector_store.filter_calls[0]["filter"],
-        And(
-            [
-                PathScope("uri", "viking://resources", depth=3),
-                RawDSL({"op": "must", "field": "search_tags", "conds": ["env=prod"]}),
-            ]
-        ),
+    assert vector_store.filter_calls[0]["filter"] == And(
+        [
+            PathScope("uri", "viking://resources", depth=3),
+            RawDSL({"op": "must", "field": "search_tags", "conds": ["env=prod"]}),
+        ]
     )
     assert calls[0]["allowed_uris"] == {"viking://resources/tagged.md"}
 
@@ -756,21 +748,18 @@ async def test_grep_vikingdb_pushes_exclude_uri_to_filter(monkeypatch):
     assert result == {"matches": [], "count": 0, "match_count": 0, "files_scanned": 0}
     filter_expr = vector_store.calls[0]["filter"]
     assert isinstance(filter_expr, And)
-    _assert_expiry_barrier(
-        filter_expr,
-        And(
-            [
-                PathScope("uri", "viking://resources", depth=3),
-                RawDSL(
-                    {
-                        "op": "must_not",
-                        "field": "uri",
-                        "conds": ["viking://resources/archive"],
-                        "para": "-d=-1",
-                    }
-                ),
-            ]
-        ),
+    assert filter_expr == And(
+        [
+            PathScope("uri", "viking://resources", depth=3),
+            RawDSL(
+                {
+                    "op": "must_not",
+                    "field": "uri",
+                    "conds": ["viking://resources/archive"],
+                    "para": "-d=-1",
+                }
+            ),
+        ]
     )
 
 
@@ -861,14 +850,11 @@ async def test_grep_vikingdb_pushes_tag_filter_into_bm25_request(monkeypatch):
 
     assert calls == [["viking://resources/untagged.md", "viking://resources/tagged.md"]]
     assert vector_store.calls[0]["limit"] == 5
-    _assert_expiry_barrier(
-        vector_store.calls[0]["filter"],
-        And(
-            [
-                PathScope("uri", "viking://resources", depth=3),
-                RawDSL({"op": "must", "field": "search_tags", "conds": ["env=prod"]}),
-            ]
-        ),
+    assert vector_store.calls[0]["filter"] == And(
+        [
+            PathScope("uri", "viking://resources", depth=3),
+            RawDSL({"op": "must", "field": "search_tags", "conds": ["env=prod"]}),
+        ]
     )
     assert result["matches"] == [
         {
