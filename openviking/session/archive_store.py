@@ -48,10 +48,42 @@ def is_storage_not_found(exc: BaseException) -> bool:
     return False
 
 
+_WM_ABSTRACT_MAX_CHARS = 400
+
+
+def _working_memory_abstract(summary: str) -> str:
+    """L0 for a Working Memory document: title plus the start of Current State.
+
+    The generic rule below takes the first line, which for Working Memory is
+    always the literal "# Working Memory" and carries no information.
+    """
+    def section(name: str) -> str:
+        match = re.search(rf"^##\s+{re.escape(name)}\s*$(.*?)(?=^##\s|\Z)", summary, re.M | re.S)
+        return match.group(1).strip() if match else ""
+
+    title = section("Session Title").strip("_*` \n")
+    state = " ".join(section("Current State").split())
+    if not title and not state:
+        return ""
+    if state:
+        sentence = re.split(r"(?<=[.!?。！？])\s+", state, maxsplit=1)[0]
+        text = f"{title} — {sentence}" if title else sentence
+    else:
+        text = title
+    if len(text) > _WM_ABSTRACT_MAX_CHARS:
+        text = text[: _WM_ABSTRACT_MAX_CHARS - 1].rstrip() + "…"
+    return text
+
+
 def extract_abstract_from_summary(summary: str) -> str:
     """Extract one-sentence overview from a structured summary."""
     if not summary:
         return ""
+
+    if re.search(r"^##\s+Session Title\s*$", summary, re.M):
+        abstract = _working_memory_abstract(summary)
+        if abstract:
+            return abstract
 
     match = re.search(r"^\*\*[^*]+\*\*:\s*(.+)$", summary, re.MULTILINE)
     if match:
