@@ -6,6 +6,7 @@ import time
 
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
 
+import httpx
 import volcenginesdkarkruntime
 from openviking_cli.utils.logger import default_logger as logger
 
@@ -79,8 +80,22 @@ async def _measure_embedding_call_async(
         raise
 
 
-def _create_sync_ark(kwargs: Dict[str, Any]):
+# The SDK default is a 600 s request timeout plus 2 internal retries, under
+# OpenViking's own retry loop: one stalled upstream request could hold an
+# embedding (and every commit waiting on it) for an hour. Fail fast instead and
+# let the outer retry/backoff handle transient errors.
+_EMBEDDING_REQUEST_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
+
+
+def _bounded_ark_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     client_kwargs = dict(kwargs)
+    client_kwargs.setdefault("timeout", _EMBEDDING_REQUEST_TIMEOUT)
+    client_kwargs.setdefault("max_retries", 0)
+    return client_kwargs
+
+
+def _create_sync_ark(kwargs: Dict[str, Any]):
+    client_kwargs = _bounded_ark_kwargs(kwargs)
     http_client = create_optional_sync_httpx_client(
         client_kwargs.get("base_url"),
         timeout=60.0,
@@ -91,7 +106,7 @@ def _create_sync_ark(kwargs: Dict[str, Any]):
 
 
 def _create_async_ark(kwargs: Dict[str, Any]):
-    client_kwargs = dict(kwargs)
+    client_kwargs = _bounded_ark_kwargs(kwargs)
     http_client = create_optional_async_httpx_client(
         client_kwargs.get("base_url"),
         timeout=60.0,
