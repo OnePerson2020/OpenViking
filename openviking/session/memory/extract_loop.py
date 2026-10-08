@@ -114,6 +114,28 @@ def _preview_text(content: str, *, limit: int = 240) -> str:
     return text[: limit - 3] + "..."
 
 
+
+def _vlm_supports_structured_output(vlm: Any) -> bool:
+    """True when the backend that will serve this VLM accepts strict JSON schema.
+
+    0.4.23 hands extraction an account-bound proxy (AccountBoundVLM) that
+    forwards calls to the account's VLMConfig; the capability lives on the
+    concrete backend behind that config, so look through the proxy.
+    """
+    if getattr(vlm, "supports_structured_output", False) is True:
+        return True
+    settings = vlm.__dict__.get("_settings") if hasattr(vlm, "__dict__") else None
+    target = settings if settings is not None else vlm
+    get_instance = getattr(target, "get_vlm_instance", None)
+    if not callable(get_instance):
+        return False
+    return getattr(get_instance(), "supports_structured_output", False) is True
+
+
+class ExtractionOutputInvalidError(RuntimeError, ValueError):
+    """Model output stayed unparseable/unsafe after every repair iteration."""
+
+
 class ExtractLoop:
     """
     Simplified ReAct orchestrator for memory updates.
@@ -211,7 +233,7 @@ class ExtractLoop:
         pending_resolution_repair: Optional[Tuple[ResolvedOperations, List]] = None
 
         # 从 provider 获取 schemas（内部自动加载 registry）
-        schemas = self.context_provider.get_memory_schemas(self.ctx)
+        schemas = self.context_provider.get_memory_schemas(getattr(self, "ctx", None))
 
         # 初始化 schema 生成器（使用 schemas 而非 registry）
         output_language = self.context_provider.get_output_language()
@@ -260,6 +282,7 @@ class ExtractLoop:
             link_enabled=self._link_enabled,
             role_scope=role_scope,
             available_tools=tuple(allowed_tools),
+            memory_type_resolver=self._memory_type_for_uri,
             template_context={"language": output_language},
         )
         tracer.set("memory.extraction.output_format", output_format)
@@ -278,9 +301,14 @@ class ExtractLoop:
 {provider_instruction}
 {reference_rules}
 ## Read Format Rules
-- The read tool accepts `uri`, optional `offset` (0-indexed), and optional `limit`.
+- The read tool accepts `uri`, optional line `offset`/`limit`, and optional exact-field
+  `field`/`text_offset`.
 - Read content is returned in Claude Code format: each visible line is prefixed with `line_number<TAB>`.
 - When you copy text from read results into SEARCH/REPLACE or DELETE operations, copy the exact text after the line-number prefix. Never include the line-number prefix itself in `search`, `replace`, or `delete`.
+- If `_partial` is true, fields in `_omitted_fields` may only be changed with local
+  edit()/drop() operations whose exact SEARCH text was visible. Never replace a partial
+  field wholesale and never delete a partially read memory. Read another page or exact
+  field first when the needed text is not visible.
 {output_contract}
         """,
             }
@@ -305,6 +333,8 @@ class ExtractLoop:
 
             # If last iteration, add a message telling the model to return result directly
             if is_last_iteration:
+                if self._output_protocol.name == "json_schema":
+                    self._disable_tools_for_iteration = True
                 messages.append(
                     {
                         "role": "user",
@@ -383,10 +413,14 @@ class ExtractLoop:
 
                     continue
                 patch_errors = await self._validate_patch_operations(final_operations)
+                partial_errors = self._partial_operation_errors(final_operations)
+                patch_errors.extend(partial_errors)
                 if patch_errors and patch_repair_count == 0:
                     patch_repair_count += 1
                     max_iterations += 1
                     self._disable_tools_for_iteration = True
+                    if self._output_protocol.name == 'json_schema':
+                        await self._refresh_patch_fields(messages, patch_errors)
                     messages.append(
                         {
                             "role": "user",
@@ -397,6 +431,8 @@ class ExtractLoop:
                         f"Extended max_iterations to {max_iterations} for retry patch repair"
                     )
                     continue
+                if partial_errors or (patch_errors and self._output_protocol.name == "json_schema"):
+                    raise ValueError(self._build_patch_repair_instruction(patch_errors))
                 break
             # If no tool calls either, continue to next iteration (don't break!)
             failure_kind = self._last_llm_failure_kind or "unknown"
@@ -409,7 +445,11 @@ class ExtractLoop:
                 max_iterations += 1
                 retry_reason = "refusal_text" if failure_kind == "refusal_text" else "format_retry"
                 tracer.info(f"Extended max_iterations to {max_iterations} for {retry_reason}")
-                self._add_format_error_message(messages)
+
+            # Refresh the parser feedback after EVERY invalid response, while
+            # granting only the single bounded extra attempt above. Otherwise
+            # later attempts repeat a new error without ever seeing its cause.
+            self._add_format_error_message(messages)
 
             # A failure is only terminal when no retry attempt remains after it.
             retry_remaining = iteration < max_iterations
@@ -424,11 +464,12 @@ class ExtractLoop:
                 # not the console/log stream.
                 tracer.info(failure_message)
             else:
-                # ERROR: no attempt remains to repair the invalid response.
+                # ERROR: retries exhausted; never report an invalid program as
+                # a successful empty extraction or publish a completion receipt.
                 tracer.error(failure_message)
 
-            # Preserve a valid first pass when only its resolution repair failed.
-            # Otherwise propagate failure so the archive is not marked completed.
+            # Preserve a valid first pass only for optional resolution repair.
+            # All other terminal parse failures must reach the task failure path.
             if not retry_remaining:
                 if pending_resolution_repair is not None:
                     final_operations, raw_links = pending_resolution_repair
@@ -439,10 +480,10 @@ class ExtractLoop:
                         console=True,
                     )
                     break
-                raise RuntimeError(
-                    "Final response could not be parsed as operations "
-                    f"after {max_iterations} iterations "
-                    f"(failure_kind={failure_kind})"
+                raise ExtractionOutputInvalidError(
+                    "Final response could not be parsed as operations: memory extraction "
+                    f"output invalid after {max_iterations} iterations (failure_kind={failure_kind}): "
+                    f"{parse_error or 'no valid operations returned'}"
                 )
 
             self._disable_tools_for_iteration = (
@@ -542,7 +583,7 @@ class ExtractLoop:
     def _memory_type_for_uri(self, uri: str) -> Optional[str]:
         matches = [
             schema.memory_type
-            for schema in self.context_provider.get_memory_schemas(self.ctx)
+            for schema in self.context_provider.get_memory_schemas(getattr(self, "ctx", None))
             if self._uri_belongs_to_schema(uri, schema) is True
         ]
         unique_matches = list(dict.fromkeys(matches))
@@ -773,7 +814,7 @@ class ExtractLoop:
 
         role_scope = self._isolation_handler.get_read_scope()
         page_id_map = getattr(self._extract_context, "page_id_map", None)
-        schemas = list(self.context_provider.get_memory_schemas(self.ctx))
+        schemas = list(self.context_provider.get_memory_schemas(getattr(self, "ctx", None)))
         assigned_page_ids, page_id_assignments = self._assign_response_page_ids(
             operations,
             schemas,
@@ -790,6 +831,15 @@ class ExtractLoop:
 
             for item_index, item in enumerate(items):
                 item_dict = dict(item)
+                if getattr(self, "_output_protocol", None) is not None and self._output_protocol.name == "json_schema":
+                    # The strict wire format emits every property. On an existing
+                    # page null means KEEP, not replace-with-null. Remove it only
+                    # at the operation boundary, after strict schema validation.
+                    requested = item_dict.get("page_id")
+                    if page_id_map is not None and page_id_map.resolve(requested):
+                        for field in schema.fields:
+                            if field.merge_op != MergeOp.IMMUTABLE and item_dict.get(field.name) is None:
+                                item_dict.pop(field.name, None)
                 item_dict["memory_type"] = memory_type
                 identity_resolution_skip = None
                 classify_identity_fields = getattr(
@@ -870,10 +920,16 @@ class ExtractLoop:
                                 for field in schema.fields
                                 if field.merge_op == MergeOp.IMMUTABLE
                             }
+                            from openviking.session.memory.context_budget import (
+                                memory_file_field_value,
+                            )
+
                             preserved_fields = set(immutable_fields)
-                            preserved_fields.update(schema.identity_fields(include_peer_id=False))
+                            identity_fields = getattr(schema, "identity_fields", None)
+                            if callable(identity_fields):
+                                preserved_fields.update(identity_fields(include_peer_id=False))
                             for field_name in preserved_fields:
-                                old_value = old_content.extra_fields.get(field_name)
+                                old_value = memory_file_field_value(old_content, field_name)
                                 if not ImmutableOp.is_set(old_value):
                                     continue
                                 new_value = resolved_op.memory_fields.get(field_name)
@@ -1175,12 +1231,31 @@ class ExtractLoop:
         Returns:
             Tuple of (tool_calls, operations) - one will be None, the other set
         """
+        if getattr(self, "_output_protocol", None) is not None and self._output_protocol.name == "json_schema":
+            return await self._call_strict_json(messages)
         # Call LLM with tools - use tools from strategy
         tools = None
         tool_choice = None
         if not self._disable_tools_for_iteration and self._tool_schemas:
             tools = self._tool_schemas
             tool_choice = "auto"
+        from openviking.session.memory.context_budget import MemoryInputBudgetError, json_tokens
+
+        input_budget = getattr(
+            get_openviking_config().memory,
+            "extraction_input_token_budget",
+            48000,
+        )
+        estimated_input_tokens = json_tokens({"messages": messages, "tools": tools})
+        tracer.info(
+            f"Memory extraction input budget: estimated={estimated_input_tokens} "
+            f"limit={input_budget}"
+        )
+        if estimated_input_tokens > input_budget:
+            raise MemoryInputBudgetError(
+                "Memory extraction input budget exceeded before model call: "
+                f"{estimated_input_tokens} > {input_budget}"
+            )
         with bind_telemetry_stage("memory_extract"):
             response = await self.vlm.get_completion_async(
                 messages=messages,
@@ -1283,6 +1358,63 @@ class ExtractLoop:
         )
         return (None, None)
 
+    async def _call_strict_json(self, messages):
+        """Constrain both read requests and final operations, never native tool wrappers."""
+        from jsonschema import ValidationError as SchemaValidationError
+        from pydantic import ValidationError as ModelValidationError
+        from openviking.session.memory.extraction_output_protocol.strict_json_protocol import StrictActionError
+        from openviking.session.memory.context_budget import MemoryInputBudgetError, json_tokens
+
+        if not _vlm_supports_structured_output(self.vlm):
+            raise ValueError("Strict extraction requires a verified structured-output backend")
+        tools = [] if self._disable_tools_for_iteration else (self._tool_schemas or [])
+        fmt = self._output_protocol.response_format(self._output_context, tools)
+        budget = getattr(get_openviking_config().memory, "extraction_input_token_budget", 48000)
+        estimated = json_tokens({"messages": messages, "response_format": fmt})
+        if estimated > budget:
+            raise MemoryInputBudgetError(
+                f"Memory extraction input budget exceeded before model call: {estimated} > {budget}"
+            )
+        # Transport/deadline/cancellation exceptions are not format retries.
+        with bind_telemetry_stage("memory_extract"):
+            response = await self.vlm.get_completion_async(
+                messages=messages, thinking=self.thinking,
+                max_tokens=self._effective_max_output_tokens, response_format=fmt,
+            )
+        self._last_llm_failure_kind = None
+        self._last_llm_failure_content = ""
+        self._last_parse_error = None
+        try:
+            return self._output_protocol.parse_response(response, self._output_context, fmt, tools)
+        except (ValueError, TypeError, KeyError, SchemaValidationError, ModelValidationError) as exc:
+            self._last_llm_failure_kind = "parse_error"
+            # Never log invalid response bodies (or schema validation instance values).
+            if isinstance(exc, StrictActionError):
+                self._last_parse_error = str(exc)
+            elif isinstance(exc, SchemaValidationError):
+                self._last_parse_error = "STRICT_SCHEMA_MISMATCH validator=" + str(exc.validator)
+                # Required/additionalProperties may mention model-supplied keys;
+                # include only the validator's schema path, never instance data.
+                self._last_parse_error += " schema_path=" + "/".join(map(str, exc.absolute_schema_path))[:240]
+                if exc.context:
+                    # anyOf/oneOf: name the closest branch's failing location.
+                    # Instance paths are schema keys/list indexes, never values.
+                    from jsonschema.exceptions import best_match
+
+                    inner = best_match(exc.context)
+                    self._last_parse_error += (
+                        " best_validator=" + str(inner.validator)
+                        + " best_schema_path=" + "/".join(map(str, inner.absolute_schema_path))[:240]
+                        + " best_instance_path=" + "/".join(map(str, inner.absolute_path))[:160]
+                    )
+            elif isinstance(exc, json.JSONDecodeError):
+                self._last_parse_error = "STRICT_JSON_SYNTAX: return exactly one valid JSON object"
+            else:
+                self._last_parse_error = "STRICT_PARSE_ERROR type=" + type(exc).__name__
+            logger.warning("Strict extraction rejected provider=%s reason=%s",
+                           type(self.context_provider).__name__, self._last_parse_error)
+            return None, None
+
     async def _check_unread_existing_files(self, operations: ResolvedOperations) -> Dict:
         refetch_uris = {}
         for operation in operations.upsert_operations:
@@ -1316,6 +1448,34 @@ class ExtractLoop:
         """Build schema-aware final-iteration instructions for the LLM."""
         return self._output_protocol.render_final_instruction(self._output_context)
 
+    async def _refresh_patch_fields(self, messages, errors):
+        """Bounded read-only repair context, never change field targets automatically."""
+        from openviking.session.memory.context_budget import memory_file_field_value, json_tokens
+        reads = self.context_provider.read_file_contents or {}
+        requests = []
+        for error in errors:
+            fields = [error.get('field')] + list(error.get('found_in_other_fields', []))
+            for field in fields:
+                requests.append((error.get('uri'), field, error.get('search')))
+        seen = set();total = 0
+        for uri, field, search in requests:
+            if not field or uri not in reads or (uri, field) in seen:
+                continue
+            seen.add((uri, field))
+            if len(seen) > 4: break
+            value = memory_file_field_value(reads[uri], field)
+            if not isinstance(value, str): continue
+            at = value.find(search) if isinstance(search, str) and search else -1
+            params = {'uri': uri, 'field': field, 'text_offset': max(0, at-240)}
+            data = await self.context_provider.execute_tool(ToolCall(
+                id='repair_'+str(len(seen)), name='read', arguments=params))
+            rendered = self._output_protocol.render_tool_result_messages(
+                self._output_context, call_id='repair_'+str(len(seen)), tool_name='read',
+                params=params, result=data, source='exact field retry')
+            cost = json_tokens(rendered)
+            if cost > 4000 or total + cost > 12000: continue
+            total += cost;messages.extend(rendered)
+
     async def _validate_patch_operations(
         self,
         operations: ResolvedOperations,
@@ -1326,6 +1486,7 @@ class ExtractLoop:
             StrPatch,
         )
         from openviking.session.memory.merge_op.patch_handler import unescape_markers
+        from openviking.session.memory.context_budget import memory_file_field_value
 
         errors = []
         patch_op = PatchOp(FieldType.STRING)
@@ -1333,11 +1494,16 @@ class ExtractLoop:
         for operation in operations.upsert_operations:
             if operation.old_memory_file_content is None:
                 continue
-            current_content = operation.old_memory_file_content.plain_content() or ""
             target_uri = (
                 operation.uris[0] if operation.uris else operation.old_memory_file_content.uri
             )
             for field_name, patch_value in operation.memory_fields.items():
+                current_content = memory_file_field_value(
+                    operation.old_memory_file_content, field_name
+                )
+                if current_content is not None and not isinstance(current_content, str):
+                    continue
+                current_content = current_content or ""
                 blocks = []
                 if isinstance(patch_value, StrPatch):
                     blocks = patch_value.blocks
@@ -1381,11 +1547,20 @@ class ExtractLoop:
                         for uri, memory_file in read_files.items()
                         if uri != target_uri and search in (memory_file.plain_content() or "")
                     ]
+                    schema = next((s for s in self.context_provider.get_memory_schemas(getattr(self, "ctx", None))
+                                   if s.memory_type == operation.memory_type), None)
+                    other_fields = [f.name for f in schema.fields
+                        if f.name != field_name
+                        and isinstance(memory_file_field_value(operation.old_memory_file_content, f.name), str)
+                        and effective_search
+                        and effective_search in memory_file_field_value(operation.old_memory_file_content, f.name)
+                    ] if schema is not None else []
                     errors.append(
                         {
                             "uri": target_uri,
                             "page_id": operation.page_id,
                             "field": field_name,
+                            "found_in_other_fields": other_fields,
                             "block_index": block_index,
                             "search": search,
                             "reason": reason,
@@ -1396,6 +1571,48 @@ class ExtractLoop:
                     break
         if errors:
             tracer.info(f"String patch validation failed before apply: {errors}")
+        return errors
+
+    def _partial_operation_errors(
+        self, operations: ResolvedOperations
+    ) -> List[Dict[str, Any]]:
+        from openviking.session.memory.context_budget import validate_partial_fields
+
+        errors: List[Dict[str, Any]] = []
+        partial = getattr(self.context_provider, "partial_read_fields", {})
+        for deleted in operations.delete_file_contents:
+            if deleted.uri and partial.get(deleted.uri):
+                errors.append(
+                    {
+                        "uri": deleted.uri,
+                        "reason": "Cannot delete a partially read memory",
+                    }
+                )
+
+        for operation in operations.upsert_operations:
+            for uri in operation.uris:
+                constraints = partial.get(uri, {})
+                if not constraints or operation.old_memory_file_content is None:
+                    continue
+                operation.partial_read_fields = {
+                    name: list(spans) for name, spans in constraints.items()
+                }
+                for field_name in constraints:
+                    try:
+                        validate_partial_fields(
+                            operation.old_memory_file_content,
+                            operation.memory_fields,
+                            {field_name: constraints[field_name]},
+                        )
+                    except ValueError as exc:
+                        errors.append(
+                            {
+                                "uri": uri,
+                                "page_id": operation.page_id,
+                                "field": field_name,
+                                "reason": str(exc),
+                            }
+                        )
         return errors
 
     def _build_patch_repair_instruction(self, patch_errors: List[Dict[str, Any]]) -> str:

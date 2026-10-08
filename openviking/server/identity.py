@@ -127,6 +127,8 @@ class ToolContext:
     transaction_handle: Optional[Any] = None
     read_file_contents: Optional[Any] = None  # 用于记录已读取的文件内容
     page_id_map: Optional[Any] = None  # PageIdMap for annotating read results
+    partial_read_fields: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    read_query: str = ""
 
     @property
     def user(self):

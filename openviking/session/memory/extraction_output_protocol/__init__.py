@@ -9,12 +9,17 @@ from openviking.session.memory.extraction_output_protocol.base import (
 from openviking.session.memory.extraction_output_protocol.json_protocol import (
     JsonExtractionOutputProtocol,
 )
+from openviking.session.memory.extraction_output_protocol.strict_json_protocol import (
+    StrictJsonExtractionOutputProtocol,
+)
 from openviking.session.memory.extraction_output_protocol.python_protocol import (
     PythonExtractionOutputProtocol,
 )
 
 
 def create_extraction_output_protocol(output_format: str) -> ExtractionOutputProtocol:
+    if output_format == "json_schema":
+        return StrictJsonExtractionOutputProtocol()
     if output_format == "json":
         return JsonExtractionOutputProtocol()
     if output_format == "python":

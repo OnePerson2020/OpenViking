@@ -32,6 +32,8 @@ class ExtractionOutputContext:
     link_enabled: bool
     role_scope: Any | None = None
     available_tools: tuple[str, ...] = ()
+    # Trusted, identity-scoped path classifier. Never inferred from model output.
+    memory_type_resolver: Any | None = None
     template_context: dict[str, Any] = field(default_factory=dict)
 
 

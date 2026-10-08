@@ -76,6 +76,16 @@ class MemoryConfig(BaseModel):
             "notice asking it to choose between coherent splitting and single-file compaction."
         ),
     )
+    extraction_input_token_budget: int = Field(
+        default=48000,
+        ge=16000,
+        description="Maximum estimated input tokens for one memory-extraction model call.",
+    )
+    extraction_read_token_budget: int = Field(
+        default=3000,
+        ge=512,
+        description="Maximum estimated tokens exposed by one memory read.",
+    )
     extraction_enabled: bool = Field(
         default=True,
         description=(
@@ -85,12 +95,21 @@ class MemoryConfig(BaseModel):
             "stateless deployments."
         ),
     )
-    extraction_output_format: Literal["json", "python"] = Field(
+    extraction_output_format: Literal["json", "python", "json_schema"] = Field(
         default="python",
         description=(
             "Final model-output protocol used by every memory extraction loop. "
             "'python' uses the restricted internal memory SDK DSL (default); "
-            "'json' preserves the legacy structured JSON protocol."
+            "'json' preserves the legacy structured JSON protocol. "
+            "'json_schema' constrains read-only actions and final operations at the provider "
+            "and rejects malformed JSON locally without repair. Requires a verified backend."
+        ),
+    )
+    working_memory_transport: Literal["legacy", "strict_tool", "json_schema"] = Field(
+        default="legacy",
+        description=(
+            "WM output transport: legacy tool calls, strict tool parameters, or "
+            "provider-constrained JSON Schema. Opt in only on a verified backend."
         ),
     )
     session_skill_extraction_enabled: bool = Field(

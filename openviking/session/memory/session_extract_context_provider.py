@@ -78,6 +78,7 @@ class SessionExtractContextProvider(ExtractContextProvider):
         self._extract_context = None  # 缓存 ExtractContext 实例
         self._isolation_handler = isolation_handler
         self._read_file_contents: Dict[str, MemoryFile] = {}
+        self.partial_read_fields: Dict[str, Dict[str, List[str]]] = {}
         # 读取 eager_prefetch 配置
         config = get_openviking_config()
         self._eager_prefetch = config.memory.eager_prefetch if config.memory else False
@@ -227,7 +228,10 @@ class SessionExtractContextProvider(ExtractContextProvider):
 
 ## Critical
 - ONLY read and search tools are available - DO NOT use write tool
-- Before editing ANY existing memory file, you MUST first read its complete content
+- Before editing ANY existing memory file, you MUST first read its complete content, unless
+  the read result explicitly returns `_partial`. For a partial result, only use exact unique
+  edit/drop operations inside visible original text. Never replace a partial field or delete
+  a partially read file; read another page or exact field when needed.
 - ONLY read URIs that are explicitly listed in ls/search tool results, returned by previous tool calls{resource_deletion_read_source}
 
 ## Target Output Language
@@ -410,6 +414,8 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
             default_search_uris=default_search_uris,
             read_file_contents=self._read_file_contents,
             page_id_map=extract_context.page_id_map,
+            partial_read_fields=self.partial_read_fields,
+            read_query=self._build_prefetch_search_query(),
         )
         return tool_ctx
 
