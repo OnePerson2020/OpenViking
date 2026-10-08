@@ -48,6 +48,10 @@ _RESOURCE_REASON_MEMORY_TYPES = ["entities", "events", "preferences"]
 _RESOURCE_DELETION_MEMORY_TYPES = ["entities", "preferences"]
 _RESOURCE_REASON_COMMIT_TIMEOUT_SECONDS = 1800.0
 _RESOURCE_ABSTRACT_MAX_CHARS = 200
+# Automatically captured agent artifacts already carry their provenance as an
+# explicit session link message. A reason commit per artifact only serializes
+# on the shared reason session and holds AddResource workers while it waits.
+_AUTO_CAPTURE_RESOURCE_PREFIX = "viking://resources/agent-artifacts/"
 _ABSTRACT_NOT_READY_MARKERS = (
     "[.abstract.md is not ready]",
     "[Directory abstract is not ready]",
@@ -160,6 +164,8 @@ class ResourceMemoryLinkService:
             return {"status": "skipped", "reason": "empty_reason"}
         if not resource_uri:
             return {"status": "skipped", "reason": "empty_resource_uri"}
+        if resource_uri.startswith(_AUTO_CAPTURE_RESOURCE_PREFIX):
+            return {"status": "skipped", "reason": "auto_captured_artifact"}
         if not self._session_service:
             return {"status": "skipped", "reason": "session_service_unavailable"}
 
