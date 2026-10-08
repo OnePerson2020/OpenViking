@@ -95,11 +95,84 @@ verified the actual executable's HTTP requests, table output and nullable JSON.
 The relevant cleanup regression selection passed all 30 cases. Ruff and
 `git diff --check` passed; Rust files retain pre-existing rustfmt differences.
 
-Web Studio is in this repository, but this PR has no TTL page changes. Its
-filesystem and Session TypeScript types also lack `expires_at`. It would need
-library/root configuration and read-only expiry display; API filtering already
-hides expired content on refresh. The cloud console's code ownership is not
-established by this checkout. Neither UI is claimed as delivered.
+### Web Studio integration (2026-10-08)
+
+Web Studio now has a TTL card in Connection Settings for library/type defaults
+and exact user/peer events or sessions roots. Root controls are also available
+from the directory preview/browser and Sessions page. The form uses the existing
+account configuration PATCH and root TTL GET APIs. Each save changes only the
+selected policy; unrelated settings and root overrides remain intact. Removing
+a library override, inheriting the type/library policy, and disabling expiry are
+separate choices. The global default permits days or disabled, while type/root
+overrides also permit an absolute local date/time, sent as Unix seconds.
+
+Account creation can also include initial TTL through the existing create
+request: server defaults, disabled, custom days, or an explicit preset of
+60 days for both event types and 30 days for Sessions. The preset follows the
+PRD's written defaults. It creates no separate settings request or new backend
+mechanism. Type/root overrides can be edited after creation.
+
+Editing follows existing account-admin/Root management permissions. Dev mode's
+Admin API remains unavailable. Ordinary users can read object expiry. Directory,
+file and Session views preserve `expires_at`, including null; an omitted field
+from an older server is not shown as disabled. Children have no TTL edit control.
+Writes still do not renew deadlines. Partial application errors remain visible
+and allow retrying the same policy. Switching account or credentials resets an
+unsaved form, and outstanding requests retain their original identity.
+
+Validation for this addition:
+
+- All 532 Web Studio tests passed across 103 files, including eleven new cases.
+- Existing backend HTTP/config/policy application selection: 49 passed.
+- Production build with `/studio/` base, changed-file ESLint, Prettier and diff
+  checks passed. TypeScript still reports the same 31 pre-existing errors as
+  the prior commit; no new errors after normalizing shifted line numbers.
+- Chrome exercised the production bundle against an isolated localhost API
+  with native local storage and an account-admin credential. Library and root
+  changes updated existing Event/Session expiry while preserving original
+  timestamps; message append did not renew the Session. CLI read the same
+  settings and deadlines and applied an absolute root policy. After expiry,
+  refreshing Studio removed the Session, its API returned 404, and the unaffected
+  Event remained readable. Event directory/file and Session expiry, root dialog,
+  both locales and a 390 px layout were checked. The embedder was a local stub;
+  this validates configuration/visibility, not model or remote-storage behavior.
+- A separate browser flow created an account with the preset in a single
+  request, verified both event policies, created a Session with exactly 30 days
+  of retention, and confirmed Studio switched to the new account.
+
+This UI addition has not been deployed to shared K8s. The separate cloud console,
+countdown/7-day warnings and billing integration are not included. Earlier K8s
+cleanup evidence below remains separate from this browser acceptance.
+
+### Remaining integration acceptance
+
+The current implementation covers Studio configuration and expiry display, but
+does not establish complete acceptance of the original console prototype:
+
+- Deploy matching frontend/backend builds to the integration environment. An
+  older TTL image and source-overlay tests do not validate the new Studio bundle.
+- Connect the separate cloud console's create/edit and exact-root controls to
+  the same APIs, with real account identities and administrator permissions.
+  This change edits only this repository's Studio.
+- Verify expiry hiding, then daily cleanup of files, summaries, Meta and vectors,
+  then eventual metering convergence in the shared environment. Local native
+  tests establish behavior; remote storage and billing remain separate checks.
+- The prototype's TTL-source/received-time fields, root tree badges and
+  countdown/7-day warning presentation remain absent. Actual expiry is shown.
+  `modTime` must not be presented as the original receipt timestamp. Public TTL
+  responses do not currently expose the original receipt time or policy source.
+- Studio's embedded terminal supports a command subset, including `/stat` and
+  `/session get`; it does not run the native CLI's `ov ttl` or admin commands.
+  Native CLI configuration and queries were separately exercised against HTTP.
+- TTL cleanup uses internal strict deletion. The public filesystem DELETE route
+  still has no strict query parameter; it must not be advertised as supporting it.
+
+Some prototype details describe superseded scope: individual Session/file
+editing, other memory categories, write-triggered renewal, and fixed midnight
+deletion are not this delivery contract. The prototype's retention examples
+differ from the written PRD; Studio labels the actual preset days explicitly.
+Time-decay controls belong to the separate workstream. Independent review,
+merge conflicts and final-head CI also remain before merge.
 
 ## Directory-scan implementation
 
