@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0
 """VolcEngine VLM backend implementation."""
 
+import asyncio
 import base64
 import json
 import time
@@ -9,13 +10,15 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from openviking.models.call_diagnostics import CallObservation, attach_hooks
+from openviking.utils.exceptions import ModelCallDeadlineError
+from openviking.utils.token_estimation import estimate_text_tokens
 from openviking.models.network import (
     create_optional_async_httpx_client,
     create_optional_sync_httpx_client,
 )
 from openviking.telemetry import tracer
 from openviking.utils.message_format import format_messages, sanitize_openai_messages
-from openviking.utils.model_retry import retry_async
 from openviking.utils.multimodal import redact_image_data_urls
 from openviking_cli.utils import get_logger
 
@@ -55,6 +58,8 @@ def build_volcengine_request_headers(
 
 class VolcEngineVLM(OpenAIVLM):
     """VolcEngine VLM backend with Chat Completions API support."""
+
+    supports_structured_output = True
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
@@ -152,7 +157,11 @@ class VolcEngineVLM(OpenAIVLM):
         )
         if http_client is not None:
             kwargs["http_client"] = http_client
-        return volcenginesdkarkruntime.AsyncArk(**kwargs)
+        client = volcenginesdkarkruntime.AsyncArk(**kwargs)
+        # Keep SDK timeout, pooling, proxy and redirect defaults unchanged.
+        # Hooks observe header timing / httpcore phases without consuming bodies.
+        attach_hooks(client._client)
+        return client
 
     def supports_media(
         self,
@@ -237,8 +246,11 @@ class VolcEngineVLM(OpenAIVLM):
         tool_choice: Optional[str] = None,
         messages: Optional[List[Dict[str, Any]]] = None,
         max_tokens: Optional[int] = None,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> Union[str, VLMResponse]:
-        """Get text completion asynchronously via Chat Completions API."""
+        """Get text completion; structured requests retain finish_reason/usage."""
+        if response_format is not None and tools:
+            raise ValueError("Use either tools or response_format, not both")
         effective_thinking = self.thinking if thinking is None else thinking
         effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
         kwargs_messages = sanitize_openai_messages(
@@ -268,31 +280,89 @@ class VolcEngineVLM(OpenAIVLM):
                 f"tools: {json.dumps([t['function']['name'] for t in tools], ensure_ascii=False)}"
             )
 
+        if response_format is not None:
+            kwargs["response_format"] = response_format
         client = self.get_async_client()
 
-        async def _call() -> Union[str, VLMResponse]:
+        observation = CallObservation(
+            model=self.model,
+            input_tokens=estimate_text_tokens(json.dumps(
+                {"messages": kwargs_messages, "tools": tools, "tool_choice": tool_choice,
+                 "response_format": response_format},
+                ensure_ascii=False, default=str,
+            )),
+            max_tokens=effective_max_tokens,
+            tool_names=[tool.get("function", {}).get("name", "") for tool in tools or []],
+            thinking=effective_thinking,
+            timeout=self.timeout,
+        )
+        observation.fields["output_transport"] = (
+            "json_schema" if response_format is not None else "tools" if tools else "text"
+        )
+        observation.fields["strict_schema"] = (
+            response_format.get("json_schema", {}).get("strict", False)
+            if response_format is not None else
+            bool(tools) and all(t.get("function", {}).get("strict", False) for t in tools)
+        )
+        with observation:
+            return await self._complete_async_with_deadline(
+                client, kwargs, bool(tools) or response_format is not None, observation
+            )
+
+    async def _complete_async_with_deadline(self, client, kwargs, has_tools, observation):
+        # Hard wall-clock ceiling across all retries. The Ark SDK's own per-call
+        # timeout does not reliably fire on a stalled read (connection made, server
+        # never responds), and the retry loop can otherwise stack up to
+        # (max_retries + 1) full per-call timeouts, leaving the task "running" with a
+        # frozen updated_at and the per-session commit lock held. asyncio.wait_for
+        # guarantees each attempt is cancelled, and the shared deadline guarantees the
+        # whole call returns/raises within self.timeout regardless of retries.
+        overall_deadline = time.monotonic() + self.timeout
+        last_error = None
+        for attempt in range(self.max_retries + 1):
+            observation.begin_attempt(attempt + 1)
+            remaining = overall_deadline - time.monotonic()
+            if remaining <= 0:
+                break
             t0 = time.perf_counter()
             try:
-                response = await client.chat.completions.create(**kwargs)
-            except Exception as error:
-                self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=error)
-                raise
-            elapsed = time.perf_counter() - t0
-            self._update_token_usage_from_response(response, duration_seconds=elapsed)
-            result = self._build_vlm_response(response, has_tools=bool(tools))
-            if tools:
-                return result
-            content = self._clean_response(str(result))
-            if content:
-                tracer.info(f"message.content={content}")
-            return content
+                response = await asyncio.wait_for(
+                    client.chat.completions.create(**kwargs), timeout=remaining
+                )
+                elapsed = time.perf_counter() - t0
+                self._update_token_usage_from_response(response, duration_seconds=elapsed)
+                observation.complete(response)
+                result = self._build_vlm_response(response, has_tools=has_tools)
+                if has_tools:
+                    return result
+                content = self._clean_response(str(result))
+                if content:
+                    tracer.info(f"message.content={content}")
+                return content
+            except asyncio.TimeoutError as e:
+                self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=e)
+                last_error = ModelCallDeadlineError(
+                    f"VolcEngine completion exceeded {self.timeout:.0f}s deadline"
+                )
+                logger.warning(
+                    "[VolcEngineVLM] async completion timed out after "
+                    f"{time.perf_counter() - t0:.1f}s (attempt {attempt + 1}/"
+                    f"{self.max_retries + 1}); aborting deadline-bound call"
+                )
+                break
+            except Exception as e:
+                self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=e)
+                last_error = e
+                if attempt < self.max_retries:
+                    backoff = 2**attempt
+                    if time.monotonic() + backoff >= overall_deadline:
+                        break
+                    await asyncio.sleep(backoff)
 
-        return await retry_async(
-            _call,
-            max_retries=self.max_retries,
-            logger=logger,
-            operation_name="VolcEngine VLM async completion",
-        )
+        if last_error:
+            raise last_error
+        else:
+            raise RuntimeError("Unknown error in async completion")
 
     def _detect_image_format(self, data: bytes) -> str:
         """Detect image format from magic bytes.
@@ -497,7 +567,14 @@ class VolcEngineVLM(OpenAIVLM):
         client = self.get_async_client()
         t0 = time.perf_counter()
         try:
-            response = await client.chat.completions.create(**kwargs)
+            response = await asyncio.wait_for(
+                client.chat.completions.create(**kwargs), timeout=self.timeout
+            )
+        except asyncio.TimeoutError as error:
+            self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=error)
+            raise ModelCallDeadlineError(
+                f"VolcEngine vision completion exceeded {self.timeout:.0f}s deadline"
+            ) from error
         except Exception as error:
             self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=error)
             raise

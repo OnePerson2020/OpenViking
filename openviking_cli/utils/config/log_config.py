@@ -19,6 +19,11 @@ class LogConfig(BaseModel):
 
     output: str = Field(default="stdout", description="Log output: stdout, stderr, or file path")
 
+    model_calls_output: str = Field(
+        default="",
+        description="Optional metadata-only model call JSONL; 10 MiB rotation, 3 backups. No prompts or credentials.",
+    )
+
     rotation: bool = Field(default=True, description="Enable log file rotation")
 
     rotation_days: int = Field(default=3, description="Number of days to retain rotated log files")

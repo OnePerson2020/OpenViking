@@ -8,8 +8,12 @@ import threading
 import time
 from typing import Awaitable, Callable, TypeVar
 
+from openviking.utils.exceptions import (
+    AllCredentialsFailedError,
+    ModelCallDeadlineError,
+    WorkingMemoryDeadlineExhaustedError,
+)
 from openviking.pyagfs.exceptions import AGFSNotADirectoryError
-from openviking.utils.exceptions import AllCredentialsFailedError
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +27,7 @@ ERROR_CLASS_INPUT_TOO_LARGE = "input_too_large"
 ERROR_CLASS_QUOTA_EXCEEDED = "quota_exceeded"
 ERROR_CLASS_TRANSIENT = "transient"
 ERROR_CLASS_UNKNOWN = "unknown"
+ERROR_CLASS_DEADLINE = "deadline_exceeded"  # explicit, retry only at a safe boundary
 
 _METRIC_ERROR_CODE_MAX_LENGTH = 64
 
@@ -219,6 +224,11 @@ def classify_api_error(error: Exception) -> str:
     - an aggregated ``AllCredentialsFailedError`` is classified from its
       per-credential classes, not its concatenated message.
     """
+    if any(isinstance(exc, ModelCallDeadlineError) for exc in _iter_exception_chain(error)):
+        # Do not let generic retries replay a storage-writing extraction step.
+        # Working Memory handles these at its read-only current-batch boundary.
+        return ERROR_CLASS_DEADLINE
+
     if isinstance(error, AllCredentialsFailedError):
         classes = [ec for (_cid, ec, _exc, _idx) in error.errors if ec]
         if ERROR_CLASS_TRANSIENT in classes:
@@ -286,7 +296,10 @@ def classify_api_error(error: Exception) -> str:
 
 
 def is_retryable_api_error(error: Exception) -> bool:
-    """Return True if the error should be retried."""
+    """Return True for generic retries, excluding exhausted safe-boundary retries."""
+    if any(isinstance(exc, WorkingMemoryDeadlineExhaustedError)
+           for exc in _iter_exception_chain(error)):
+        return False
     return classify_api_error(error) == ERROR_CLASS_TRANSIENT
 
 

@@ -31,6 +31,14 @@ def error_code_from_http_status(status: int | None, default: str = "INVALID_ARGU
     return default
 
 
+class ModelCallDeadlineError(TimeoutError):
+    """One model HTTP call exceeded its wall-clock deadline, not a storage step."""
+
+
+class WorkingMemoryDeadlineExhaustedError(ModelCallDeadlineError):
+    """The current read-only WM batch already used its one deadline retry."""
+
+
 class AllCredentialsFailedError(Exception):
     """Raised when all credentials in the chain have failed."""
 
