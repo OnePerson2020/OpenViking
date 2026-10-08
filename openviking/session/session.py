@@ -2966,6 +2966,13 @@ class Session:
         """Persist a terminal failure marker for the archive."""
         if not self._viking_fs:
             return
+        if await self._archives.file_exists(archive_uri, ".done"):
+            # ``.done`` wins in terminal_state; a late failure marker would only
+            # leave a contradictory record behind.
+            logger.warning(
+                "Skipped failure marker for completed archive: %s (%s)", archive_uri, stage
+            )
+            return
         payload = {
             "stage": stage,
             "error": error,
@@ -3217,6 +3224,11 @@ class Session:
         tracker = get_task_tracker()
         if tracker.has_work(str(task_id)):
             return False
+        # The predecessor writes ``.done`` before releasing its queue work, so
+        # a completion that landed between the pending read above and
+        # ``has_work`` is visible now; it is not an orphan.
+        if await self._archives.terminal_state(predecessor_uri) != "pending":
+            return True
 
         error = "Session commit queue work is missing"
         await self._write_failed_marker(
