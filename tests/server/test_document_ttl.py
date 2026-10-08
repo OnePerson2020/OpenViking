@@ -51,6 +51,58 @@ async def request(client, method, path, **kwargs):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "node",
+    [
+        "global",
+        "global_default",
+        "user_events",
+        "peer_events",
+        "sessions",
+        ROOT + "/memories/events",
+        ROOT + "/peers/p1/memories/events",
+        ROOT + "/sessions",
+    ],
+)
+async def test_policy_mode_is_required_before_create_or_patch(client, service, node):
+    from openviking.config.scope import ConfigScope
+
+    manager = service.runtime_config_manager
+
+    def settings(policy):
+        ttl = {"directories": {node: policy}} if node.startswith("viking://") else {node: policy}
+        return {"ttl": ttl}
+
+    # A previously saved mode must not make an incomplete new request valid.
+    for existing in (False, True):
+        if existing:
+            await manager.patch_cluster(settings({"mode": "days", "ttl_days": 7}))
+            await manager.patch_account("default", settings({"mode": "days", "ttl_days": 7}))
+        before = [
+            await manager.get_settings(scope)
+            for scope in (ConfigScope.cluster(), ConfigScope.account("default"))
+        ]
+        for policy in ({}, {"ttl_days": 30}, {"ttl_absolute": 4102444800}, {"mode": None}):
+            for method, path in (
+                ("post", "/api/v1/admin/accounts"),
+                ("patch", CONFIG),
+                ("patch", "/api/v1/admin/configuration"),
+            ):
+                body = {"settings": settings(policy)}
+                if method == "post":
+                    body.update(account_id="missing-mode", admin_user_id="alice")
+                response = await getattr(client, method)(path, json=body)
+                assert response.status_code == 400, response.text
+                error = response.json()["error"]
+                assert error["code"] == "INVALID_ARGUMENT"
+                assert "mode is required" in error["message"]
+        assert before == [
+            await manager.get_settings(scope)
+            for scope in (ConfigScope.cluster(), ConfigScope.account("default"))
+        ]
+
+
+@pytest.mark.asyncio
 async def test_session_api_inherits_root_and_returns_expiry_everywhere(client, service):
     await request(
         client,
@@ -294,7 +346,12 @@ async def test_root_patch_updates_existing_event_and_session_before_return(clien
     event_fields = await request(client, "get", "/api/v1/content/ttl", params={"uri": event})
     session_fields = await request(client, "get", "/api/v1/sessions/existing")
     assert event_fields["expires_at"] and session_fields["expires_at"]
-    await request(client, "patch", CONFIG, json={"settings": {"ttl": {"global": {"ttl_days": 30}}}})
+    await request(
+        client,
+        "patch",
+        CONFIG,
+        json={"settings": {"ttl": {"global": {"mode": "days", "ttl_days": 30}}}},
+    )
     extended = await request(client, "get", "/api/v1/content/ttl", params={"uri": event})
     from datetime import timedelta
 

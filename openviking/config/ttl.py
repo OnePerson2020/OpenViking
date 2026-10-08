@@ -10,12 +10,32 @@ from openviking.config.validate import filter_runtime_fields, normalize_config_k
 from openviking_cli.utils.config.ttl_config import TTLConfig
 
 
+def validate_ttl_policy_modes(settings: dict) -> dict:
+    """Require an explicit mode on each policy object in an API request."""
+    ttl = settings.get("ttl")
+    if isinstance(ttl, dict):
+        policies = [
+            (f"ttl.{key}", ttl[key])
+            for key in ("global", "global_default", "user_events", "peer_events", "sessions")
+            if key in ttl
+        ]
+        if isinstance(ttl.get("directories"), dict):
+            policies.extend(
+                (f"ttl.directories.{uri}", value) for uri, value in ttl["directories"].items()
+            )
+        for path, policy in policies:
+            if isinstance(policy, dict) and policy.get("mode") is None:
+                raise ValueError(f"{path}.mode is required")
+    return settings
+
+
 def merge_ttl_config(current: dict, patch: dict) -> dict:
     """Merge sparse TTL policies without retaining another mode's parameters.
 
     Null removes an override. A concrete mode selects a policy variant;
     unrelated scopes and directories retain ordinary PATCH semantics.
-    A day/timestamp-only edit selects its variant for a fresh sparse override.
+    Legacy persisted day/timestamp-only overrides still select their variant;
+    API requests must provide mode before reaching this merge.
     Conflicting request fields remain present so validation rejects them.
     """
     merged = apply_three_state_patch(current, patch)

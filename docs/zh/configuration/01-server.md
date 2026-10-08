@@ -488,6 +488,8 @@ TTL 默认关闭，仅用于 events 日期目录和 Session。`ov.conf` 中的 `
 
 运行时 HTTP 接口：`GET/PATCH /api/v1/admin/configuration` 修改集群覆盖（ROOT）；`GET/PATCH /api/v1/admin/accounts/{account_id}/configuration` 修改库覆盖（本库 ADMIN 或 ROOT）。PATCH 请求体为 `{"settings": {"ttl": ...}}`；省略字段保持原值，`null` 删除该层覆盖并回退至基线，修改单个目录不会清空其他目录。GET 返回该层显式覆盖，不是具体对象的期限。
 
+创建 Account 和 PATCH 配置时，每个提交的非 `null` 策略对象都必须显式包含 `mode`，包括 `global`、三个类型默认和 `directories[URI]`。空策略 `{}`、仅传 `{"ttl_days":30}` 或 `{"ttl_absolute":1893456000}`、`mode:null` 均返回 `400 INVALID_ARGUMENT`；已有配置中的 `mode` 也不能代替本次请求。未提交的策略节点保持不变，节点或 `settings.ttl` 为 `null` 仍表示删除覆盖；创建 Account 时 `settings.ttl:null` 等同于不传，继承实例策略，并不强制关闭 TTL。
+
 ```bash
 ov admin get-configuration --account-id default
 ov admin patch-configuration --account-id default --settings '{"ttl":{"global":{"mode":"days","ttl_days":90}}}'

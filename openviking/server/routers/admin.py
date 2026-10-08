@@ -4,12 +4,13 @@
 
 import asyncio
 from collections.abc import Mapping
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Body, Depends, Path, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 from openviking.config.scope import ConfigScope
+from openviking.config.ttl import validate_ttl_policy_modes
 from openviking.config.validate import ConfigPatchError
 from openviking.server.api_keys.models import validate_account_user_role
 from openviking.server.auth import (
@@ -71,7 +72,7 @@ class CreateAccountRequest(BaseModel):
     user_config: UserConfig | None = None
     # Optional initial AccountConfig override, validated against the active
     # account-level runtime field surface before the account is created.
-    settings: dict[str, Any] | None = None
+    settings: Annotated[dict[str, Any], AfterValidator(validate_ttl_policy_modes)] | None = None
 
 
 class RegisterUserRequest(BaseModel):
@@ -138,7 +139,9 @@ class ConfigPatchRequest(BaseModel):
     the model surface, not this envelope.
     """
 
-    settings: dict[str, Any] = Field(default_factory=dict)
+    settings: Annotated[dict[str, Any], AfterValidator(validate_ttl_policy_modes)] = Field(
+        default_factory=dict
+    )
 
 
 _ROOT_ONLY_ACCOUNT_CONFIG_SECTIONS = frozenset({"vlm", "query_planner", "embedding", "vectordb"})

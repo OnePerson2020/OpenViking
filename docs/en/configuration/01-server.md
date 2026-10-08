@@ -501,6 +501,8 @@ Year/month/date directories, individual sessions and descendants are read-only.
 
 Runtime endpoints: `GET/PATCH /api/v1/admin/configuration` for cluster overrides (ROOT), and `GET/PATCH /api/v1/admin/accounts/{account_id}/configuration` for library overrides (that account's ADMIN or ROOT). PATCH bodies use `{"settings": {"ttl": ...}}`. Omitted fields stay unchanged; `null` removes the current layer's override and restores fallback. Updating one directory preserves other policies. GET returns explicit overrides for that layer, not individual object deadlines.
 
+Account creation and configuration PATCH requests require an explicit `mode` in every submitted non-null policy object: `global`, all three type defaults, and `directories[URI]`. An empty policy `{}`, `{"ttl_days":30}`, `{"ttl_absolute":1893456000}`, or `mode:null` returns `400 INVALID_ARGUMENT`, even when the saved policy already has a mode. Omitted policy nodes remain unchanged; null policy nodes or `settings.ttl:null` still remove overrides. On Account creation, `settings.ttl:null` is equivalent to omission: it inherits instance policy rather than forcing TTL off.
+
 ```bash
 ov admin get-configuration --account-id default
 ov admin patch-configuration --account-id default --settings '{"ttl":{"global":{"mode":"days","ttl_days":90}}}'
