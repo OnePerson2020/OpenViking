@@ -83,14 +83,32 @@ def get_task_context() -> Optional[TaskExecutionContext]:
 
 
 def _payload_dict(message: Any) -> Optional[Dict[str, Any]]:
-    if not isinstance(message, dict):
-        return None
-    payload: Any = message.get("data", message)
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except (TypeError, ValueError):
-            return None
+    payload: Any = message
+    for _ in range(6):
+        if isinstance(payload, dict) and "data" in payload:
+            payload = payload["data"]
+            continue
+        if isinstance(payload, bytes):
+            try:
+                payload = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+            continue
+        if isinstance(payload, list) and all(
+            type(value) is int and 0 <= value <= 255 for value in payload
+        ):
+            try:
+                payload = bytes(payload).decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+            continue
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError):
+                return None
+            continue
+        break
     return payload if isinstance(payload, dict) else None
 
 
