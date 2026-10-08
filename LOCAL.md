@@ -17,6 +17,16 @@ Replaces hand-merging `upgrade-0423-20261005/port/merged`.
     git checkout local && git rebase upstream/X.Y.Z
     # 3. drop commits upstream has absorbed (git rebase skips empty ones)
 
+Alternative to step 1: the `github` remote (volcengine/openviking). devbox has no
+direct GitHub access, so run git through the Mac proxy with `devbox-gh` (on the Mac):
+
+    devbox-gh git -C .openviking/local_patches/ov-fork fetch --depth 1 github \
+        refs/tags/vX.Y.Z:refs/tags/github/vX.Y.Z
+
+For v0.4.23 the sdist python sources equal that tag except the generated
+`_version.py` and `web_studio/dist` assets, so `git rebase github/vX.Y.Z` also works
+(the build still needs the sdist).
+
 ## Export the overlay for build/deploy (deploy.py reads port/merged + files.txt)
 
     P=~/.openviking/local_patches/<new-port-dir>/port
