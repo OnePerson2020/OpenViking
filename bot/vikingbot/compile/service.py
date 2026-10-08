@@ -124,24 +124,33 @@ def _consume_background_result(future: asyncio.Future[Any], *, label: str) -> No
 
 
 async def _renew_compile_sandbox(
-    sandbox: WorkspaceSandbox, interval: float, owner: asyncio.Task[Any]
+    sandbox: WorkspaceSandbox,
+    interval: float,
+    owner: asyncio.Task[Any],
+    *,
+    fail_task: Callable[[CompileFailure], Awaitable[None]],
 ) -> None:
     """Renew the current sandbox immediately and every interval seconds until cancelled.
 
-    Each health/renewal request is bounded by interval; failure interrupts owner,
-    which retrieves this coroutine's exception before reporting the task failure.
+    Each health/renewal request is bounded by interval. On failure, fail_task
+    persists the outcome before owner cancellation, independently of worker
+    cleanup. The owner is cancelled even if persistence raises an error.
     """
     while True:
         try:
             if not await asyncio.wait_for(sandbox.is_healthy(), timeout=interval):
                 raise RuntimeError("Sandbox is not healthy")
         except Exception as exc:
-            owner.cancel()
-            raise CompileFailure(
+            failure = CompileFailure(
                 "UNAVAILABLE",
                 f"Sandbox renewal failed: {str(exc) or type(exc).__name__}",
                 stage="sandbox",
-            ) from exc
+            )
+            try:
+                await fail_task(failure)
+            finally:
+                owner.cancel()
+            raise failure from exc
         await asyncio.sleep(interval)
 
 
@@ -751,7 +760,12 @@ class BotCompileService:
             if task_config.sandbox.backend == SandboxBackend.OPENSANDBOX:
                 interval = task_config.sandbox.backends.opensandbox.runtime.timeout / 3
                 renewal_task = asyncio.create_task(
-                    _renew_compile_sandbox(sandbox, interval, asyncio.current_task())
+                    _renew_compile_sandbox(
+                        sandbox,
+                        interval,
+                        asyncio.current_task(),
+                        fail_task=lambda failure: self._fail(task_id, failure),
+                    )
                 )
             if target_type in {"resource", "skill"}:
                 focused_loop = None
@@ -935,7 +949,7 @@ class BotCompileService:
             )
 
             def complete(task: CompileTask) -> None:
-                if task.status == "cancelling":
+                if task.status in TERMINAL_STATUSES or task.status == "cancelling":
                     return
                 task.status = "completed"
                 task.stage = "completed"
@@ -1131,7 +1145,7 @@ class BotCompileService:
             )
 
             def complete(task):
-                if task.status != "cancelling":
+                if task.status not in TERMINAL_STATUSES and task.status != "cancelling":
                     record_metrics(task)
                     task.status = "completed" if published else "failed"
                     task.stage = "completed" if published else "writing"

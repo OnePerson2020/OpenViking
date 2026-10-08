@@ -258,6 +258,7 @@ class VLMProviderAdapter(LLMProvider):
         temperature: float = 0.7,
         session_id: str | None = None,
         thinking: bool | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         effective_model = model or self._default_model
 
@@ -288,6 +289,12 @@ class VLMProviderAdapter(LLMProvider):
             # An explicit empty list asks VLM backends for a structured response
             # without exposing tools, so per-response usage is preserved.
             response_tools = tools if tools is not None else []
+            # Effort overrides are scoped to the native Ark backend, not compatible APIs.
+            completion_overrides = (
+                {"reasoning_effort": reasoning_effort}
+                if reasoning_effort is not None and self._vlm.provider == "volcengine"
+                else {}
+            )
             while True:
                 try:
                     result = await self._vlm.get_completion_async(
@@ -298,6 +305,7 @@ class VLMProviderAdapter(LLMProvider):
                         tools=response_tools,
                         tool_choice="auto" if response_tools else None,
                         max_tokens=max_tokens,
+                        **completion_overrides,
                     )
                     break
                 except Exception as e:

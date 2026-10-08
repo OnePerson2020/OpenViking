@@ -153,6 +153,7 @@ class LLMProvider(ABC):
         temperature: float = 0.7,
         session_id: str | None = None,
         thinking: bool | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request.
@@ -165,6 +166,7 @@ class LLMProvider(ABC):
             temperature: Sampling temperature.
             session_id: Optional session ID for tracing.
             thinking: Optional per-call reasoning mode; None preserves provider configuration.
+            reasoning_effort: Optional per-call effort override for supported backends.
 
         Returns:
             LLMResponse with content and/or tool calls.

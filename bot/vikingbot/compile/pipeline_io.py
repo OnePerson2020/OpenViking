@@ -183,6 +183,9 @@ async def bounded_jobs(
                 try:
                     results[index] = await run(item)
                 except Exception as exc:
+                    # Diagnostic I/O can mask CancelledError; cancelled workers must still exit.
+                    if asyncio.current_task().cancelling():
+                        raise asyncio.CancelledError() from exc
                     failed += 1
                     if len(errors) < 4:
                         errors.append(str(exc)[:500])
@@ -226,13 +229,20 @@ class JsonModel:
         self.identity.update(
             batch_target_chars=self.budget, output_reserve_tokens=self.output_tokens
         )
-        self.identity["thinking"] = False
+        self.identity["thinking"] = {"compile": True}
         underlying = getattr(provider, "_provider", provider)
         backend = getattr(underlying, "_vlm", underlying)
         self.identity["backend_settings"] = {
             name: getattr(backend, name, None)
             for name in ("model", "thinking", "temperature", "max_tokens", "reasoning_effort")
         }
+        # Explicit Ark configuration controls direct generation without changing other stages.
+        self.identity["reasoning_effort"] = (
+            {"compile": backend.reasoning_effort}
+            if getattr(backend, "provider", None) == "volcengine"
+            and getattr(backend, "reasoning_effort", None) is not None
+            else {}
+        )
         configured_tokens = self.identity["backend_settings"]["max_tokens"]
         self.max_tokens = (
             configured_tokens
@@ -272,7 +282,7 @@ class JsonModel:
             "call": number,
             "max_tokens": max_tokens,
             "timeout_seconds": self.limits.pipeline_call_seconds,
-            "thinking": False,
+            "thinking": self.identity["thinking"].get(stage, False),
             "message_chars": sum(len(json.dumps(m, ensure_ascii=False)) for m in messages),
             "tool_schema_chars": len(json.dumps(tools, ensure_ascii=False)),
             "tool_result_chars": sum(
@@ -286,6 +296,10 @@ class JsonModel:
             json.dumps([messages, tools], ensure_ascii=False), text_type="mixed"
         )
         try:
+            completion_overrides = {}
+            if stage in self.identity["reasoning_effort"]:
+                report["reasoning_effort"] = self.identity["reasoning_effort"][stage]
+                completion_overrides["reasoning_effort"] = report["reasoning_effort"]
             async with asyncio.timeout(self.limits.pipeline_call_seconds):
                 response = await self.provider.chat(
                     messages=messages,
@@ -294,6 +308,7 @@ class JsonModel:
                     temperature=self.temperature,
                     max_tokens=max_tokens,
                     thinking=report["thinking"],
+                    **completion_overrides,
                 )
             report.update(
                 finish_reason=response.finish_reason,
