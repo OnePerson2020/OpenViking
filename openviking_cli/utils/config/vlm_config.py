@@ -816,17 +816,23 @@ class VLMConfig(BaseModel):
         tool_choice: Optional[Any] = None,
         messages: Optional[List[Dict[str, Any]]] = None,
         max_tokens: Optional[int] = None,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> Union[str, Any]:
-        """Get LLM completion asynchronously."""
+        """Get LLM completion asynchronously.
+
+        ``max_tokens`` is a per-call output cap.  Keep it separate from the
+        configured default so callers that budget a complete prompt can reserve
+        the matching amount of response space without mutating shared config.
+        """
         effective_thinking = self.thinking if thinking is None else thinking
-        return await self.get_vlm_instance().get_completion_async(
-            prompt=prompt,
-            thinking=effective_thinking,
-            tools=tools,
-            tool_choice=tool_choice,
-            messages=messages,
-            max_tokens=max_tokens,
-        )
+        backend = self.get_vlm_instance()
+        kwargs = dict(prompt=prompt, thinking=effective_thinking, tools=tools,
+                      tool_choice=tool_choice, messages=messages, max_tokens=max_tokens)
+        if response_format is not None:
+            if getattr(backend, "supports_structured_output", False) is not True:
+                raise ValueError("Configured VLM backend does not expose structured output")
+            kwargs["response_format"] = response_format
+        return await backend.get_completion_async(**kwargs)
 
     def is_available(self) -> bool:
         """Check if LLM is configured."""
