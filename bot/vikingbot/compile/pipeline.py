@@ -20,7 +20,7 @@ from vikingbot.compile.ops import finalize as finalize_op
 from vikingbot.compile.ops import map as map_op
 from vikingbot.compile.ops import reduce as reduce_op
 from vikingbot.compile.ops.shuffle import Shuffle
-from vikingbot.compile.pipeline_io import JsonModel, TaskFiles
+from vikingbot.compile.pipeline_io import JsonModel, TaskFiles, bounded_jobs
 from vikingbot.compile.plan import PLANNING_RULES, Contract, PlanProposal, parse_plan
 from vikingbot.compile.renderer import RenderedBundle
 from vikingbot.compile.results import Record
@@ -446,8 +446,38 @@ class Pipeline:
         }
 
     async def seed(self, batches) -> list[Record]:
-        """Retain exact ranges with content hashes and offsets before any transformation."""
+        """Write unique source ranges with bounded concurrency, retaining their input order."""
         result = []
+        pending = []
+        seen = set(self.records)
+
+        async def write_source(item):
+            """Atomically write one (ID, metadata, range); return its record and evidence."""
+            record_id, metadata, part = item
+            await self.files.put(
+                f"sources/{record_id}", {**metadata, "text": part.content, "context": part.context}
+            )
+            return Record(
+                record_id, f"sources/{record_id}", [record_id], part.uri, {}, []
+            ), metadata
+
+        async def flush():
+            """Register successful writes in source order; report any failed writes."""
+            errors = []
+            for record, metadata in await bounded_jobs(
+                pending,
+                write_source,
+                concurrency=self.limits.source_concurrency,
+                metrics=self.metrics,
+                failures=errors,
+            ):
+                self.evidence[record.record_id] = metadata
+                self.register(record)
+                result.append(record)
+            pending.clear()
+            if errors:
+                raise ValueError(errors[0])
+
         async for batch in batches:
             for part in batch:
                 metadata = {
@@ -461,16 +491,14 @@ class Pipeline:
                     "continues_after": part.continues_after,
                 }
                 record_id = digest(metadata)[:24]
-                if record_id in self.records:
+                if record_id in seen:
                     continue
-                self.evidence[record_id] = metadata
-                await self.files.put(
-                    f"sources/{record_id}",
-                    {**metadata, "text": part.content, "context": part.context},
-                )
-                record = Record(record_id, f"sources/{record_id}", [record_id], part.uri, {}, [])
-                self.register(record)
-                result.append(record)
+                seen.add(record_id)
+                pending.append((record_id, metadata, part))
+                if len(pending) >= self.limits.source_concurrency:
+                    await flush()
+        if pending:
+            await flush()
         return result
 
     def register(self, record: Record) -> None:

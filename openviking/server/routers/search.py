@@ -3,8 +3,6 @@
 """Search endpoints for OpenViking HTTP Server."""
 
 import asyncio
-import hashlib
-import json
 import math
 from typing import Any, Dict, List, Literal, Optional, Sequence, Union
 
@@ -107,28 +105,9 @@ async def compile_embeddings(
         )
     fs = get_service().viking_fs
     await fs.stat(target, ctx=_ctx, skip_count=True)
-    embedder = fs.query_embedder
-    config = getattr(embedder, "config", {})
-    # Hash only representation-affecting public settings, never credential material.
-    identity = {
-        "provider": getattr(embedder, "provider", type(embedder).__name__),
-        "model": getattr(embedder, "model_name", ""),
-        "dimension": embedder.get_dimension() if hasattr(embedder, "get_dimension") else None,
-        "config": {
-            k: config.get(k)
-            for k in (
-                "dimension",
-                "dimensions",
-                "output_dim",
-                "encoding_format",
-                "input_type",
-                "max_input_tokens",
-                "api_base",
-                "base_url",
-            )
-        },
-    }
-    model = hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()
+    embedder = fs._get_embedder(_ctx)
+    # The account's effective embedding settings identify task-local cached vectors.
+    model = (await get_service().embedding_provider.get_status(_ctx.account_id)).fingerprint
     if request.expected_model and request.expected_model != model:
         raise InvalidArgumentError("Compile embedding model changed during the task")
     # Small chunks also bound providers whose embed_async implementation has no limiter.
