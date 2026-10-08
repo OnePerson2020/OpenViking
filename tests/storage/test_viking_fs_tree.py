@@ -9,7 +9,6 @@ import pytest
 
 from openviking.server.identity import RequestContext, Role
 from openviking.storage import viking_fs as viking_fs_module
-from openviking.storage.ttl_registry import TTLRecord
 from openviking.storage.viking_fs import VikingFS
 from openviking_cli.exceptions import NotFoundError
 from openviking_cli.session.user_id import UserIdentifier
@@ -94,44 +93,12 @@ async def test_read_hides_expired_session_content(monkeypatch, fs):
 
 
 @pytest.mark.asyncio
-async def test_read_hides_partial_cleanup_session_when_metadata_is_already_gone(monkeypatch, fs):
-    ctx = _default_ctx()
-    session_uri = "viking://user/default/sessions/session-1"
-    child_uri = f"{session_uri}/messages.jsonl"
-    child_path = fs._uri_to_path(child_uri, ctx=ctx)
-    child = b'{"role":"user"}\n'
-    monkeypatch.setattr(fs.ttl_registry, "account_may_have_records", AsyncMock(return_value=True))
-
-    async def stat(path, **kwargs):
-        if path == child_path:
-            return {"name": "messages.jsonl", "isDir": False}
-        raise FileNotFoundError(path)
-
-    monkeypatch.setattr(fs._async_agfs, "stat", stat)
-    monkeypatch.setattr(fs._async_agfs, "read", AsyncMock(return_value=child))
-    fs.ttl_registry.get = AsyncMock(
-        return_value=TTLRecord(
-            object_uri=session_uri,
-            object_type="session",
-            account_id=ctx.account_id,
-            user_id=ctx.user.user_id,
-            expires_at="2000-01-01T00:00:00.000Z",
-        )
-    )
-
-    with pytest.raises(NotFoundError):
-        await fs.read_file(child_uri, ctx=ctx)
-    assert await fs.read_file(child_uri, ctx=ctx, include_expired=True) == child.decode()
-
-
-@pytest.mark.asyncio
 async def test_unmanaged_event_without_metadata_remains_visible(monkeypatch, fs):
     ctx = _default_ctx()
     uri = "viking://user/default/memories/events/2026/06/11/legacy.md"
     path = fs._uri_to_path(uri, ctx=ctx)
     metadata_read = AsyncMock(side_effect=FileNotFoundError)
 
-    monkeypatch.setattr(fs.ttl_registry, "get", AsyncMock(return_value=None))
     monkeypatch.setattr(fs._async_agfs, "read", metadata_read)
 
     assert await fs._ttl_uri_visible(uri, ctx, path=path) is True

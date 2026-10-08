@@ -389,10 +389,15 @@ class FSService:
         return await TTLView(self._ensure_initialized(), ctx).fields(uri)
 
     async def get_ttl(self, uri: str, ctx: RequestContext) -> dict:
-        from openviking.storage.document_ttl import get_document_ttl
+        from openviking.core.ttl import ttl_scope_for_uri
+        from openviking.storage.ttl_view import TTLView
 
         self._reject_storage_internal_target(uri)
-        return await get_document_ttl(self._ensure_initialized(), uri, ctx=ctx)
+        fs = self._ensure_initialized()
+        stat = await fs.stat(uri, ctx=ctx)
+        if ttl_scope_for_uri(uri) is None:
+            raise InvalidArgumentError("TTL only supports events and sessions")
+        return {"uri": uri, **await TTLView(fs, ctx).fields(uri, is_dir=stat.get("isDir", False))}
 
     async def mkdir(
         self,
@@ -478,7 +483,6 @@ class FSService:
         *,
         strict: bool = False,
         lease_ref: Optional[Dict[str, Any]] = None,
-        verify_only: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Remove resource."""
         if is_ttl_metadata_name(uri.rsplit("/", 1)[-1]):
@@ -495,7 +499,6 @@ class FSService:
             recursive=recursive,
             ctx=ctx,
             strict=strict,
-            **({"verify_only": True} if verify_only else {}),
             **({"lease_ref": lease_ref} if lease_ref is not None else {}),
         )
         await self._sync_watch_after_rm(uri, account_id=ctx.account_id, context_type=context_type)

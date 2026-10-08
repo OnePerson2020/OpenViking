@@ -1706,6 +1706,6 @@ results = await client.search(query=query, session_id=session_id)
 
 Session 创建时继承 `sessions` 根目录的有效策略。创建和配置接口不接受 `ttl_relative`、`ttl_absolute`、`expires_at`、`ttl_days` 或 `ttl_per_file`，显式传 `null` 也会被拒绝。
 
-创建、详情、列表、配置更新、消息追加、commit 和上下文响应均回显 `expires_at`；未启用为 `null`。相对 TTL 按已保存天数在成功追加消息或完成非空 commit 后续期。已过期 Session 的直接访问返回 404，列表不返回它。
+创建、详情、列表、配置更新、消息追加、commit 和上下文响应均回显 `expires_at`；未启用为 `null`。相对 TTL 从 Session 创建时间计算；消息追加、commit 和任务重试不自动续期，用户可在到期前修改根策略延长期限。已过期 Session 的直接访问返回 404，列表不返回它。
 
 详见[目录 TTL](../concepts/17-ttl.md)及[根目录策略配置](../configuration/01-server.md#ttl)。

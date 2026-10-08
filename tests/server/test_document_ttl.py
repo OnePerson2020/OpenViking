@@ -69,8 +69,8 @@ async def test_session_api_inherits_root_and_returns_expiry_everywhere(client, s
     expiry = created["expires_at"]
     assert expiry
     details = await request(client, "get", "/api/v1/sessions/ttl-api")
-    assert details["expires_at"] == expiry and details["ttl_days"] == 7
-    assert "ttl_per_file" not in details and "ttl_generation" not in details
+    assert details["expires_at"] == expiry
+    assert {"ttl_days", "received_at", "ttl_per_file", "ttl_generation"}.isdisjoint(details)
     listed = await request(client, "get", "/api/v1/sessions")
     assert next(row for row in listed if row["session_id"] == "ttl-api")["expires_at"] == expiry
     changed = await request(client, "patch", "/api/v1/sessions/ttl-api/config", json={})
@@ -84,7 +84,7 @@ async def test_session_api_inherits_root_and_returns_expiry_everywhere(client, s
         ("messages/batch", {"messages": [{"role": "assistant", "content": "world"}]}),
     ]:
         result = await request(client, "post", "/api/v1/sessions/ttl-api/" + endpoint, json=body)
-        assert result["expires_at"] >= expiry
+        assert result["expires_at"] == expiry
     await request(
         client,
         "patch",
@@ -318,7 +318,10 @@ async def test_root_patch_updates_existing_event_and_session_before_return(clien
     assert (
         await client.get("/api/v1/content/read", params={"uri": event + "/body.txt"})
     ).status_code == 404
-    assert (await request(client, "get", "/api/v1/sessions/existing"))["ttl_days"] == 30
+    updated_session = await request(client, "get", "/api/v1/sessions/existing")
+    assert parse_iso_datetime(updated_session["expires_at"]) - parse_iso_datetime(
+        session_fields["expires_at"]
+    ) == timedelta(days=23)
     await request(
         client, "patch", CONFIG, json={"settings": {"ttl": {"global": {"mode": "disabled"}}}}
     )

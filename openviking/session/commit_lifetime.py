@@ -21,7 +21,7 @@ class StaleSessionCommit(NotFoundError):
         super().__init__(uri, "session commit")
 
 
-async def validate_commit(fs, ctx, session_uri, archive_uri, task_id, *, lease_ref):
+async def validate_commit(fs, ctx, session_uri, archive_uri, task_id):
     """The Phase 1 task ID survives task-history eviction but not session deletion."""
 
     async def read(uri):
@@ -35,28 +35,9 @@ async def validate_commit(fs, ctx, session_uri, archive_uri, task_id, *, lease_r
             raise StaleSessionCommit(session_uri) from exc
         raise
     saved_id = archive.get("phase1", {}).get("queue_message", {}).get("task_id")
-    if not task_id or saved_id != task_id:
+    if not task_id or saved_id != task_id or hidden_by_ttl(meta.get("expires_at")):
         raise StaleSessionCommit(session_uri)
-    if hidden_by_ttl(meta.get("expires_at")):
-        from openviking.session.ttl_renewal import reconcile_session_ttl
-
-        # An already saved successful completion may outlive its interrupted
-        # root-meta write. Repair it only after matching the original commit.
-        meta_lease = await fs._async_agfs.pathlock_acquire_exact(
-            fs._uri_to_path(session_uri + "/.meta.json", ctx=ctx),
-            owner_lease_ref=lease_ref,
-            timeout_secs=30.0,
-        )
-        token = _commit.set(None)
-        try:
-            meta = await reconcile_session_ttl(
-                fs, ctx, session_uri=session_uri, archive_uri=archive_uri, lease_ref=meta_lease
-            )
-        finally:
-            _commit.reset(token)
-            await fs._async_agfs.pathlock_release(meta_lease)
-        if not meta or hidden_by_ttl(meta.get("expires_at")):
-            raise StaleSessionCommit(session_uri)
+    return meta
 
 
 @asynccontextmanager
@@ -74,7 +55,7 @@ async def commit_write(fs, ctx, lease_ref=None):
     )
     token = _write_lease.set(lease)
     try:
-        await validate_commit(fs, ctx, session_uri, archive_uri, task_id, lease_ref=lease)
+        await validate_commit(fs, ctx, session_uri, archive_uri, task_id)
         yield lease
     finally:
         _write_lease.reset(token)

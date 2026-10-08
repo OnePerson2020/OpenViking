@@ -4,11 +4,13 @@
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from openviking.core import ttl
 from openviking.message import Message, TextPart
 from openviking.service.task_store import PersistentTaskStore
 from openviking.service.task_tracker import TaskTracker, set_task_tracker
@@ -17,9 +19,12 @@ from openviking.session.commit_lifetime import StaleSessionCommit
 from openviking.session.session import Session
 from openviking.storage.directory_ttl import read_directory_fields
 from openviking.storage.queuefs.session_commit_msg import SessionCommitMsg
+from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
+from openviking_cli.utils.config.ttl_config import TTLConfig
 from tests.storage.test_transfer_merge_binding import binding_fs as binding_fs
 from tests.storage.test_transfer_merge_binding import root_ctx
 from tests.unit.service.test_ttl_cleanup import _cleanup_once
+from tests.unit.storage.ttl_test_storage import read_record
 
 
 async def seed_commit(fs, ctx, session, task_id):
@@ -75,7 +80,7 @@ async def test_late_commit_cannot_recreate_event_or_corrupt_reused_session(bindi
                 json.dumps({**fields, "expires_at": "2000-01-01T00:00:00Z"}),
                 ctx=ctx,
             )
-            assert (await _cleanup_once(cleanup, await fs.ttl_registry.get(ctx.account_id, owner)))[
+            assert (await _cleanup_once(cleanup, await read_record(fs, ctx.account_id, owner)))[
                 "deleted"
             ]
         replacement = Session(viking_fs=fs, session_id="reused", ctx=ctx)
@@ -111,12 +116,27 @@ async def test_late_commit_cannot_recreate_event_or_corrupt_reused_session(bindi
 
 
 @pytest.mark.asyncio
-async def test_original_commit_can_complete_and_renew_with_real_file_leases(binding_fs):
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"mode": "days", "ttl_days": 7},
+        {"mode": "absolute", "ttl_absolute": 32503680000},
+        {"mode": "disabled"},
+    ],
+)
+async def test_commit_completion_and_replay_preserve_deadline(binding_fs, monkeypatch, policy):
+    from openviking.session import session as session_module
+
     fs, ctx = binding_fs, root_ctx()
+    config = TTLConfig(sessions=policy)
+    monkeypatch.setattr(ttl, "get_openviking_config", lambda: SimpleNamespace(ttl=config))
     session = Session(viking_fs=fs, session_id="current", ctx=ctx)
     await session.ensure_exists()
     msg = await seed_commit(fs, ctx, session, "current-task")
-    completed = await session._merge_and_save_commit_meta(
+    before = await read_directory_fields(fs, session.uri, ctx=ctx)
+    completed = format_iso8601(parse_iso_datetime(before["created_at"]) + timedelta(days=1))
+    monkeypatch.setattr(session_module, "get_current_timestamp", lambda: completed)
+    await session._merge_and_save_commit_meta(
         archive_index=1,
         archive_uri=msg.archive_uri,
         task_id=msg.task_id,
@@ -124,17 +144,25 @@ async def test_original_commit_can_complete_and_renew_with_real_file_leases(bind
         telemetry_snapshot=None,
     )
     fields = await read_directory_fields(fs, session.uri, ctx=ctx)
-    assert fields["received_at"] == completed
+    assert fields.get("expires_at") == before.get("expires_at")
+    assert fields["created_at"] == before["created_at"]
+    assert fields["last_commit_at"] == completed
     assert fields["memories_extracted"]["events"] == 1
     assert fields["commit_count"] == 1
+    await session._write_done_file(msg.archive_uri, "message-1", "message-1")
+    done = json.loads(await fs.read_file(msg.archive_uri + "/.done", ctx=ctx))
+    assert "phase2_completed_at" not in done
+    tracker = TaskTracker(PersistentTaskStore(fs._async_agfs))
+    set_task_tracker(tracker)
+    try:
+        assert await session.resume_queued_commit(msg)
+    finally:
+        set_task_tracker(None)
+    assert await read_directory_fields(fs, session.uri, ctx=ctx) == fields
 
 
 @pytest.mark.asyncio
-async def test_saved_completion_repairs_expired_root_before_resume(binding_fs):
-    from datetime import datetime, timedelta, timezone
-
-    from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
-
+async def test_legacy_completion_cannot_revive_expired_session_or_block_cleanup(binding_fs):
     fs, ctx = binding_fs, root_ctx()
     session = Session(viking_fs=fs, session_id="completion-crash", ctx=ctx)
     await session.ensure_exists()
@@ -166,11 +194,13 @@ async def test_saved_completion_repairs_expired_root_before_resume(binding_fs):
     tracker = TaskTracker(PersistentTaskStore(fs._async_agfs))
     set_task_tracker(tracker)
     try:
-        assert await session.resume_queued_commit(msg)
+        with pytest.raises(StaleSessionCommit):
+            await session.resume_queued_commit(msg)
     finally:
         set_task_tracker(None)
-    repaired = await read_directory_fields(fs, session.uri, ctx=ctx)
-    assert repaired["received_at"] == completed
-    assert parse_iso_datetime(repaired["expires_at"]) == parse_iso_datetime(completed) + timedelta(
-        days=2
-    )
+    expired = await read_directory_fields(fs, session.uri, ctx=ctx)
+    assert expired["expires_at"] == format_iso8601(now - timedelta(days=1))
+    cleanup = TTLCleanupService(service=SimpleNamespace(viking_fs=fs))
+    record = await read_record(fs, ctx.account_id, session.uri)
+    assert (await _cleanup_once(cleanup, record))["deleted"]
+    assert not await fs.exists(session.uri, ctx=ctx, include_expired=True)

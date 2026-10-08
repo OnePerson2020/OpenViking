@@ -31,7 +31,6 @@ from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config import get_openviking_config
 from openviking_cli.utils.logger import get_logger
 
-_PAGE_SIZE = 100
 _CONCURRENCY = 8
 # Serializes configuration application, not ordinary content writes. A storage
 # lease also orders patches handled by different server processes.
@@ -39,28 +38,29 @@ _CONFIG_LOCK = "/local/__system__/ttl/policy.lock"
 
 
 async def _directories(fs, path):
-    offset = 0
-    while True:
-        try:
-            entries = await fs._async_agfs.ls(path, offset=offset, limit=_PAGE_SIZE, sort_by="name")
-        except Exception as exc:
-            if is_storage_not_found(exc):
-                return
-            raise
-        for entry in entries:
-            name = str(entry.get("name") or "")
-            if path.rstrip("/") == "/local" and name == "_system":
-                continue
-            if entry.get("isDir") and name not in {"", ".", "..", "__system__"}:
-                if not is_storage_internal_name(name):
-                    yield name
-        if len(entries) < _PAGE_SIZE:
+    # Offset pages can skip live siblings when cleanup removes earlier entries.
+    # Keep this level's names while applying changes, not full entry metadata.
+    try:
+        entries = await fs._async_agfs.ls(path, sort_by="name")
+    except Exception as exc:
+        if is_storage_not_found(exc):
             return
-        offset += len(entries)
+        raise
+    names = []
+    for entry in entries:
+        name = str(entry.get("name") or "")
+        if path.rstrip("/") == "/local" and name == "_system":
+            continue
+        if entry.get("isDir") and name not in {"", ".", "..", "__system__"}:
+            if not is_storage_internal_name(name):
+                names.append(name)
+    del entries
+    for name in names:
+        yield name
 
 
 async def _config(fs, account_id):
-    return await resolve_ttl_config(fs, account_id) or get_openviking_config().ttl
+    return await resolve_ttl_config(fs, account_id, fresh=True) or get_openviking_config().ttl
 
 
 def _affected(root, scope, config, previous, patch):
@@ -110,7 +110,7 @@ async def _owners(fs, root, ctx):
                     yield uri
 
 
-async def _apply_owner(fs, uri, ctx):
+async def _apply_owner(fs, uri, ctx, config):
     kind, _ = ttl_object_for_uri(uri)
     path = fs._uri_to_path(uri, ctx=ctx)
     # Lock creation can materialize parent directories. Check existence first
@@ -123,70 +123,51 @@ async def _apply_owner(fs, uri, ctx):
     lease = await fs._async_agfs.pathlock_acquire_batch(requests, timeout_secs=30.0)
     try:
         fields = await read_directory_fields(fs, uri, ctx=ctx)
+        if fields.get("expires_at"):
+            await fs.ttl_registry.mark_account(ctx.account_id)
         if before and not fields and not await _has_content(fs, path):
             await fs._remove_empty_lock_directory(path)
             return "deleted"
-        if kind == OBJECT_TYPE_SESSION and fields.get("ttl_days"):
-            from openviking.session.ttl_renewal import reconcile_session_ttl
-
-            fields = (
-                await reconcile_session_ttl(fs, ctx, session_uri=uri, lease_ref=lease) or fields
-            )
-        record = await fs.ttl_registry.get(ctx.account_id, uri)
-        expiry = fields.get("expires_at") if fields else (record.expires_at if record else None)
-        if hidden_by_ttl(expiry):
-            # Repair a possibly interrupted index write, without reviving data.
-            if fields.get("expires_at"):
-                await write_directory_fields(fs, uri, fields, ctx=ctx, lease_ref=lease)
+        if hidden_by_ttl(fields.get("expires_at")):
             return "expired"
-        config = await _config(fs, ctx.account_id)
         policy = config.resolve_uri_policy(uri, ttl_scope_for_uri(uri))
         desired = dict(fields)
+        desired.pop("ttl_days", None)
+        if kind == OBJECT_TYPE_SESSION:
+            desired.pop("received_at", None)
+        content_time = None
         if policy.mode in {"disabled", "inherit"}:
-            if not fields and not record:
+            if not fields:
                 return "unmanaged"
-            # Keep an explicit cleared value so an interrupted index removal
-            # can be distinguished from missing owner metadata on retry.
-            desired.update(policy_ttl_fields(policy))
         elif policy.mode == "absolute":
             if not fields and not await _has_content(fs, path):
                 return "empty"
-            desired.update(policy_ttl_fields(policy))
         else:
-            content_time = fields.get("received_at")
-            if kind == OBJECT_TYPE_SESSION and not content_time:
-                # updated_at also changes on metadata edits, so it is not a
-                # reliable business timestamp for historical sessions.
-                content_time = fields.get("last_message_at") or fields.get("created_at")
-                last_commit = fields.get("last_commit_at")
-                if last_commit and (
-                    not content_time
-                    or parse_iso_datetime(last_commit) > parse_iso_datetime(content_time)
-                ):
-                    content_time = last_commit
+            content_time = fields.get(
+                "created_at" if kind == OBJECT_TYPE_SESSION else "received_at"
+            )
             if not content_time:
                 if not await _has_content(fs, path):
                     return "empty"
                 raise ValueError("directory has no reliable original content timestamp")
-            desired.update(policy_ttl_fields(policy, parse_iso_datetime(content_time)))
-        if desired or fields or record:
-            # Always write on retry: the previous request may have persisted
-            # metadata successfully but failed to update its scheduling index.
+            content_time = parse_iso_datetime(content_time)
+        desired.update(policy_ttl_fields(policy, content_time))
+        if desired != fields:
             await write_directory_fields(fs, uri, desired, ctx=ctx, lease_ref=lease)
         return "updated"
     finally:
         await fs._async_agfs.pathlock_release(lease)
 
 
-async def apply_account_ttl(fs, account_id, *, previous=None, patch=None):
+async def apply_account_ttl(fs, account_id, *, previous=None, patch=None, config=None):
     """Apply current effective policies with bounded storage work and errors."""
     ctx = RequestContext(user=UserIdentifier(account_id, "__system__"), role=Role.ROOT)
-    config = await _config(fs, account_id)
+    config = config or await _config(fs, account_id)
     result: dict[str, Any] = {"updated": 0, "skipped": 0, "failed": 0, "failures": []}
 
     async def apply(uri):
         try:
-            status = await _apply_owner(fs, uri, ctx)
+            status = await _apply_owner(fs, uri, ctx, config)
         except Exception as exc:
             if is_storage_not_found(exc):
                 result["skipped"] += 1
@@ -264,9 +245,10 @@ async def apply_startup_ttl(fs):
     lease = await fs._async_agfs.pathlock_acquire_exact(_CONFIG_LOCK, timeout_secs=30.0)
     try:
         async for account_id in _directories(fs, "/local"):
-            if not (await _config(fs, account_id)).enabled:
+            config = await _config(fs, account_id)
+            if not config.enabled:
                 continue
-            result = await apply_account_ttl(fs, account_id)
+            result = await apply_account_ttl(fs, account_id, config=config)
             if result["failed"]:
                 get_logger(__name__).error(
                     "TTL startup application incomplete for %s: %s", account_id, result

@@ -2,7 +2,11 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Resolve the same library TTL policy for every object creation path."""
 
+import asyncio
+
 from openviking.config.merge import apply_three_state_patch
+from openviking.config.scope import ConfigScope
+from openviking.config.validate import filter_runtime_fields, normalize_config_keys
 from openviking_cli.utils.config.ttl_config import TTLConfig
 
 
@@ -67,10 +71,42 @@ def effective_ttl_config(cluster, account) -> TTLConfig:
     )
 
 
-async def resolve_ttl_config(fs, account_id: str) -> TTLConfig | None:
+async def resolve_ttl_config(fs, account_id: str, *, fresh: bool = False) -> TTLConfig | None:
     manager = getattr(fs, "runtime_config_manager", None)
     if manager is None:
         return None  # The pure TTL helpers fall back to ov.conf at startup.
+
+    if fresh:
+        # Only lifetime initialization/application needs current source values.
+        # Resolve TTL alone; do not rebuild/publish unrelated runtime sections.
+        cluster, account = await asyncio.gather(
+            manager.get_settings(ConfigScope.cluster()),
+            manager.get_settings(ConfigScope.account(account_id)),
+        )
+        settings = manager.base_config.ttl.model_dump(by_alias=True)
+        if "ttl" in cluster:
+            settings = (
+                merge_ttl_config(
+                    settings,
+                    filter_runtime_fields(
+                        TTLConfig, normalize_config_keys(TTLConfig, cluster["ttl"])
+                    ),
+                )
+                if cluster["ttl"] is not None
+                else {}
+            )
+        # Account nulls remove its override, not the inherited cluster policy.
+        override = merge_ttl_config(
+            {},
+            filter_runtime_fields(
+                TTLConfig, normalize_config_keys(TTLConfig, account.get("ttl") or {})
+            ),
+        )
+        # Normalize each scope (including directory URIs) before composition,
+        # just as the cached cluster/account models do.
+        settings = TTLConfig.model_validate(settings).model_dump(by_alias=True)
+        override = TTLConfig.model_validate(override).model_dump(by_alias=True, exclude_unset=True)
+        return TTLConfig.model_validate(merge_ttl_config(settings, override))
 
     def resolve(view):
         return effective_ttl_config(view.cluster, view.account)

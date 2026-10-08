@@ -363,7 +363,7 @@ enum AclCommands {
 #[derive(Subcommand)]
 enum Commands {
     // --- Data Operations ---
-    /// [Data] Inspect or change an event date directory or session expiry
+    /// [Data] Inspect directory expiry and inherited TTL policy
     Ttl {
         #[command(subcommand)]
         action: TtlCommands,
@@ -604,7 +604,7 @@ enum Commands {
             help_heading = "Common options"
         )]
         sort_order: Option<String>,
-        /// Comma-separated fields to display (name,uri,path,type,size,mode,mtime,locked,id,count,tags,abstract,overview)
+        /// Comma-separated fields to display (name,uri,path,type,size,mode,mtime,expires_at,locked,id,count,tags,abstract,overview)
         #[arg(
             short = 'f',
             long = "fields",
@@ -707,7 +707,7 @@ enum Commands {
         /// Simple path output (just paths, no tree formatting)
         #[arg(short, long, help_heading = "Common options")]
         simple: bool,
-        /// Comma-separated fields to display (name,uri,path,type,size,mode,mtime,locked,id,count,tags,abstract,overview)
+        /// Comma-separated fields to display (name,uri,path,type,size,mode,mtime,expires_at,locked,id,count,tags,abstract,overview)
         #[arg(short = 'f', long = "fields", value_delimiter = ',', value_name = "FIELDS", help_heading = "Output options")]
         fields: Option<Vec<String>>,
         /// Comma-separated k=v retrieval tags; all tags must match
@@ -1156,7 +1156,7 @@ enum Commands {
         /// Comma-separated k=v retrieval tags; all tags must match
         #[arg(long = "tags", value_delimiter = ',', value_name = "k=v", help_heading = "Common options")]
         tags: Vec<String>,
-        /// Comma-separated fields to display (name,uri,path,type,size,mode,mtime,locked,id,tags)
+        /// Comma-separated fields to display (name,uri,path,type,size,mode,mtime,expires_at,locked,id,tags)
         #[arg(short = 'f', long = "fields", value_delimiter = ',', value_name = "FIELDS", help_heading = "Output options")]
         fields: Option<Vec<String>>,
     },
@@ -3434,37 +3434,30 @@ async fn main() {
                     }
                 }
             } else if let Some(path) = path {
-                match handlers::parse_add_resource_args(resource_args.as_deref()) {
-                    Err(e) => Err(e),
-                    Ok(args) => {
-                        let resource_args =
-                            args.map(|value| serde_json::Value::Object(value).to_string());
-                        handlers::handle_add_resource(
-                            path,
-                            add_type,
-                            to,
-                            parent,
-                            parent_auto_create,
-                            reason,
-                            instruction,
-                            wait,
-                            timeout,
-                            strict_mode,
-                            ignore_dirs,
-                            include,
-                            exclude,
-                            no_directly_upload_media,
-                            watch_interval.unwrap_or(0.0),
-                            processing_mode,
-                            resource_args,
-                            tags,
-                            tag_mode,
-                            acl,
-                            ctx,
-                        )
-                        .await
-                    }
-                }
+                handlers::handle_add_resource(
+                    path,
+                    add_type,
+                    to,
+                    parent,
+                    parent_auto_create,
+                    reason,
+                    instruction,
+                    wait,
+                    timeout,
+                    strict_mode,
+                    ignore_dirs,
+                    include,
+                    exclude,
+                    no_directly_upload_media,
+                    watch_interval.unwrap_or(0.0),
+                    processing_mode,
+                    resource_args,
+                    tags,
+                    tag_mode,
+                    acl,
+                    ctx,
+                )
+                .await
             } else {
                 Err(error::Error::Client(
                     "a path/URL or --manifest is required".to_string(),

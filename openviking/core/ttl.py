@@ -4,13 +4,13 @@
 
 TTL is off by default. Each events/YYYY/MM/DD directory or session owns one
 expires_at shared by all descendants. Root policy changes apply to existing
-directories; only sessions also renew after successful content updates.
+directories. Content writes never extend their deadlines.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping, Optional
+from typing import Optional
 
 from openviking.core.namespace import uri_parts
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
@@ -90,18 +90,10 @@ def ttl_object_for_uri(uri: str) -> Optional[tuple[str, str]]:
     return OBJECT_TYPE_EVENT, "viking://" + "/".join(parts[: depth + 3])
 
 
-def compute_expires_at(received_at: datetime, ttl_days: int) -> datetime:
-    """Return ``received_at`` plus ``ttl_days`` whole days."""
-    if received_at.tzinfo is None:
-        received_at = received_at.replace(tzinfo=timezone.utc)
-    return received_at + timedelta(days=ttl_days)
-
-
 def policy_ttl_fields(policy: TTLPolicy, received_at: Optional[datetime] = None) -> dict:
     """Compute a directory's fields without replacing its business timestamp.
 
-    Creation and explicit policy application use the same calculation. Policy
-    application may shorten a deadline, unlike ordinary session renewal.
+    Creation and explicit policy application use the same calculation.
     """
     if received_at is not None and received_at.tzinfo is None:
         received_at = received_at.replace(tzinfo=timezone.utc)
@@ -111,16 +103,10 @@ def policy_ttl_fields(policy: TTLPolicy, received_at: Optional[datetime] = None)
     elif days is not None:
         if received_at is None:
             raise ValueError("relative TTL requires the original content timestamp")
-        expires = compute_expires_at(received_at, days)
+        expires = received_at + timedelta(days=days)
     else:
         expires = None
-    fields = {
-        "ttl_days": days,
-        "expires_at": format_iso8601(expires) if expires is not None else "",
-    }
-    if received_at is not None:
-        fields["received_at"] = format_iso8601(received_at)
-    return fields
+    return {"expires_at": format_iso8601(expires) if expires is not None else ""}
 
 
 def initial_ttl_fields(
@@ -140,20 +126,15 @@ def initial_ttl_fields(
     policy = ttl_config.resolve_uri_policy(uri, scope)
     if policy.mode not in {"days", "absolute"}:
         return None
-    return policy_ttl_fields(policy, received_at or datetime.now(timezone.utc))
+    received_at = received_at or datetime.now(timezone.utc)
+    fields = policy_ttl_fields(policy, received_at)
+    if target[0] == OBJECT_TYPE_EVENT:
+        fields["received_at"] = format_iso8601(received_at)
+    return fields
 
 
-def strip_ttl_fields(metadata: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep TTL out of file payloads; the lifecycle directory owns it."""
-    return {
-        key: value
-        for key, value in metadata.items()
-        if key not in TTL_FIELD_NAMES and key != "ttl_generation"
-    }
-
-
-def is_expired(expires_at: Optional[str], *, now: Optional[datetime] = None) -> bool:
-    """Return whether an ``expires_at`` timestamp is at or past ``now`` (UTC).
+def hidden_by_ttl(expires_at: Optional[str], *, now: Optional[datetime] = None) -> bool:
+    """Hide an object at or past its persisted deadline, regardless of policy.
 
     Absent/blank/unparseable expiry means "no TTL" and is never expired, matching
     the read barrier's absent-field-visible rule.
@@ -176,16 +157,6 @@ def ttl_enabled() -> bool:
     """Whether policy enables TTL; reads always use persisted object deadlines."""
     config = _current_ttl_config()
     return config is not None and config.enabled
-
-
-def hidden_by_ttl(expires_at: Optional[str], *, now: Optional[datetime] = None) -> bool:
-    """Whether a read/compute path should treat ``expires_at`` as logically gone.
-
-    Used by filesystem reads and vector candidate validation against source
-    metadata. Visibility follows the persisted object deadline. Policy updates
-    can change a live object's deadline but cannot revive an expired object.
-    """
-    return is_expired(expires_at, now=now)
 
 
 def _current_ttl_config() -> Optional[TTLConfig]:

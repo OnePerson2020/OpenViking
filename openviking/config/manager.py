@@ -247,6 +247,11 @@ class RuntimeConfigManager(Generic[C, A]):
         self._refresh_task: Optional[asyncio.Task] = None
         self._refresh_task_loop: Optional[asyncio.AbstractEventLoop] = None
 
+    @property
+    def base_config(self) -> C:
+        """Return the read-only startup baseline used to resolve stored overrides."""
+        return self._base_config
+
     # -- consumers ------------------------------------------------------------
 
     def add_update_consumer(

@@ -79,7 +79,6 @@ def setup(monkeypatch):
 
     fs._async_agfs.read = AsyncMock(side_effect=read)
     fs.ttl_registry.account_may_have_records = AsyncMock(return_value=True)
-    fs.ttl_registry.get = AsyncMock(return_value=None)
     monkeypatch.setattr("openviking.storage.viking_fs.get_viking_fs", lambda: fs)
     monkeypatch.setattr("openviking.storage.viking_vector_index_backend.ttl_enabled", lambda: False)
 
@@ -270,15 +269,6 @@ async def test_source_read_error_cannot_expose_event_name(setup, error):
 
 
 @pytest.mark.asyncio
-async def test_partial_delete_registry_error_cannot_expose_session_subtree(setup):
-    s = setup
-    uri = "viking://user/alice/sessions/expired-session/messages.jsonl"
-    s.fs.ttl_registry.get = AsyncMock(side_effect=OSError("registry unavailable"))
-    with pytest.raises(OSError, match="registry unavailable"):
-        await s.fs._ttl_uri_visible(uri, s.ctx)
-
-
-@pytest.mark.asyncio
 async def test_backend_ignoring_exclusion_fails_without_looping_forever(setup):
     s = setup
     row = {"uri": ROOT + "/2026/09/03/expired.md", "level": 2}
@@ -301,17 +291,8 @@ async def test_default_off_still_checks_stored_directory_deadlines(setup):
 
 
 @pytest.mark.asyncio
-async def test_user_count_excludes_expired_while_cleanup_count_sees_residue(setup):
+async def test_count_uses_backend_total_until_physical_cleanup(setup):
     s = setup
-    old, live = ROOT + "/2026/09/05/old.md", ROOT + "/2026/09/06/live.md"
-    s.source(old, PAST)
-    s.source(live, FUTURE)
-    s.single.scroll = AsyncMock(
-        side_effect=[
-            ([{"uri": old, "level": 2}], "1"),
-            ([{"uri": live, "level": 2}], None),
-        ]
-    )
     s.single.count = AsyncMock(return_value=2)
-    assert await s.backend.count(ctx=s.ctx, include_expired=False) == 1
     assert await s.backend.count(ctx=s.ctx) == 2
+    s.fs._async_agfs.read.assert_not_awaited()

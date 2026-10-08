@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import openviking.core.ttl as ttl
 from openviking.server.identity import RequestContext, Role
 from openviking.session.memory.dataclass import MemoryFile
 from openviking.session.memory.utils import MemoryFileUtils
@@ -24,7 +23,6 @@ from openviking_cli.exceptions import (
     PermissionDeniedError,
 )
 from openviking_cli.session.user_id import UserIdentifier
-from openviking_cli.utils.config import TTLConfig
 
 
 @pytest.mark.asyncio
@@ -635,35 +633,6 @@ class _FakeQueueManager:
         del allow_create
         assert name == self.SEMANTIC
         return self.queue
-
-
-@pytest.mark.asyncio
-async def test_memory_create_strips_file_ttl_overrides(monkeypatch):
-    uri = "viking://user/default/memories/events/2026/09/28/note.md"
-    ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.USER)
-    viking_fs = _FakeVikingFS(file_uri=uri, root_uri=uri.rsplit("/", 1)[0])
-    coordinator = ContentWriteCoordinator(viking_fs=viking_fs)
-    config = TTLConfig(user_events={"mode": "days", "ttl_days": 5})
-    monkeypatch.setattr(
-        ttl,
-        "get_openviking_config",
-        lambda: SimpleNamespace(ttl=config),
-    )
-    requested = MemoryFile(
-        content="event",
-        extra_fields={
-            "ttl_days": 999,
-            "received_at": "2999-01-01T00:00:00.000Z",
-            "expires_at": "2999-01-02T00:00:00.000Z",
-        },
-    )
-
-    await coordinator._write_in_place(uri, MemoryFileUtils.write(requested), mode="create", ctx=ctx)
-
-    stored = MemoryFileUtils.read(viking_fs.content[uri], uri=uri)
-    assert {"ttl_days", "received_at", "expires_at", "ttl_generation"}.isdisjoint(
-        stored.extra_fields
-    )
 
 
 @pytest.mark.asyncio

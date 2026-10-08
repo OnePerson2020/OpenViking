@@ -22,14 +22,13 @@ from openviking_cli.utils.config.ttl_config import TTLConfig
 from tests.server.test_content_batch_write import _VFS
 from tests.storage.test_transfer_merge_binding import binding_fs as binding_fs
 from tests.unit.service.test_ttl_cleanup import (
-    _cleanup_once,
     _make_service,
     _message,
+    _owner_meta,
     _record,
-    _session_meta,
     _TaskStore,
 )
-from tests.unit.session.test_session_commit_resume import _MemoryVikingFS
+from tests.unit.storage.ttl_test_storage import read_record
 
 
 def _default_ctx():
@@ -43,22 +42,19 @@ class _DummyAgfs:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "entrypoint,extension",
+    "entrypoint,filename",
     [
-        (entrypoint, extension)
-        for entrypoint in ("write", "batch_write", "replace", "append")
-        for extension in (".md", ".MD", ".txt", ".TXT")
-    ]
-    + [
-        (entrypoint, extension)
-        for entrypoint in ("replace", "append")
-        for extension in (".custom", "")
+        ("write", "event.md"),
+        ("write", ".note.MD"),
+        ("batch_write", "event.txt"),
+        ("batch_write", ".note.TXT"),
+        ("replace", "event.custom"),
+        ("append", "event"),
     ],
 )
 @pytest.mark.parametrize("owner", ["user/default", "user/default/peers/assistant"])
-@pytest.mark.parametrize("basename", ["event", ".note"])
-async def test_public_event_write_registers_and_hides_every_supported_file(
-    monkeypatch, entrypoint, owner, basename, extension, binding_fs
+async def test_public_write_entrypoints_share_directory_ttl(
+    monkeypatch, entrypoint, owner, filename, binding_fs
 ):
     class Clock(datetime):
         current = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -71,7 +67,7 @@ async def test_public_event_write_registers_and_hides_every_supported_file(
     monkeypatch.setattr(ttl, "datetime", Clock)
     monkeypatch.setattr(ttl, "get_openviking_config", lambda: SimpleNamespace(ttl=config))
     root = f"viking://{owner}/memories/events/2026/09/28"
-    uri = root + "/" + basename + extension
+    uri = root + "/" + filename
     ctx = _default_ctx()
     fs = binding_fs
     source = _VFS(root)
@@ -92,33 +88,33 @@ async def test_public_event_write_registers_and_hides_every_supported_file(
         "openviking.storage.content_write.MemoryUpdater.refresh_file_embedding",
         AsyncMock(return_value=False),
     )
+    # File frontmatter remains user content; only the owner metadata sets TTL.
+    content = "---\nexpires_at: 2999-01-01T00:00:00Z\n---\nevent body"
     if entrypoint != "batch_write":
         await writer.write(
             uri=uri,
-            content="event body",
+            content=content,
             mode="create" if entrypoint == "write" else entrypoint,
             ctx=ctx,
         )
     else:
         await writer.batch_write(
             root_uri=root,
-            operations=[{"uri": uri, "content": "event body", "mode": "create"}],
+            operations=[{"uri": uri, "content": content, "mode": "create"}],
             ctx=ctx,
         )
 
-    record = await fs.ttl_registry.get(ctx.account_id, root)
+    record = await read_record(fs, ctx.account_id, root)
     assert record is not None
     assert record.object_type == "event"
     assert record.expires_at == "2026-01-02T00:00:00.000Z"
     assert "event body" in await fs.read_file(uri, ctx=ctx)
-    # Policy changes do not alter the frozen expiry of any extension.
+    # Changing defaults alone cannot override the persisted deadline.
     config.global_default.mode = "disabled"
     Clock.current = datetime(2026, 1, 3, tzinfo=timezone.utc)
     for read in (fs.read_file, fs.read_file_bytes):
         with pytest.raises(NotFoundError):
             await read(uri, ctx=ctx)
-    due = [item async for item in fs.ttl_registry.claim_due(now=Clock.current)]
-    assert [item[0] for item in due] == [record]
 
 
 @pytest.mark.asyncio
@@ -132,25 +128,6 @@ async def test_event_directory_is_visible_without_parsing_it_as_a_file(monkeypat
         "viking://user/default/memories/events/" + directory, _default_ctx()
     )
     fs._async_agfs.read.assert_not_awaited()
-
-
-@pytest.mark.parametrize(
-    "parent_policy,expected",
-    [
-        ({"mode": "days", "ttl_days": 90}, 90),
-        ({"mode": "disabled"}, None),
-    ],
-)
-def test_root_policy_overrides_global(parent_policy, expected):
-    parent = "viking://user/u1/memories/events"
-    config = TTLConfig.model_validate(
-        {
-            "global": {"mode": "days", "ttl_days": 1},
-            "directories": {parent: parent_policy},
-        }
-    )
-    actual = config.resolve_uri(parent + "/2026/09/28/e.md", "user_events")
-    assert actual == expected, f"parent={parent_policy}; expected {expected}; got {actual}"
 
 
 @pytest.mark.asyncio
@@ -238,89 +215,11 @@ async def test_summary_frontmatter_does_not_override_owner_deadline(monkeypatch,
                     await read(parent + "/" + filename, ctx=ctx)
 
 
-class ProcessCrash(BaseException):
-    pass
-
-
-@pytest.mark.asyncio
-async def test_cleanup_reconciles_persisted_phase2_completion_after_crash(monkeypatch):
-    class Clock(datetime):
-        current = datetime(2026, 9, 21, 23, 59, tzinfo=timezone.utc)
-
-        @classmethod
-        def now(cls, tz=None):
-            return cls.current
-
-    monkeypatch.setattr(ttl, "datetime", Clock)
-    monkeypatch.setattr(
-        "openviking.session.session.get_current_timestamp", lambda: "2026-09-21T23:59:00.000Z"
-    )
-    uri = "viking://user/u1/sessions/s1"
-    archive = uri + "/history/archive_001"
-    old_expiry = "2026-09-22T00:00:00.000Z"
-    files = {
-        uri + "/messages.jsonl": "",
-        uri + "/.meta.json": json.dumps(
-            {
-                "session_id": "s1",
-                "ttl_days": 2,
-                "received_at": "2026-09-20T00:00:00.000Z",
-                "expires_at": old_expiry,
-                "ttl_generation": "generation-1",
-            }
-        ),
-    }
-    files[archive + "/.meta.json"] = json.dumps(
-        {"phase1": {"queue_message": {"task_id": "task-1"}}}
-    )
-    storage = _MemoryVikingFS(files)
-    session = Session(viking_fs=storage, session_id="s1", session_uri=uri)
-    await session.load(include_expired=True)
-    write = storage.write_file
-
-    async def crash_on_root_save(uri, content, ctx=None, lease_ref=None):
-        if uri.endswith("/sessions/s1/.meta.json"):
-            raise ProcessCrash("termination after durable archive completion, before root renewal")
-        await write(uri, content, ctx=ctx, lease_ref=lease_ref)
-
-    storage.write_file = crash_on_root_save
-    with pytest.raises(ProcessCrash):
-        await session._merge_and_save_commit_meta(
-            task_id="task-1",
-            archive_uri=archive,
-            archive_index=1,
-            memories_extracted={},
-            telemetry_snapshot=None,
-        )
-    assert (
-        json.loads(files[archive + "/.meta.json"])["phase2_completed_at"]
-        == "2026-09-21T23:59:00.000Z"
-    )
-    assert json.loads(files[uri + "/.meta.json"])["expires_at"] == old_expiry
-    Clock.current = datetime(2026, 9, 22, 0, 0, 1, tzinfo=timezone.utc)
-    record = _record(object_uri=uri, expires_at=old_expiry)
-    cleanup, vfs, registry, _ = _make_service(
-        record=record, live_content=files[uri + "/.meta.json"]
-    )
-    vfs.read_file = storage.read_file
-    vfs.write_file = write
-
-    async def list_history(path, **kwargs):
-        return await storage.ls(uri + "/history")
-
-    vfs._async_agfs.ls = list_history
-    result = await _cleanup_once(cleanup, record)
-    assert not result["deleted"], (
-        "Phase2 completed at 2026-09-21 23:59 and should renew to 2026-09-23 23:59; "
-        f"cleanup instead issued strict recursive rm: {vfs.rm.await_args}"
-    )
-
-
 def test_failed_cleanup_does_not_reconsume_without_any_wait():
     record = _record()
     cleanup, vfs, _, queue_manager = _make_service(
         record=record,
-        live_content=_session_meta(),
+        live_content=_owner_meta(),
         rm_error=RuntimeError("vector backend unavailable"),
     )
     pending = [_message(record)]
@@ -355,7 +254,7 @@ def test_failed_cleanup_does_not_reconsume_without_any_wait():
 
         async def dequeue(self):
             message = pending.pop(0)
-            attempts.append(message["retry_count"])
+            attempts.append(message["task_id"])
             await cleanup._process(message)
             if len(attempts) == 5:
                 stop.set()
@@ -367,10 +266,9 @@ def test_failed_cleanup_does_not_reconsume_without_any_wait():
         manager._queue_worker_loop(Queue(), stop, 1)
     finally:
         set_task_tracker(None)
-    assert attempts == [0], (
-        "failed work must leave the immediate queue until its durable retry time"
+    assert attempts == ["task-1"], (
+        "failed work must leave the immediate queue until the next directory scan"
     )
-    vfs.ttl_registry.defer_retry.assert_awaited_once()
     assert stop.waits
 
 

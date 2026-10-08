@@ -24,40 +24,42 @@ from tests.storage.test_transfer_merge_binding import binding_fs as binding_fs
 from tests.storage.test_transfer_merge_binding import indexed_fs as indexed_fs
 from tests.storage.test_transfer_merge_binding import root_ctx
 from tests.unit.service.test_ttl_cleanup import _cleanup_once
+from tests.unit.storage.ttl_test_storage import read_record
 
 
 @pytest.mark.asyncio
-async def test_session_append_renews_saved_duration_and_unmanaged_stays_unmanaged(
-    binding_fs, monkeypatch
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"mode": "days", "ttl_days": 7},
+        {"mode": "absolute", "ttl_absolute": 32503680000},
+        {"mode": "disabled"},
+    ],
+)
+async def test_session_append_preserves_deadline_despite_new_default(
+    binding_fs, monkeypatch, policy
 ):
     from openviking.message import TextPart
     from openviking.session import session as session_module
     from openviking.session.session import Session
 
     fs, ctx = binding_fs, root_ctx()
-    config = TTLConfig(sessions={"mode": "days", "ttl_days": 7})
+    config = TTLConfig(sessions=policy)
     monkeypatch.setattr(ttl, "get_openviking_config", lambda: SimpleNamespace(ttl=config))
-    session = Session(viking_fs=fs, session_id="renewal", ctx=ctx)
+    session = Session(viking_fs=fs, session_id="fixed-deadline", ctx=ctx)
     await session.ensure_exists()
     initial = await read_directory_fields(fs, session.uri, ctx=ctx)
-    config.sessions.ttl_days = 30
-    completed = format_iso8601(parse_iso_datetime(initial["received_at"]) + timedelta(days=1))
+    config.sessions = TTLConfig(sessions={"mode": "days", "ttl_days": 30}).sessions
+    completed = format_iso8601(parse_iso_datetime(initial["created_at"]) + timedelta(days=1))
     monkeypatch.setattr(session_module, "get_current_timestamp", lambda: completed)
     await asyncio.wait_for(session.add_message_async("user", [TextPart("append")]), timeout=10)
-    renewed = await read_directory_fields(fs, session.uri, ctx=ctx)
-    assert renewed["ttl_days"] == 7
-    assert parse_iso_datetime(renewed["expires_at"]) - parse_iso_datetime(completed) == timedelta(
-        days=7
-    )
-    before_empty = renewed["expires_at"]
+    current = await read_directory_fields(fs, session.uri, ctx=ctx)
+    assert current.get("expires_at") == initial.get("expires_at")
+    assert current["created_at"] == initial["created_at"]
+    assert current["last_message_at"] == completed
+    assert "ttl_days" not in current and "received_at" not in current
     await session.add_messages_async([])
-    assert (await read_directory_fields(fs, session.uri, ctx=ctx))["expires_at"] == before_empty
-    config.sessions.mode, config.sessions.ttl_days = "disabled", None
-    unmanaged = Session(viking_fs=fs, session_id="unmanaged", ctx=ctx)
-    await unmanaged.ensure_exists()
-    config.sessions.mode, config.sessions.ttl_days = "days", 7
-    await unmanaged.add_message_async("user", [TextPart("legacy append")])
-    assert not (await read_directory_fields(fs, unmanaged.uri, ctx=ctx)).get("expires_at")
+    assert await read_directory_fields(fs, session.uri, ctx=ctx) == current
 
 
 @pytest.mark.asyncio
@@ -111,10 +113,17 @@ async def test_cleanup_removes_files_all_vectors_and_metadata(
             },
             ctx=ctx,
         )
+    backend = await vectors._get_backend_for_context(ctx)
+    stored = await backend.strict_query(limit=100)
+    assert len(stored) == 10
+    assert all("expires_at" not in row for row in stored)
+    assert "expires_at" not in {
+        field["FieldName"] for field in backend._get_collection().get_meta_data()["Fields"]
+    }
     await fs.write_file(
         owner + "/.meta.json", json.dumps({"expires_at": "2000-01-01T00:00:00Z"}), ctx=ctx
     )
-    record = await fs.ttl_registry.get(ctx.account_id, owner)
+    record = await read_record(fs, ctx.account_id, owner)
     for uri in [
         owner,
         *bodies,
@@ -131,9 +140,12 @@ async def test_cleanup_removes_files_all_vectors_and_metadata(
             )
             with pytest.raises(StorageException, match="confirm failed"):
                 await _cleanup_once(cleanup, record)
-        assert await fs.ttl_registry.get(ctx.account_id, owner) == record
-    assert (await _cleanup_once(cleanup, record))["deleted"]
-    assert await fs.ttl_registry.get(ctx.account_id, owner) is None
+        # Deletion completed; only the final confirmation request failed.
+        # With no body or vectors left, no expiry entry needs to be retained.
+        assert not (await _cleanup_once(cleanup, record))["deleted"]
+    else:
+        assert (await _cleanup_once(cleanup, record))["deleted"]
+    assert await read_record(fs, ctx.account_id, owner) is None
     assert not await fs.exists(owner, ctx=ctx)
     for uri, data in summary_bytes.items():
         if uri.startswith(owner + "/"):
@@ -141,7 +153,7 @@ async def test_cleanup_removes_files_all_vectors_and_metadata(
                 await fs.read_file_bytes(uri, ctx=ctx)
         else:
             assert await fs.read_file_bytes(uri, ctx=ctx) == data
-    remaining = await vectors.query(ctx=ctx, limit=100)
+    remaining = await backend.strict_query(limit=100)
     assert {(r["uri"], r["level"]) for r in remaining} == {(parent, 0), (parent, 1)}
 
 
@@ -154,7 +166,7 @@ async def test_busy_file_defers_cleanup_without_tree_lock(binding_fs, monkeypatc
     await fs.write_file(
         root + "/.meta.json", json.dumps({"expires_at": "2000-01-01T00:00:00Z"}), ctx=ctx
     )
-    record = await fs.ttl_registry.get(ctx.account_id, root)
+    record = await read_record(fs, ctx.account_id, root)
     cleanup = TTLCleanupService(service=SimpleNamespace(viking_fs=fs))
     lock = await fs._async_agfs.pathlock_acquire_exact(fs._uri_to_path(body, ctx=ctx))
     monkeypatch.setattr(
@@ -165,7 +177,7 @@ async def test_busy_file_defers_cleanup_without_tree_lock(binding_fs, monkeypatc
             await asyncio.wait_for(_cleanup_once(cleanup, record), timeout=3)
         assert not isinstance(failure.value, (AssertionError, TimeoutError))
         assert (await read_directory_fields(fs, root, ctx=ctx))["expires_at"] == record.expires_at
-        assert await fs.ttl_registry.get(ctx.account_id, root) == record
+        assert await read_record(fs, ctx.account_id, root) == record
     finally:
         await fs._async_agfs.pathlock_release(lock)
     assert (await _cleanup_once(cleanup, record))["deleted"]
@@ -179,7 +191,7 @@ async def test_active_embedding_defers_cleanup_until_vector_write_finishes(bindi
     await fs.write_file(
         owner + "/.meta.json", json.dumps({"expires_at": "2000-01-01T00:00:00Z"}), ctx=ctx
     )
-    record = await fs.ttl_registry.get(ctx.account_id, owner)
+    record = await read_record(fs, ctx.account_id, owner)
     cleanup = TTLCleanupService(service=SimpleNamespace(viking_fs=fs))
     guard = await fs._async_agfs.pathlock_acquire_exact(
         TTLRegistry.vector_lock_path(ctx.account_id, owner)
@@ -187,7 +199,7 @@ async def test_active_embedding_defers_cleanup_until_vector_write_finishes(bindi
     try:
         with pytest.raises(LockAcquisitionError):
             await _cleanup_once(cleanup, record)
-        assert await fs.ttl_registry.get(ctx.account_id, owner) == record
+        assert await read_record(fs, ctx.account_id, owner) == record
     finally:
         await fs._async_agfs.pathlock_release(guard)
     assert (await _cleanup_once(cleanup, record))["deleted"]
@@ -209,7 +221,7 @@ async def test_worker_cleanup_and_late_summary_do_not_recreate_session(binding_f
     await fs.write_file(
         root + "/.meta.json", json.dumps({"expires_at": "2000-01-01T00:00:00Z"}), ctx=ctx
     )
-    record = await fs.ttl_registry.get(ctx.account_id, root)
+    record = await read_record(fs, ctx.account_id, root)
     service = TTLCleanupService(service=SimpleNamespace(viking_fs=fs))
     processor = _TTLCleanupProcessor(service)
     set_task_tracker(TaskTracker(PersistentTaskStore(fs._async_agfs)))

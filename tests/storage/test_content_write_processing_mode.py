@@ -44,7 +44,6 @@ class _FakeVikingFS:
         self.read_file = AsyncMock(return_value="previous")
         self._async_agfs = _FakePathLock()
         self.runtime_config_manager = None
-        self.ttl_registry = SimpleNamespace(get=AsyncMock(return_value=None))
 
     def _uri_to_path(self, uri, ctx=None):
         return f"/fake/{uri}"

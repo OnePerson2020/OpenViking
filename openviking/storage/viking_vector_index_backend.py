@@ -1962,26 +1962,11 @@ class VikingVectorIndexBackend:
         filter: Optional[Dict[str, Any] | FilterExpr] = None,
         *,
         ctx: Optional[RequestContext] = None,
-        include_expired: bool = True,
     ) -> int:
         if ctx:
             backend = await self._get_backend_for_context(ctx)
         else:
             backend = self._get_default_backend()
-        if not include_expired and ctx is not None:
-            fs = await self._ttl_source(ctx)
-            if fs is not None:
-                total, cursor = 0, None
-                while True:
-                    records, cursor = await backend.scroll(
-                        filter=filter,
-                        limit=256,
-                        cursor=cursor,
-                        output_fields=["uri", "level", "abstract"],
-                    )
-                    total += sum(await self._ttl_visibility(fs, records, ctx))
-                    if cursor is None:
-                        return total
         return await backend.count(filter=filter)
 
     async def search_by_keywords(
@@ -2616,23 +2601,16 @@ class VikingVectorIndexBackend:
             And([Eq("account_id", account_id), Eq("owner_user_id", user_id)])
         )
 
-    async def delete_uris(
-        self, ctx: RequestContext, uris: List[str], *, level: Optional[int] = None
-    ) -> None:
+    async def delete_uris(self, ctx: RequestContext, uris: List[str]) -> None:
         for uri in uris:
             conds: List[FilterExpr] = [
                 Eq("account_id", ctx.account_id),
                 Or([Eq("uri", uri), In("uri", [f"{uri}/"])]),
             ]
-            if level is not None:
-                conds.append(Eq("level", level))
-
             backend = await self._get_backend_for_context(ctx)
             await backend.delete_by_filter(And(conds))
 
-    async def delete_uri_scope(
-        self, ctx: RequestContext, uri: str, *, level: Optional[int] = None
-    ) -> None:
+    async def delete_uri_scope(self, ctx: RequestContext, uri: str) -> None:
         """Strictly delete one URI and every descendant in its tenant."""
         backend = await self._get_backend_for_context(ctx)
         await backend.delete_by_filter(
@@ -2640,7 +2618,6 @@ class VikingVectorIndexBackend:
                 [
                     Eq("account_id", ctx.account_id),
                     Or([Eq("uri", uri), PathScope("uri", uri, depth=-1)]),
-                    *([Eq("level", level)] if level is not None else []),
                 ]
             )
         )

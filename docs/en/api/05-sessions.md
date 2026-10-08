@@ -1736,6 +1736,6 @@ results = await client.search(query=query, session_id=session_id)
 
 Sessions inherit the `sessions` root policy on creation. Create/config APIs reject `ttl_relative`, `ttl_absolute`, `expires_at`, `ttl_days` and `ttl_per_file`, including explicit nulls.
 
-Create, detail, list, config update, message append, commit and context responses expose `expires_at`, explicitly null without TTL. Successful appends and completed nonempty commits renew the saved duration. Direct expired-session access returns 404; lists omit expired sessions.
+Create, detail, list, config update, message append, commit and context responses expose `expires_at`, explicitly null without TTL. Relative TTL starts at Session creation. Appends, commits and retries never renew it; users can extend live Sessions by changing the root policy before expiry. Direct expired-session access returns 404; lists omit expired sessions.
 
 See [Directory TTL](../concepts/17-ttl.md) and [root policy configuration](../configuration/01-server.md#ttl).

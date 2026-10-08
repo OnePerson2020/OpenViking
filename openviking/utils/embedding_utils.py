@@ -19,7 +19,7 @@ from openviking.core.namespace import (
     is_session_uri,
     owner_space_for_uri,
 )
-from openviking.core.ttl import TTL_FIELD_NAMES, ttl_object_for_uri
+from openviking.core.ttl import ttl_object_for_uri
 from openviking.parse.parsers.media.utils import (
     MPEG_TS_PROBE_BYTES,
     is_mpeg_ts,
@@ -76,12 +76,7 @@ def _apply_scalar_overrides(embedding_msg, overrides: Optional[Dict[str, Any]]) 
         # Internal queue metadata, removed by TextEmbeddingHandler before upsert.
         embedding_msg.context_data["_upsert_record_id"] = str(record_id)
     for field, value in overrides.items():
-        if (
-            field.startswith("_")
-            or field in NON_PORTABLE_VECTOR_RECORD_FIELDS
-            or field in TTL_FIELD_NAMES
-            or value is None
-        ):
+        if field.startswith("_") or field in NON_PORTABLE_VECTOR_RECORD_FIELDS or value is None:
             continue
         embedding_msg.context_data[field] = value
 
@@ -99,7 +94,6 @@ def _apply_planned_field_patch(
         for field, value in (field_patch.values if field_patch is not None else {}).items()
         if not field.startswith("_")
         and field not in NON_PORTABLE_VECTOR_RECORD_FIELDS
-        and field not in TTL_FIELD_NAMES
         and value is not None
     }
     for field in patch_values:

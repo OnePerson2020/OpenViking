@@ -493,20 +493,19 @@ ov admin get-configuration --account-id default
 ov admin patch-configuration --account-id default --settings '{"ttl":{"global":{"mode":"days","ttl_days":90}}}'
 ```
 
-CLI 省略 `--account-id` 时操作集群层。Python HTTP SDK 对应 `admin_get_configuration(account_id)`、`admin_patch_configuration(settings, account_id)`。首次启用或修改策略也会按原业务时间重算仍有效的已有目录，历史未纳管目录也会补 TTL；更具体的覆盖仍按优先级生效。已过期或已删除的对象不会恢复，关闭有效策略会清除仍有效目录的期限。配置请求按页、限制并发更新元数据和到期索引，部分失败时返回未完成信息，重试相同配置即可继续；相对策略下，缺少可靠原始时间的历史目录会报告并跳过。Session 相对期限在成功追加消息或完成非空 commit 后续期；绝对期限与 event 正文写入不自动续期。具体目录期限仍只读，用户通过修改根策略延长期限。详见[目录 TTL](../concepts/17-ttl.md)。
+CLI 省略 `--account-id` 时操作集群层。Python HTTP SDK 对应 `admin_get_configuration(account_id)`、`admin_patch_configuration(settings, account_id)`。首次启用或修改策略也会按原业务时间重算仍有效的已有目录，历史未纳管目录也会补 TTL；更具体的覆盖仍按优先级生效。已过期或已删除的对象不会恢复，关闭有效策略会清除仍有效目录的期限。配置请求逐层列举子目录、限制并发更新目录元数据，部分失败时返回未完成信息，重试相同配置即可继续；相对策略下，缺少可靠原始时间的历史目录会报告并跳过。Session 的相对期限从创建时间计算，event 从首次成功写入时间计算；追加消息、commit、正文写入及任务重试都不自动续期。具体目录期限仍只读，用户通过修改根策略延长期限。详见[目录 TTL](../concepts/17-ttl.md)。
 
-`ttl_cleanup` 独立控制物理删除执行器。它默认 `enabled: true`，但所有 TTL 策略默认关闭时没有到期任务。关闭执行器会暂停新的物理删除并保留重试状态；已到期目录及其内容 仍会立即逻辑不可见。调度器同时使用扫描抖动和稳定的逐对象清理偏移，避免所有租户集中在 UTC 0 点删除。
+`ttl_cleanup` 独立控制物理删除执行器。它默认 `enabled: true`，但所有 TTL 策略默认关闭时没有到期任务。关闭执行器会暂停新的物理删除并保留重试状态；已到期目录及其内容 仍会立即逻辑不可见。扫描器分批读取目录元数据，每轮结束后默认等待一天。通过队列背压和少量轮询抖动分散工作，不维护逐对象调度记录。
 
 | 配置项 | 默认值 | 作用 |
 |---|---:|---|
 | `ttl_cleanup.enabled` | `true` | 执行已启用 TTL 策略对象的物理清理 |
-| `ttl_cleanup.check_interval_seconds` | `30` | registry 扫描基础间隔 |
+| `ttl_cleanup.check_interval_seconds` | `30` | 目录扫描批次的基础间隔 |
 | `ttl_cleanup.scan_jitter_seconds` | `5` | 每轮扫描的随机延迟，用于分散调度轮询 |
-| `ttl_cleanup.cleanup_jitter_seconds` | `86400` | 逻辑到期后的稳定逐对象清理延迟窗口，默认 24 小时 |
-| `ttl_cleanup.batch_size` | `100` | 每轮最多领取的记录数 |
-| `ttl_cleanup.max_batch_bytes` | `1048576` | 每轮最多领取的序列化字节数 |
-| `ttl_cleanup.scan_time_budget_seconds` | `5` | 每轮 registry 扫描的最大时间 |
+| `ttl_cleanup.sweep_interval_seconds` | `86400` | 完成一轮目录扫描后的等待时间，默认一天 |
+| `ttl_cleanup.batch_size` | `100` | 每批最多检查的 owner 目录数 |
+| `ttl_cleanup.scan_time_budget_seconds` | `5` | 每批在目录之间检查的扫描时间预算 |
 
-逻辑可见性在 `expires_at` 改变，`cleanup_jitter_seconds` 只延迟物理删除。到期目录内全部 L0/L1/L2 及向量、Meta 均清理，目录外的上层摘要保留。
+逻辑可见性在 `expires_at` 改变，天级扫描只控制物理删除。到期目录内全部 L0/L1/L2 及向量、Meta 均清理，目录外的上层摘要保留。
 
 以上为 OV 原生链路。托管控制台或网关还需将对应配置和请求路由转发至 OV；增加 OV 路由不代表既有云端代理会自动开放。该 PR 不修改公有云服务或计费链路。

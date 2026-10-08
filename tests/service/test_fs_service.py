@@ -140,10 +140,13 @@ class _MkdirVikingFS:
             raise AGFSAlreadyExistsError("directory already exists")
         self.directory_exists = True
 
-    async def write_file(self, _uri, content, ctx=None, lease_ref=None):
+    async def write_file(
+        self, _uri, content, ctx=None, lease_ref=None, *, allow_empty_directory=False
+    ):
         del ctx
         assert self._async_agfs.held
         assert lease_ref is not None
+        assert allow_empty_directory
         self.abstract_content = content
 
 
@@ -435,7 +438,7 @@ async def test_grep_projects_tags_for_each_match(request_context):
     )
 
     assert result["matches"] == [
-        {**item, "expires_at": None, "ttl_days": None}
+        {**item, "expires_at": None}
         for item in [
             {
                 "uri": "viking://resources/a.md",
@@ -466,7 +469,7 @@ async def test_grep_skips_tag_projection_without_tags_or_include_tags(request_co
 
     result = await service.grep("viking://resources", "needle", ctx=request_context)
 
-    assert result["matches"] == [{**item, "expires_at": None, "ttl_days": None} for item in matches]
+    assert result["matches"] == [{**item, "expires_at": None} for item in matches]
 
 
 @pytest.mark.asyncio
@@ -485,8 +488,7 @@ async def test_grep_projects_tags_when_include_tags_is_requested(request_context
     )
 
     assert result["matches"] == [
-        {**item, "expires_at": None, "ttl_days": None}
-        for item in [{**matches[0], "tags": ["env=prod"]}]
+        {**item, "expires_at": None} for item in [{**matches[0], "tags": ["env=prod"]}]
     ]
 
 
@@ -512,7 +514,7 @@ async def test_plain_listing_reads_only_requested_page_summaries(request_context
     service = FSService(viking_fs=viking_fs, vikingdb=FakeVikingDB())
 
     assert await service.ls("viking://resources", ctx=request_context) == ListingPage(
-        entries=[{**entry, "expires_at": None, "ttl_days": None} for entry in entries],
+        entries=[{**entry, "expires_at": None} for entry in entries],
         has_more=False,
     )
     abstract.assert_not_awaited()
@@ -531,13 +533,12 @@ async def test_plain_listing_reads_only_requested_page_summaries(request_context
                 "abstract": "L0 summary",
                 "overview": "L1 overview",
                 "expires_at": None,
-                "ttl_days": None,
             }
         ],
         has_more=True,
     )
     assert await service.tree("viking://resources", ctx=request_context) == ListingPage(
-        entries=[{**entry, "expires_at": None, "ttl_days": None} for entry in entries],
+        entries=[{**entry, "expires_at": None} for entry in entries],
         has_more=False,
     )
     abstract.assert_awaited_once_with(selected["uri"], ctx=request_context)
@@ -573,9 +574,7 @@ async def test_ls_and_tree_detect_more_entries_with_n_plus_one(
         node_limit=2,
     )
 
-    assert page.entries == (
-        [{**entry, "expires_at": None, "ttl_days": None} for entry in entries[:2]]
-    )
+    assert page.entries == ([{**entry, "expires_at": None} for entry in entries[:2]])
     assert page.has_more is expected_has_more
     fetch_mock = getattr(viking_fs, method_name)
     assert fetch_mock.await_args.kwargs["node_limit"] == 3
@@ -635,7 +634,6 @@ async def test_glob_filters_and_projects_tags_before_applying_node_limit(request
                 "uri": "viking://resources/b.md",
                 "isDir": False,
                 "expires_at": None,
-                "ttl_days": None,
                 "tags": ["team=search", "env=prod"],
             }
         ],
@@ -726,7 +724,7 @@ async def test_tagged_grep_reuses_tags_returned_by_viking_fs(request_context):
         tags=["team=search", "env=prod"],
     )
 
-    assert result["matches"] == [{**item, "expires_at": None, "ttl_days": None} for item in matches]
+    assert result["matches"] == [{**item, "expires_at": None} for item in matches]
 
 
 @pytest.mark.asyncio
@@ -799,7 +797,6 @@ async def test_ls_filters_and_paginates_before_reading_summaries(request_context
                 "abstract": "L0 summary",
                 "overview": "L1 overview",
                 "expires_at": None,
-                "ttl_days": None,
             }
         ],
         has_more=True,
@@ -903,7 +900,6 @@ async def test_tree_projects_directory_tags_before_pagination_and_summaries(
                 "abstract": "L0 summary",
                 "overview": "L1 overview",
                 "expires_at": None,
-                "ttl_days": None,
             }
         ],
         has_more=False,

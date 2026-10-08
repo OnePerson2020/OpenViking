@@ -54,7 +54,6 @@ class FakeVikingFS:
             stat=AsyncMock(side_effect=FileNotFoundError),
             read=AsyncMock(side_effect=FileNotFoundError),
         )
-        self.ttl_registry = SimpleNamespace(get=AsyncMock(return_value=None))
         self._uri_to_path = lambda uri, ctx=None: "/local/default/" + uri.removeprefix("viking://")
         self.written_files: list[str] = []
         self.created_dirs: list[str] = []

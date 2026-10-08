@@ -66,7 +66,6 @@ from openviking.telemetry import get_current_telemetry, tracer
 from openviking.telemetry.request_wait_tracker import get_request_wait_tracker
 from openviking.utils.model_retry import is_retryable_api_error, retry_async
 from openviking.utils.time_utils import (
-    format_iso8601,
     get_current_timestamp,
     parse_iso_datetime,
 )
@@ -328,13 +327,8 @@ class SessionMeta:
     # session. Maps to config.memory_extraction_config.events.tags in the API.
     # None means no session default; a commit may still override per-call.
     event_search_tags: Optional[List[str]] = None
-    # Retention duration snapshotted at creation or explicitly edited later.
-    # received_at tracks successful content updates even when TTL is off;
-    # received_at/expires_at are RFC 3339 UTC strings. expires_at is authoritative
-    # for the read barrier and cleanup scan. Successful appends and commits renew
-    # it from the saved ttl_days, never from the current default configuration.
-    ttl_days: Optional[int] = None
-    received_at: str = ""
+    # Persisted UTC deadline, changed only by creation or explicit root policy
+    # updates. Relative policies use created_at; writes never extend retention.
     expires_at: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -367,10 +361,6 @@ class SessionMeta:
             data["total_message_count"] = self.total_message_count
         if self.event_search_tags is not None:
             data["event_search_tags"] = list(self.event_search_tags)
-        if self.ttl_days is not None:
-            data["ttl_days"] = self.ttl_days
-        if self.received_at:
-            data["received_at"] = self.received_at
         if self.expires_at:
             data["expires_at"] = self.expires_at
         return data
@@ -423,8 +413,6 @@ class SessionMeta:
             last_message_at=data.get("last_message_at", ""),
             last_auto_commit_at=data.get("last_auto_commit_at", ""),
             event_search_tags=data.get("event_search_tags"),
-            ttl_days=data.get("ttl_days"),
-            received_at=data.get("received_at", ""),
             expires_at=data.get("expires_at", ""),
         )
 
@@ -663,46 +651,24 @@ class Session:
                 messages_uri, ctx=self.ctx, include_expired=True
             ):
                 return
-            self._initialize_ttl(config=await resolve_ttl_config(fs, self.ctx.account_id))
+            self._initialize_ttl(
+                config=await resolve_ttl_config(fs, self.ctx.account_id, fresh=True)
+            )
             await fs.write_file(messages_uri, "", ctx=self.ctx, lease_ref=lease)
             await self._save_meta(lease_ref=lease)
         finally:
             await fs._async_agfs.pathlock_release(lease)
 
     def _initialize_ttl(self, *, config=None) -> None:
-        """Initialize deadline and original content time from the current policy."""
+        """Apply the current policy using the Session's fixed creation time."""
         from openviking.core.ttl import initial_ttl_fields
 
-        snapshot = initial_ttl_fields(self._session_uri, config=config)
-        if not snapshot:
-            self._meta.received_at = self._meta.created_at
-            return
-        self._meta.ttl_days = snapshot["ttl_days"]
-        self._meta.received_at = snapshot["received_at"]
-        self._meta.expires_at = snapshot["expires_at"]
-
-    def _renew_ttl_on_content_update(self, completed_at: str) -> None:
-        """Record successful content time and renew the saved relative duration.
-
-        Older completion retries cannot move the content time or deadline back.
-        Track content time even before TTL is enabled for an existing session.
-        """
-        completed = parse_iso_datetime(completed_at)
-        if self._meta.received_at and completed <= parse_iso_datetime(self._meta.received_at):
-            return
-        self._meta.received_at = format_iso8601(completed)
-        if not self._meta.ttl_days:
-            return
-        from openviking.core.ttl import compute_expires_at
-
-        renewed_expiry = compute_expires_at(completed, self._meta.ttl_days)
-        if self._meta.expires_at:
-            try:
-                if parse_iso_datetime(self._meta.expires_at) >= renewed_expiry:
-                    return
-            except (TypeError, ValueError):
-                pass
-        self._meta.expires_at = format_iso8601(renewed_expiry)
+        snapshot = initial_ttl_fields(
+            self._session_uri,
+            received_at=parse_iso_datetime(self._meta.created_at),
+            config=config,
+        )
+        self._meta.expires_at = snapshot["expires_at"] if snapshot else ""
 
     async def _save_meta(self, lease_ref: Optional[Any] = None) -> None:
         """Persist .meta.json to storage using an optional held PathLock lease."""
@@ -752,6 +718,14 @@ class Session:
             except Exception as exc:
                 if not _is_storage_not_found(exc):
                     raise
+                # Old sessions may have messages without metadata. Check the
+                # live file under the session lock before retaining that fallback:
+                # a removed/expired session must not be recreated from this request.
+                if not await self.is_materialized():
+                    await self._viking_fs._remove_empty_lock_directory(session_path)
+                    raise NotFoundError(self.session_id, "session") from exc
+            if hidden_by_ttl(self._meta.expires_at):
+                raise NotFoundError(self.session_id, "session")
             if event_search_tags is not None:
                 self._meta.event_search_tags = list(event_search_tags)
             if update_auto_commit_policy:
@@ -841,7 +815,6 @@ class Session:
                     batch_content,
                     ctx=self.ctx,
                 )
-            self._renew_ttl_on_content_update(get_current_timestamp())
             await self._save_meta()
         finally:
             await self._viking_fs._async_agfs.pathlock_release(lease)
@@ -1798,7 +1771,7 @@ class Session:
         )
 
         try:
-            done_raw = await self._viking_fs.read_file(
+            await self._viking_fs.read_file(
                 f"{msg.archive_uri}/.done",
                 ctx=self.ctx,
                 include_expired=True,
@@ -1807,14 +1780,6 @@ class Session:
             if not _is_storage_not_found(exc):
                 raise
         else:
-            done = json.loads(done_raw)
-            if not isinstance(done, dict):
-                raise ValueError(f"Invalid Phase 2 completion marker: {msg.archive_uri}")
-            completed_at = str(done.get("phase2_completed_at") or "")
-            if completed_at and self._meta.ttl_days:
-                await self._renew_ttl_after_phase2(
-                    completed_at, archive_uri=msg.archive_uri, task_id=msg.task_id
-                )
             if task.status.value == "completed":
                 return True
             await tracker.complete(
@@ -2461,7 +2426,7 @@ class Session:
             # Phase 2 complete — update meta with telemetry and commit info
             snapshot = telemetry.finish("ok")
             _publish_telemetry_summary_best_effort(snapshot)
-            phase2_completed_at = await self._merge_and_save_commit_meta(
+            await self._merge_and_save_commit_meta(
                 archive_uri=archive_uri,
                 task_id=task_id,
                 archive_index=archive_index,
@@ -2482,7 +2447,6 @@ class Session:
                 completed_memory_steps=self._archives.serialize_completed_memory_steps(
                     completed_memory_steps
                 ),
-                phase2_completed_at=phase2_completed_at,
             )
 
             result_payload = {
@@ -2577,7 +2541,6 @@ class Session:
         coverage_end_archive: Optional[str] = None,
         covered_failed_archives: Optional[List[str]] = None,
         completed_memory_steps: Optional[Dict[str, List[str]]] = None,
-        phase2_completed_at: str = "",
     ) -> None:
         """Write .done marker file to the archive directory."""
         if not self._viking_fs:
@@ -2592,7 +2555,6 @@ class Session:
                 "coverage_end_archive": coverage_end_archive or archive_id,
                 "covered_failed_archives": list(covered_failed_archives or []),
                 "completed_memory_steps": dict(completed_memory_steps or {}),
-                "phase2_completed_at": phase2_completed_at,
             },
             ensure_ascii=False,
         )
@@ -2918,41 +2880,19 @@ class Session:
         archive_uri: str = "",
         task_id: str,
         record_auto_commit_success: bool = False,
-    ) -> str:
-        """Persist one Phase 2 completion and renew its session exactly once."""
+    ) -> None:
+        """Merge Phase 2 results into the original live Session under its lock."""
         if not archive_uri:
             archive_uri = f"{self._session_uri}/history/archive_{archive_index:03d}"
         session_path = self._viking_fs._uri_to_path(self._session_uri, ctx=self.ctx)
         acquire = self._viking_fs._async_agfs.pathlock_acquire_exact
         lease = await acquire(session_path, timeout_secs=_SESSION_PHASE1_LOCK_TIMEOUT_SECONDS)
         try:
-            await validate_commit(
-                self._viking_fs, self.ctx, self._session_uri, archive_uri, task_id, lease_ref=lease
+            latest_meta = SessionMeta.from_dict(
+                await validate_commit(
+                    self._viking_fs, self.ctx, self._session_uri, archive_uri, task_id
+                )
             )
-            latest_meta = self._meta
-            try:
-                meta_content = await self._viking_fs.read_file(
-                    f"{self._session_uri}/.meta.json",
-                    ctx=self.ctx,
-                    include_expired=True,
-                )
-                latest_meta = SessionMeta.from_dict(json.loads(meta_content))
-            except Exception as exc:
-                if self._meta.expires_at or not _is_storage_not_found(exc):
-                    raise
-                latest_meta = self._meta
-
-            archive_meta = await self._archives.read_meta(archive_uri)
-            phase2_completed_at = str(archive_meta.get("phase2_completed_at") or "")
-            try:
-                parse_iso_datetime(phase2_completed_at)
-            except (TypeError, ValueError):
-                phase2_completed_at = get_current_timestamp()
-                await self._merge_archive_meta(
-                    archive_uri,
-                    {"phase2_completed_at": phase2_completed_at},
-                    lease_ref=lease,
-                )
 
             if telemetry_snapshot:
                 llm = telemetry_snapshot.summary.get("tokens", {}).get("llm", {})
@@ -2974,41 +2914,13 @@ class Session:
                 latest_meta.memories_extracted["total"] = (
                     latest_meta.memories_extracted.get("total", 0) + count
                 )
-            latest_meta.last_commit_at = phase2_completed_at
+            latest_meta.last_commit_at = get_current_timestamp()
             latest_meta.message_count = await self._read_live_message_count()
             self._meta = latest_meta
-            self._renew_ttl_on_content_update(phase2_completed_at)
             if record_auto_commit_success:
                 # Mirror the Phase 1 success stamp so the persisted meta reflects
                 # a clean auto-commit even after Phase 2 reloads the latest meta.
                 latest_meta.last_auto_commit_at = get_current_timestamp()
-            await self._save_meta(lease_ref=lease)
-            return phase2_completed_at
-        finally:
-            await self._viking_fs._async_agfs.pathlock_release(lease)
-
-    async def _renew_ttl_after_phase2(
-        self, completed_at: str, *, archive_uri: str, task_id: str
-    ) -> None:
-        """Replay a durable completion without assigning a new success time."""
-        path = self._viking_fs._uri_to_path(self._session_uri, ctx=self.ctx)
-        lease = await self._viking_fs._async_agfs.pathlock_acquire_exact(
-            path, timeout_secs=_SESSION_PHASE1_LOCK_TIMEOUT_SECONDS
-        )
-        try:
-            await validate_commit(
-                self._viking_fs, self.ctx, self._session_uri, archive_uri, task_id, lease_ref=lease
-            )
-            try:
-                raw = await self._viking_fs.read_file(
-                    f"{self._session_uri}/.meta.json", ctx=self.ctx, include_expired=True
-                )
-            except Exception as exc:
-                if _is_storage_not_found(exc):
-                    return
-                raise
-            self._meta = SessionMeta.from_dict(json.loads(raw))
-            self._renew_ttl_on_content_update(completed_at)
             await self._save_meta(lease_ref=lease)
         finally:
             await self._viking_fs._async_agfs.pathlock_release(lease)

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Directory lifetimes and short write admission locks."""
 
-import hashlib
 import json
 from contextlib import asynccontextmanager
 from functools import wraps
@@ -50,18 +49,6 @@ async def read_directory_fields(fs, uri, *, ctx):
             raise
     if not isinstance(fields, dict):
         raise ValueError(f"Invalid TTL metadata: {root}")
-    pending = fields.pop("_ttl_pending", None)
-    if pending:
-        try:
-            raw = fs._handle_agfs_read(
-                await fs._async_agfs.read(fs._uri_to_path(pending["uri"], ctx=ctx))
-            )
-        except Exception as exc:
-            if not is_storage_not_found(exc):
-                raise
-        else:
-            if hashlib.sha256(raw).hexdigest() == pending["sha256"]:
-                return pending["fields"]
     return fields
 
 
@@ -98,11 +85,7 @@ async def _has_content(fs, path):
 
 @asynccontextmanager
 async def content_update(fs, uri, content, *, ctx, lease_ref=None, allow_empty_directory=False):
-    """Initialize a new bucket only after its first successful content write.
-
-    A durable intent lets readers and cleanup recover the write if metadata
-    finalization is interrupted. Failed writes retain the old deadline.
-    """
+    """Register a new bucket before publishing content; roll back failed writes."""
     target = ttl_object_for_uri(uri)
     if target is None:
         yield lease_ref
@@ -132,10 +115,6 @@ async def content_update(fs, uri, content, *, ctx, lease_ref=None, allow_empty_d
             timeout_secs=30.0,
         )
         previous = await read_directory_fields(fs, root, ctx=ctx)
-        if not previous:
-            record = await fs.ttl_registry.get(ctx.account_id, root)
-            if record:
-                previous = {"expires_at": record.expires_at}
         if hidden_by_ttl(previous.get("expires_at")):
             raise NotFoundError(root, "directory")
         if kind == OBJECT_TYPE_SESSION:
@@ -164,54 +143,22 @@ async def content_update(fs, uri, content, *, ctx, lease_ref=None, allow_empty_d
             await release_admission()
             yield body_lease
             return
-        existed = True
-        try:
-            await fs._async_agfs.stat(fs._uri_to_path(root, ctx=ctx), bypass_cache=True)
-        except Exception as exc:
-            if not is_storage_not_found(exc):
-                raise
-            existed = False
-        if existed and not previous:
-            existed = await _has_content(fs, fs._uri_to_path(root, ctx=ctx))
         # Content writes do not renew events. Explicit root policy application
-        # updates existing lifetimes separately.
-        if previous.get("received_at") or previous.get("expires_at") or existed:
+        # updates existing lifetimes separately. The file locks above already
+        # ensure the parent exists; only a bucket without metadata needs a scan.
+        if previous or await _has_content(fs, fs._uri_to_path(root, ctx=ctx)):
             await release_admission()
             yield body_lease
             return
-        desired = {
-            **previous,
-            **(
-                initial_ttl_fields(root, config=await resolve_ttl_config(fs, ctx.account_id))
-                or {"received_at": get_current_timestamp()}
-            ),
-        }
-        try:
-            old = fs._handle_agfs_read(await fs._async_agfs.read(fs._uri_to_path(uri, ctx=ctx)))
-        except Exception as exc:
-            if not is_storage_not_found(exc):
-                raise
-            old = None
-        raw = content.encode("utf-8") if isinstance(content, str) else content
-        if old == raw:
-            await release_admission()
-            yield body_lease
-            return
-        journal = {
-            **(previous or desired),
-            "_ttl_pending": {
-                "uri": uri,
-                "sha256": hashlib.sha256(raw).hexdigest(),
-                "fields": desired,
-            },
-        }
-        await write_directory_fields(fs, root, journal, ctx=ctx, lease_ref=lease)
+        desired = initial_ttl_fields(
+            root, config=await resolve_ttl_config(fs, ctx.account_id, fresh=True)
+        ) or {"received_at": get_current_timestamp()}
+        await write_directory_fields(fs, root, desired, ctx=ctx, lease_ref=lease)
         try:
             yield body_lease
         except BaseException:
             await write_directory_fields(fs, root, previous, ctx=ctx, lease_ref=lease)
             raise
-        await write_directory_fields(fs, root, desired, ctx=ctx, lease_ref=lease)
     finally:
         if lease is not None:
             await fs._async_agfs.pathlock_release(lease)

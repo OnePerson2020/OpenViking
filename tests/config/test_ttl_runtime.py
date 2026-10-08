@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from openviking.config.binding import manager_over_source
-from openviking.config.scope import ConfigScope
+from openviking.config.scope import ConfigScope, ScopeKind
 from openviking.config.source import MemoryConfigSource
 from openviking.config.ttl import resolve_ttl_config
 from openviking.config.validate import ConfigPatchError, normalize_config_keys, validate_patch
@@ -152,5 +152,93 @@ async def test_initial_and_persisted_shorthand_use_the_same_ttl_merge():
 
         assert effective.sessions.mode == "days"
         assert effective.sessions.ttl_days == 30
+    finally:
+        set_openviking_config(original)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cluster", "account"),
+    [
+        ({}, {}),
+        (
+            {"ttl": {"global_default": {"ttl_days": 7}}},
+            {"ttl": {"sessions": {"ttl_days": 15}}},
+        ),
+        (
+            {"ttl": {"sessions": {"mode": "absolute", "ttl_absolute": 4102444800}}},
+            {"ttl": {"sessions": {"mode": "disabled"}}},
+        ),
+        (
+            {"ttl": {"sessions": {"ttl_days": 7}}},
+            {"ttl": {"sessions": None, "global": None}},
+        ),
+        ({"ttl": {"global": None}}, {"ttl": None}),
+        ({"ttl": None}, {}),
+        (
+            {"ttl": {"directories": {"viking://user/u/sessions": {"ttl_days": 7}}}},
+            {"ttl": {"directories": {"viking://user/u/sessions/": {"ttl_days": 15}}}},
+        ),
+        ({"ttl": {"future_option": True}}, {"ttl": {"future_option": True}}),
+    ],
+)
+async def test_current_source_ttl_matches_runtime_resolution(cluster, account):
+    original = get_openviking_config()
+    base = original.model_copy(
+        update={"ttl": TTLConfig(global_default={"mode": "days", "ttl_days": 30})}
+    )
+    source = MemoryConfigSource()
+    await source.update(ConfigScope.cluster(), lambda _: cluster)
+    await source.update(ConfigScope.account("acct"), lambda _: account)
+    manager = manager_over_source(source, base_config=base)
+    fs = SimpleNamespace(runtime_config_manager=manager)
+    try:
+        await manager.initialize()
+        cached = await resolve_ttl_config(fs, "acct")
+        current = await resolve_ttl_config(fs, "acct", fresh=True)
+        assert current == cached
+    finally:
+        set_openviking_config(original)
+
+
+@pytest.mark.asyncio
+async def test_current_source_ttl_does_not_publish_or_fall_back_to_cached_settings(monkeypatch):
+    original = get_openviking_config()
+    base = original.model_copy(
+        update={"ttl": TTLConfig(global_default={"mode": "days", "ttl_days": 30})}
+    )
+    source = MemoryConfigSource()
+    await source.update(ConfigScope.cluster(), lambda _: {"ttl": {"global": {"ttl_days": 7}}})
+    manager = manager_over_source(source, base_config=base)
+    fs = SimpleNamespace(runtime_config_manager=manager)
+    notifications = []
+
+    async def notify(event):
+        notifications.append(event)
+
+    try:
+        await manager.initialize()
+        cached = await resolve_ttl_config(fs, "acct")
+        for scope in (ScopeKind.CLUSTER, ScopeKind.ACCOUNT):
+            manager.add_update_consumer(scope=scope, sections={"ttl"}, consumer=notify)
+        await source.update(
+            ConfigScope.account("acct"), lambda _: {"ttl": {"sessions": {"ttl_days": 15}}}
+        )
+        current = await resolve_ttl_config(fs, "acct", fresh=True)
+        assert current.global_default.ttl_days == 7
+        assert current.sessions.ttl_days == 15
+        await source.delete(ConfigScope.cluster())
+        await source.delete(ConfigScope.account("acct"))
+        assert (await resolve_ttl_config(fs, "acct", fresh=True)) == base.ttl
+        assert (await resolve_ttl_config(fs, "acct")) == cached
+        assert not notifications
+
+        async def fail_load(scope):
+            raise OSError("config source unavailable")
+
+        monkeypatch.setattr(source, "load", fail_load)
+        with pytest.raises(OSError, match="config source unavailable"):
+            await resolve_ttl_config(fs, "acct", fresh=True)
+        assert (await resolve_ttl_config(fs, "acct")) == cached
     finally:
         set_openviking_config(original)

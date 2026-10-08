@@ -14,17 +14,21 @@ Priority is concrete root â†’ type (`user_events`, `peer_events`, `sessions`) â†
 
 Years, months, dates, individual sessions, nested directories and files expose read-only deadlines. Enabling or changing a root policy also updates existing live directories, including previously unmanaged history, while respecting more-specific overrides. Relative expiry uses the original business timestamp plus the new duration; absolute expiry uses the configured deadline. Shortening may expire a directory immediately. Disabling the effective policy clears live deadlines. Expired and deleted objects are never revived.
 
-The configuration request pages through directories, limits concurrency, and awaits metadata and expiry-index writes. Partial failures report incomplete directories; retry the same configuration. For relative policies, history without a reliable original timestamp is reported rather than assigned the configuration update time or directory modTime. Explicit empty event directories can be created and start their lifetime on the first body write.
+The configuration request lists each parent's child directories once, keeps their names, and updates at most eight directories concurrently. Deleting an earlier directory cannot shift later ones out of the work list. The request awaits metadata writes; partial failures report incomplete directories so the same configuration can be retried. For relative policies, history without a reliable original timestamp is reported rather than assigned the configuration update time or directory modTime. Explicit empty event directories can be created and start their lifetime on the first body write.
 
-## Lifetime and renewal
+Policy application and new directory initialization read current settings from the configured source. Each account's batch reuses one resolved policy; ordinary content updates use the saved lifetime. These reads leave the runtime configuration cache and its refresh loop unchanged. The directory name list uses memory proportional to the number of immediate children of the current parent.
 
-Each lifecycle directory stores one `expires_at` in `.meta.json`, plus `ttl_days` for relative retention. `received_at` records the content time. Events can still read legacy `.ttl.json`. AGFS directory metadata updates preserve other business fields in the same file; directory stat exposes its own deadline.
+## Deadline calculation
+
+Each lifecycle directory stores one `expires_at` in `.meta.json`. Relative retention uses a fixed starting time: the existing `created_at` for Sessions, and `received_at` for the first successful event body write. `ttl_days` belongs only to policy configuration. Events can still read legacy `.ttl.json`. AGFS directory metadata updates preserve other business fields in the same file; directory stat exposes its own deadline.
 
 - Events start their lifetime on the first successful content write. The path date only groups events. Later body writes never renew deadlines; explicit root policy changes can adjust live directories.
-- Sessions inherit their root policy on creation. Relative policies renew after successful message appends and completed nonempty commits using the saved `ttl_days`, which explicit root policy changes also update. Replays use the original completion time.
-- Reads, summaries, reindexing, failed writes, empty message batches and empty commits do not renew. Absolute deadlines never renew automatically.
+- Sessions inherit their root policy on creation. Relative deadlines are creation time plus the configured duration; absolute deadlines use the configured timestamp. Appends, completed commits and task replays leave the deadline unchanged.
+- Automatic renewal and renewal recovery are deferred. Users can change library or root policies before expiry to update live directories. Relative deadlines retain the fixed starting time rather than using the policy-change time. Active Sessions still expire at their persisted deadline.
 
 Messages, attachments, archives and L0/L1/L2 share the directory deadline. There is no message-level JSONL retention, `ttl_generation`, per-session override or per-file mode.
+
+TTL adds no deadline fields to body/summary formats or extraction Context objects. Reads obtain the deadline from the owner directory; similarly named body fields remain user content. The first Event write registers its deadline before publishing the body and rolls back a failed write. It needs no extra journal or second metadata write after success.
 
 ## Visibility
 
@@ -34,11 +38,15 @@ Structured objects expose their owner's `expires_at`, explicitly `null` without 
 
 ## Cleanup and performance
 
-Cleanup uses the existing Session commit QueueFS worker framework. The scheduler claims candidates from the durable expiry index with count, byte and time budgets. Physical deletion is spread over a day-scale window by default.
+Cleanup uses the existing Session commit QueueFS worker framework. The scheduler scans owner directory metadata in accounts that have used TTL, sends expired owners to the queue, and continues in bounded batches while the queue drains. After finishing a pass it waits one day by default. The account marker stores no object deadlines; there is no per-object scheduling index or claim lease.
 
-The worker rechecks the owner deadline under its metadata file lock and reuses the existing Session mutation mutex. It deletes files under individual exact locks, retries contention, and uses no tree lock or per-file expiry decision. It removes all owned bodies, messages, attachments, L0/L1, vectors and Meta. Metadata is removed last; registration is removed after storage and index verification. External parent summaries stay unchanged. Deletion triggers no LLM, embedding or summary rebuild.
+The worker rechecks the owner deadline under its metadata file lock and reuses the existing Session mutation mutex. It deletes files under individual exact locks, retries contention, and uses no tree lock or per-file expiry decision. It first deletes and confirms all vectors under the account and owner URI, then removes owned bodies, messages, attachments and L0/L1. It confirms body removal before deleting owner metadata and finally verifies that the directory is gone. Vector records need no `expires_at` field; the existing account and URI fields cover the entire subtree, including vectors whose source file is already missing. External parent summaries stay unchanged. Deletion triggers no LLM, embedding or summary rebuild.
 
-Result batches share owner metadata reads. Retry state lives in the expiry registry, independently of task-history retention. Display and billing may lag physical deletion. OV cleanup alone does not verify cloud billing, gateway forwarding or backup erasure.
+Lock contention, vector deletion failure or remaining body files preserve the owner deadline for the next pass. Restarting the scheduler rediscovers candidates from directory metadata; it needs no durable scan cursor or task-history lookup. A failure of the final confirmation request still reports an error even if the data was already deleted. Pre-existing vector-only orphans whose owner metadata is also gone cannot be discovered by a directory scan; strict deletion can remove them when their owner URI is known.
+
+Scanning costs O(owner directories in accounts that have used TTL) per pass. Each page examines at most `batch_size` owners, checks a time budget between owners, and waits for queued work to drain. This bounds queued deletion work, while storage listing latency and backlog can extend the daily pass. It avoids maintaining a second expiry record on writes, transfers, and restores.
+
+Result batches share owner metadata reads. Directory `count` uses the backend total and converges after physical cleanup, avoiding a full vector scan for real-time expiry counts. Returned content still enforces expiry immediately. Billing may lag physical deletion. OV cleanup alone does not verify cloud billing, gateway forwarding or backup erasure.
 
 ## Interfaces
 

@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Tests for the AGFS resource target used by content tree actions."""
 
-from unittest.mock import AsyncMock
-
 import pytest
 
 from openviking.storage.resource_target import AgfsResourceTarget
@@ -18,8 +16,6 @@ class _FakeVikingFS:
         self.files = dict(existing or {})
         self.written = []
         self.removed = []
-        self.ttl_registry = AsyncMock()
-        self.ttl_registry.get.return_value = None
 
     async def write_file_bytes(self, uri, content, *, ctx=None, lease_ref=None):
         self.files[uri] = content

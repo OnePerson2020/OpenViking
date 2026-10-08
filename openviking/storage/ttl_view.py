@@ -12,7 +12,7 @@ from openviking_cli.utils.config.ttl_config import TTLPolicy
 
 
 def lifetime_fields(fields):
-    return {"expires_at": fields.get("expires_at") or None, "ttl_days": fields.get("ttl_days")}
+    return {"expires_at": fields.get("expires_at") or None}
 
 
 class TTLView:
@@ -43,7 +43,6 @@ class TTLView:
             effective = self._config.resolve_uri_policy(uri, scope)
             return {
                 **lifetime_fields({}),
-                "ttl_days": policy.ttl_days,
                 "policy": policy.model_dump(exclude_none=True),
                 "effective_policy": effective.model_dump(exclude_none=True),
             }
@@ -56,12 +55,7 @@ class TTLView:
         )
 
     async def _read_owner(self, root):
-        fields = await read_directory_fields(self.fs, root, ctx=self.ctx)
-        if not fields:
-            record = await self.fs.ttl_registry.get(self.ctx.account_id, root)
-            if record:
-                return {"expires_at": record.expires_at}
-        return fields
+        return await read_directory_fields(self.fs, root, ctx=self.ctx)
 
     async def visible(self, uri):
         return not hidden_by_ttl((await self.fields(uri)).get("expires_at"))

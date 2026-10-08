@@ -508,21 +508,20 @@ ov admin patch-configuration --account-id default --settings '{"ttl":{"global":{
 
 Omitting `--account-id` selects the cluster layer. Python HTTP SDK methods are
 `admin_get_configuration(account_id)` and `admin_patch_configuration(settings, account_id)`.
-Enabling or changing policy also recalculates existing live directories, including historical ones, using their original business timestamps. Explicit higher-priority overrides remain effective. Expired/deleted objects stay expired/deleted. Disabling the effective policy clears live deadlines. Configuration requests await bounded, paginated metadata/index updates and report partial failures; retrying the same settings repairs incomplete application. For relative policies, history without a reliable original content timestamp is reported and skipped.
-Sessions renew relative TTL after successful appends or completed nonempty commits. Absolute TTL and event content writes do not automatically renew deadlines. Individual directory deadlines remain read-only; modify the root policy to extend live objects. See [Directory TTL](../concepts/17-ttl.md).
+Enabling or changing policy also recalculates existing live directories, including historical ones, using their original business timestamps. Explicit higher-priority overrides remain effective. Expired/deleted objects stay expired/deleted. Disabling the effective policy clears live deadlines. Configuration requests list direct child directories and await bounded metadata updates and report partial failures; retrying the same settings repairs incomplete application. For relative policies, history without a reliable original content timestamp is reported and skipped.
+Relative TTL starts at Session creation or the first successful event body write. Appends, commits, event writes and task retries never extend deadlines automatically. Individual directory deadlines remain read-only; modify the root policy to extend live objects. See [Directory TTL](../concepts/17-ttl.md).
 
-`ttl_cleanup` controls the physical deletion executor independently from TTL policy. It defaults to `enabled: true`, but with every TTL policy disabled there is no expiry work to perform. Turning the executor off pauses new physical deletes and preserves retry state; expired directories and descendants remain logically invisible. The scheduler uses a small scan jitter and a stable per-object cleanup offset so tenants do not all delete at UTC midnight.
+`ttl_cleanup` controls the physical deletion executor independently from TTL policy. It defaults to `enabled: true`, but with every TTL policy disabled there is no expiry work to perform. Turning the executor off pauses new physical deletes and preserves retry state; expired directories and descendants remain logically invisible. The scheduler scans directory metadata in paced batches and waits a day after each completed pass. Queue backpressure and small polling jitter spread work without per-object scheduling records.
 
 | Setting | Default | Purpose |
 |---|---:|---|
 | `ttl_cleanup.enabled` | `true` | Run physical cleanup for objects whose TTL policy has expired |
-| `ttl_cleanup.check_interval_seconds` | `30` | Base interval between registry scans |
+| `ttl_cleanup.check_interval_seconds` | `30` | Base interval between directory scan batches |
 | `ttl_cleanup.scan_jitter_seconds` | `5` | Per-scan random delay to spread scheduler polling |
-| `ttl_cleanup.cleanup_jitter_seconds` | `86400` | Stable per-object delay window after logical expiry; defaults to 24 hours |
-| `ttl_cleanup.batch_size` | `100` | Maximum records claimed per scan |
-| `ttl_cleanup.max_batch_bytes` | `1048576` | Maximum serialized bytes claimed per scan |
-| `ttl_cleanup.scan_time_budget_seconds` | `5` | Maximum registry scan time per pass |
+| `ttl_cleanup.sweep_interval_seconds` | `86400` | Wait after completing a directory scan pass; defaults to one day |
+| `ttl_cleanup.batch_size` | `100` | Maximum owner directories inspected per batch |
+| `ttl_cleanup.scan_time_budget_seconds` | `5` | Scan time budget checked between owners in each batch |
 
-Logical visibility changes at `expires_at`; `cleanup_jitter_seconds` delays only physical deletion. All L0/L1/L2, vectors and Meta inside the expired directory are removed. External parent summaries remain unchanged.
+Logical visibility changes at `expires_at`; the daily scan controls only physical deletion. All L0/L1/L2, vectors and Meta inside the expired directory are removed. External parent summaries remain unchanged.
 
 These are native OV routes. A hosted console or gateway must forward the matching configuration and requests; adding OV routes does not automatically expose them through an existing cloud proxy. This PR does not change public-cloud services or billing.

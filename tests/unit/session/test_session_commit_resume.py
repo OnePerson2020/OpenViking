@@ -201,66 +201,19 @@ async def test_phase1_does_not_renew_frozen_ttl(monkeypatch):
         lambda: SimpleNamespace(enqueue=AsyncMock()),
     )
     session = Session(viking_fs=storage, session_id="session-1", session_uri=session_uri)
-    session.meta.ttl_days = 7
-    session.meta.received_at = "2999-01-01T00:00:00.000Z"
     session.meta.expires_at = "2999-01-08T00:00:00.000Z"
 
     result = await session.commit_async()
 
     assert result["status"] == "accepted"
-    assert session.meta.received_at == "2999-01-01T00:00:00.000Z"
     assert session.meta.expires_at == "2999-01-08T00:00:00.000Z"
-
-
-@pytest.mark.asyncio
-async def test_phase2_completion_renews_from_one_persisted_timestamp():
-    session_uri = "viking://user/default/sessions/session-1"
-    archive_uri = f"{session_uri}/history/archive_001"
-    files = {
-        f"{session_uri}/messages.jsonl": "",
-        f"{session_uri}/.meta.json": json.dumps(
-            {
-                "session_id": "session-1",
-                "ttl_days": 2,
-                "received_at": "2999-01-01T00:00:00.000Z",
-                "expires_at": "2999-01-03T00:00:00.000Z",
-                "ttl_generation": "generation-1",
-            }
-        ),
-        f"{archive_uri}/.meta.json": json.dumps(
-            {"phase2_completed_at": "2999-02-03T04:05:06.000Z"}
-        ),
-    }
-    files.setdefault(f"{session_uri}/.meta.json", json.dumps({"session_id": "session-1"}))
-    marker = json.loads(files.get(f"{archive_uri}/.meta.json", "{}"))
-    marker["phase1"] = {"status": "ready", "queue_message": {"task_id": "task-1"}}
-    files[f"{archive_uri}/.meta.json"] = json.dumps(marker)
-    session = Session(
-        viking_fs=_MemoryVikingFS(files),
-        session_id="session-1",
-        session_uri=session_uri,
-    )
-    await session.load(include_expired=True)
-
-    completed_at = await session._merge_and_save_commit_meta(
-        task_id="task-1",
-        archive_uri=archive_uri,
-        archive_index=1,
-        memories_extracted={},
-        telemetry_snapshot=None,
-    )
-
-    assert completed_at == "2999-02-03T04:05:06.000Z"
-    persisted = json.loads(files[f"{session_uri}/.meta.json"])
-    assert persisted["received_at"] == completed_at
-    assert persisted["expires_at"] == "2999-02-05T04:05:06.000Z"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error_type", [AGFSNetworkError, AGFSTimeoutError])
 async def test_phase2_final_meta_read_outage_is_not_stale(error_type):
     uri = "viking://user/default/sessions/session-1"
-    metadata = json.dumps({"ttl_generation": "g1", "expires_at": "2999-01-01T00:00:00Z"})
+    metadata = json.dumps({"expires_at": "2999-01-01T00:00:00Z"})
     storage = _MemoryVikingFS({uri + "/.meta.json": metadata})
     # The current metadata read must propagate storage errors.
     storage.read_file = AsyncMock(side_effect=error_type("endpoint not found"))
@@ -273,56 +226,6 @@ async def test_phase2_final_meta_read_outage_is_not_stale(error_type):
             telemetry_snapshot=None,
         )
     assert storage.files == {uri + "/.meta.json": metadata}
-
-
-@pytest.mark.asyncio
-async def test_done_recovery_repairs_ttl_with_original_completion_time():
-    session_uri = "viking://user/default/sessions/session-1"
-    archive_uri = f"{session_uri}/history/archive_001"
-    completed_at = "2999-02-03T04:05:06.000Z"
-    files = {
-        f"{session_uri}/messages.jsonl": "",
-        f"{session_uri}/.meta.json": json.dumps(
-            {
-                "session_id": "session-1",
-                "ttl_days": 2,
-                "received_at": "2999-01-01T00:00:00.000Z",
-                "expires_at": "2999-01-03T00:00:00.000Z",
-                "ttl_generation": "generation-1",
-            }
-        ),
-        f"{archive_uri}/.done": json.dumps(
-            {
-                "phase2_completed_at": completed_at,
-                "ttl_generation": "generation-1",
-            }
-        ),
-    }
-    files.setdefault(f"{session_uri}/.meta.json", json.dumps({"session_id": "session-1"}))
-    marker = json.loads(files.get(f"{archive_uri}/.meta.json", "{}"))
-    marker["phase1"] = {"status": "ready", "queue_message": {"task_id": "task-done"}}
-    files[f"{archive_uri}/.meta.json"] = json.dumps(marker)
-    storage = _MemoryVikingFS(files)
-    session = Session(viking_fs=storage, session_id="session-1", session_uri=session_uri)
-    await session.load(include_expired=True)
-    tracker = TaskTracker(_TaskStore())
-    set_task_tracker(tracker)
-    message = SessionCommitMsg(
-        task_id="task-done",
-        session_id="session-1",
-        session_uri=session_uri,
-        archive_uri=archive_uri,
-        user={"account_id": "default", "user_id": "default"},
-    )
-
-    try:
-        assert await session.resume_queued_commit(message) is True
-    finally:
-        set_task_tracker(None)
-
-    persisted = json.loads(files[f"{session_uri}/.meta.json"])
-    assert persisted["received_at"] == completed_at
-    assert persisted["expires_at"] == "2999-02-05T04:05:06.000Z"
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -11,9 +12,11 @@ import pytest
 from openviking.core import ttl
 from openviking.storage.directory_ttl import read_directory_fields
 from openviking.storage.ttl_view import TTLView
+from openviking.utils.time_utils import parse_iso_datetime
 from openviking_cli.utils.config.ttl_config import TTLConfig
 from tests.storage.test_transfer_merge_binding import binding_fs as binding_fs
 from tests.storage.test_transfer_merge_binding import root_ctx
+from tests.unit.storage.ttl_test_storage import read_record
 
 
 @pytest.fixture(autouse=True)
@@ -32,13 +35,15 @@ async def test_event_deadline_is_frozen_on_first_content_write(binding_fs, prefi
     assert await read_directory_fields(fs, root, ctx=ctx) == {}
     await fs.write_file(root + "/a.md", "first", ctx=ctx)
     initial = await read_directory_fields(fs, root, ctx=ctx)
-    assert initial["ttl_days"] == 7
-    assert "ttl_generation" not in initial
+    assert parse_iso_datetime(initial["expires_at"]) - parse_iso_datetime(
+        initial["received_at"]
+    ) == timedelta(days=7)
+    assert set(initial) == {"expires_at", "received_at"}
     for name in ["a.md", "b.txt", ".abstract.md", ".overview.md", "nested/c.json"]:
         await fs.write_file(root + "/" + name, "updated", ctx=ctx)
         assert await read_directory_fields(fs, root + "/" + name, ctx=ctx) == initial
-    assert (await fs.ttl_registry.get(ctx.account_id, root)).expires_at == initial["expires_at"]
-    assert await fs.ttl_registry.get(ctx.account_id, root + "/a.md") is None
+    assert (await read_record(fs, ctx.account_id, root)).expires_at == initial["expires_at"]
+    assert await read_record(fs, ctx.account_id, root + "/a.md") is None
     assert (await fs._async_agfs.stat(fs._uri_to_path(root, ctx=ctx)))["expires_at"] == initial[
         "expires_at"
     ]
@@ -61,15 +66,17 @@ async def test_content_writes_do_not_implicitly_reapply_policy(binding_fs, enabl
     await fs.write_file(root + "/2026/09/28/a.md", "update", ctx=ctx)
     assert await read_directory_fields(fs, root + "/2026/09/28", ctx=ctx) == initial
     await fs.write_file(root + "/2026/09/29/a.md", "next bucket", ctx=ctx)
-    assert (await read_directory_fields(fs, root + "/2026/09/29", ctx=ctx))["ttl_days"] == 30
+    fields = await read_directory_fields(fs, root + "/2026/09/29", ctx=ctx)
+    assert parse_iso_datetime(fields["expires_at"]) - parse_iso_datetime(
+        fields["received_at"]
+    ) == timedelta(days=30)
     assert await TTLView(fs, ctx).fields(root + "/2026/09", is_dir=True) == {
         "expires_at": None,
-        "ttl_days": None,
     }
 
 
 @pytest.mark.asyncio
-async def test_first_write_failure_and_interrupted_finalization(binding_fs, monkeypatch):
+async def test_failed_first_write_does_not_start_lifetime(binding_fs, monkeypatch):
     fs, ctx = binding_fs, root_ctx()
     root = "viking://user/default/memories/events/2026/09/28"
     uri = root + "/a.md"
@@ -85,19 +92,7 @@ async def test_first_write_failure_and_interrupted_finalization(binding_fs, monk
         with pytest.raises(OSError, match="content failure"):
             await fs.write_file(uri, "hello", ctx=ctx)
     assert not (await read_directory_fields(fs, root, ctx=ctx)).get("expires_at")
-    assert await fs.ttl_registry.get(ctx.account_id, root) is None
-
-    async def fail_finalize(path, data, **kwargs):
-        if path.endswith("/28/.meta.json") and b"_ttl_pending" not in data:
-            raise OSError("finalization failure")
-        return await real_write(path, data, **kwargs)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(fs._async_agfs, "write", fail_finalize)
-        with pytest.raises(OSError, match="finalization failure"):
-            await fs.write_file(uri, "durable", ctx=ctx)
-    assert await fs.read_file(uri, ctx=ctx) == "durable"
-    assert (await read_directory_fields(fs, root, ctx=ctx))["ttl_days"] == 7
+    assert await read_record(fs, ctx.account_id, root) is None
 
 
 @pytest.mark.asyncio
@@ -123,7 +118,7 @@ async def test_transfer_bucket_preserves_deadline(binding_fs, operation):
         root, dest, ctx=ctx, **({"recursive": True} if operation == "cp" else {})
     )
     assert await read_directory_fields(fs, dest, ctx=ctx) == initial
-    assert (await fs.ttl_registry.get(ctx.account_id, dest)).expires_at == initial["expires_at"]
+    assert (await read_record(fs, ctx.account_id, dest)).expires_at == initial["expires_at"]
 
 
 @pytest.mark.asyncio
@@ -137,7 +132,9 @@ async def test_concurrent_sibling_writes_share_one_lifetime(binding_fs):
         timeout=10,
     )
     fields = await read_directory_fields(fs, root, ctx=ctx)
-    assert fields["ttl_days"] == 7
+    assert parse_iso_datetime(fields["expires_at"]) - parse_iso_datetime(
+        fields["received_at"]
+    ) == timedelta(days=7)
     assert len(await fs.ls(root, ctx=ctx)) == 8
 
 
@@ -154,9 +151,7 @@ async def test_native_directory_metadata_patch_preserves_business_fields(binding
     await asyncio.gather(
         *[fs._async_agfs.update_directory_metadata(path, {f"field_{i}": i}) for i in range(5)]
     )
-    await fs._async_agfs.update_directory_metadata(
-        path, {"expires_at": "2999-01-01T00:00:00Z", "ttl_days": 7}
-    )
+    await fs._async_agfs.update_directory_metadata(path, {"expires_at": "2999-01-01T00:00:00Z"})
     result = await read_directory_fields(fs, root, ctx=ctx)
     assert result["session_id"] == "metadata" and result["config"] == {"keep": True}
     assert all(result[f"field_{i}"] == i for i in range(5))
@@ -171,7 +166,10 @@ async def test_first_content_in_empty_nested_directory_gets_ttl(binding_fs):
     root = "viking://user/default/memories/events/2026/09/30"
     await fs.mkdir(root + "/nested", ctx=ctx)
     await fs.write_file(root + "/nested/a.md", "first content", ctx=ctx)
-    assert (await read_directory_fields(fs, root, ctx=ctx))["ttl_days"] == 7
+    fields = await read_directory_fields(fs, root, ctx=ctx)
+    assert parse_iso_datetime(fields["expires_at"]) - parse_iso_datetime(
+        fields["received_at"]
+    ) == timedelta(days=7)
 
 
 @pytest.mark.asyncio

@@ -74,7 +74,7 @@ class TTLConfig(BaseModel):
     The default instance leaves the global policy ``disabled``
     and the event/session scopes ``inherit``, so nothing expires unless an
     operator opts in. Policy application also updates existing live directories;
-    only sessions renew automatically after successful content changes.
+    content writes never extend the persisted deadline.
     """
 
     global_default: TTLPolicy = RuntimeField(
@@ -128,25 +128,13 @@ class TTLConfig(BaseModel):
         self.directories = normalized
         return self
 
-    def resolve_uri(self, uri: str, scope: TTLScope) -> Optional[int]:
-        """Resolve one in-scope URI using its nearest directory override.
-
-        URI scope validation intentionally stays in :mod:`openviking.core.ttl`;
-        this config model only performs boundary-safe ancestor matching. This
-        keeps configuration parsing independent from server-side URI modules.
-        """
-        policy = self.resolve_uri_policy(uri, scope)
-        return policy.ttl_days if policy.mode == "days" else None
-
     def resolve_uri_policy(self, uri: str, scope: TTLScope) -> TTLPolicy:
+        """Resolve root > type > global; validated roots cannot nest."""
         normalized_uri = uri.rstrip("/")
-        matches = (
-            (directory, policy)
-            for directory, policy in self.directories.items()
-            if normalized_uri.startswith(directory + "/") or normalized_uri == directory
-        )
-        for _, policy in sorted(matches, key=lambda item: len(item[0]), reverse=True):
-            if policy.mode != "inherit":
+        for directory, policy in self.directories.items():
+            if policy.mode != "inherit" and (
+                normalized_uri.startswith(directory + "/") or normalized_uri == directory
+            ):
                 return policy
         policy = getattr(self, scope)
         return self.global_default if policy.mode == "inherit" else policy
@@ -170,7 +158,6 @@ class TTLCleanupConfig(BaseModel):
     enabled: bool = RuntimeField(default=True)
     check_interval_seconds: float = RuntimeField(default=30.0, ge=1, le=86400)
     scan_jitter_seconds: float = RuntimeField(default=5.0, ge=0, le=86400)
-    cleanup_jitter_seconds: float = RuntimeField(default=86400.0, ge=0, le=86400)
+    sweep_interval_seconds: float = RuntimeField(default=86400.0, ge=1, le=86400)
     batch_size: StrictInt = RuntimeField(default=100, ge=1, le=10000)
-    max_batch_bytes: StrictInt = RuntimeField(default=1_048_576, ge=1024, le=104_857_600)
     scan_time_budget_seconds: float = RuntimeField(default=5.0, gt=0, le=300)

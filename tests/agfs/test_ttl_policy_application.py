@@ -18,11 +18,13 @@ from openviking.service.ttl_policy import patch_ttl_configuration
 from openviking.session.session import Session
 from openviking.storage.directory_ttl import read_directory_fields
 from openviking.utils.time_utils import format_iso8601, parse_iso_datetime
-from openviking_cli.exceptions import FailedPreconditionError
+from openviking_cli.exceptions import FailedPreconditionError, NotFoundError
 from openviking_cli.utils.config import get_openviking_config, set_openviking_config
 from openviking_cli.utils.config.ttl_config import TTLConfig
 from tests.storage.test_transfer_merge_binding import binding_fs as binding_fs
 from tests.storage.test_transfer_merge_binding import root_ctx
+from tests.unit.service.test_ttl_cleanup import _cleanup_once
+from tests.unit.storage.ttl_test_storage import read_record
 
 
 @pytest_asyncio.fixture
@@ -44,7 +46,7 @@ async def patch(fs, manager, ctx, value):
 
 
 @pytest.mark.asyncio
-async def test_startup_applies_saved_policy_to_history_and_repairs_missing_index(configured_fs):
+async def test_startup_applies_saved_policy_to_history_and_is_idempotent(configured_fs):
     from openviking.service.ttl_policy import apply_startup_ttl
 
     fs, manager, ctx = configured_fs
@@ -61,10 +63,7 @@ async def test_startup_applies_saved_policy_to_history_and_repairs_missing_index
     assert parse_iso_datetime(fields["expires_at"]) == parse_iso_datetime(
         original["received_at"]
     ) + timedelta(days=7)
-    record = await fs.ttl_registry.get(ctx.account_id, owner)
-    await fs.ttl_registry.remove_if_current(record)
     await apply_startup_ttl(fs)
-    assert await fs.ttl_registry.get(ctx.account_id, owner) == record
     assert await read_directory_fields(fs, owner, ctx=ctx) == fields
 
 
@@ -87,9 +86,11 @@ async def test_enable_extend_disable_and_reenable_history_from_original_time(con
     await patch(fs, manager, ctx, {"directories": {root: {"mode": "disabled"}}})
     fields = await read_directory_fields(fs, owner, ctx=ctx)
     assert not fields.get("expires_at") and fields["received_at"] == base
-    assert await fs.ttl_registry.get(ctx.account_id, owner) is None
+    assert await read_record(fs, ctx.account_id, owner) is None
     await patch(fs, manager, ctx, {"directories": {root: None}})
-    assert (await read_directory_fields(fs, owner, ctx=ctx))["ttl_days"] == 30
+    assert parse_iso_datetime(
+        (await read_directory_fields(fs, owner, ctx=ctx))["expires_at"]
+    ) == parse_iso_datetime(base) + timedelta(days=30)
 
 
 @pytest.mark.asyncio
@@ -100,7 +101,7 @@ async def test_priority_absolute_sessions_and_shortening_never_revive_expired(co
     base = format_iso8601(datetime.now(timezone.utc) - timedelta(days=2))
     fields = await read_directory_fields(fs, session.uri, ctx=ctx)
     await fs.write_file(
-        session.uri + "/.meta.json", json.dumps({**fields, "received_at": base}), ctx=ctx
+        session.uri + "/.meta.json", json.dumps({**fields, "created_at": base}), ctx=ctx
     )
     root = session.uri.rsplit("/", 1)[0]
     absolute = int((datetime.now(timezone.utc) + timedelta(days=10)).timestamp())
@@ -123,11 +124,8 @@ async def test_priority_absolute_sessions_and_shortening_never_revive_expired(co
         "expires_at"
     ]
     await patch(fs, manager, ctx, {"directories": {root: None}})
-    assert (await read_directory_fields(fs, session.uri, ctx=ctx))["ttl_days"] == 3
     fields = await read_directory_fields(fs, session.uri, ctx=ctx)
-    await fs.write_file(
-        session.uri + "/.meta.json", json.dumps({**fields, "received_at": base}), ctx=ctx
-    )
+    assert parse_iso_datetime(fields["expires_at"]) == parse_iso_datetime(base) + timedelta(days=3)
     await patch(fs, manager, ctx, {"sessions": {"ttl_days": 1}})
     expired = await read_directory_fields(fs, session.uri, ctx=ctx)
     assert not await fs.exists(session.uri, ctx=ctx)
@@ -138,18 +136,18 @@ async def test_priority_absolute_sessions_and_shortening_never_revive_expired(co
 
 
 @pytest.mark.asyncio
-async def test_same_patch_retries_partial_metadata_or_index_failure(configured_fs, monkeypatch):
+async def test_same_patch_retries_partial_metadata_failure(configured_fs, monkeypatch):
     fs, manager, ctx = configured_fs
     owner = "viking://user/default/memories/events/2026/10/01"
     await fs.write_file(owner + "/a.md", "body", ctx=ctx)
     policy = {"user_events": {"mode": "days", "ttl_days": 7}}
     with monkeypatch.context() as m:
-        m.setattr(fs.ttl_registry, "upsert", AsyncMock(side_effect=OSError("index unavailable")))
+        m.setattr(fs, "write_file", AsyncMock(side_effect=OSError("metadata unavailable")))
         with pytest.raises(FailedPreconditionError, match="Retry the same configuration"):
             await patch(fs, manager, ctx, policy)
     await patch(fs, manager, ctx, policy)
     fields = await read_directory_fields(fs, owner, ctx=ctx)
-    assert (await fs.ttl_registry.get(ctx.account_id, owner)).expires_at == fields["expires_at"]
+    assert (await read_record(fs, ctx.account_id, owner)).expires_at == fields["expires_at"]
 
 
 @pytest.mark.asyncio
@@ -205,7 +203,6 @@ async def test_sibling_body_io_is_parallel_with_ttl_off_or_on(configured_fs, mon
 @pytest.mark.asyncio
 async def test_policy_expiration_waits_for_unmaterialized_body_writer(configured_fs, monkeypatch):
     from openviking.service.ttl_cleanup import TTLCleanupService
-    from tests.unit.service.test_ttl_cleanup import _cleanup_once
 
     fs, manager, ctx = configured_fs
     owner = "viking://user/default/memories/events/2026/10/02"
@@ -226,11 +223,10 @@ async def test_policy_expiration_waits_for_unmaterialized_body_writer(configured
         await patch(
             fs, manager, ctx, {"user_events": {"mode": "absolute", "ttl_absolute": 1000000000}}
         )
-        record = await fs.ttl_registry.get(ctx.account_id, owner)
+        record = await read_record(fs, ctx.account_id, owner)
         cleanup = TTLCleanupService(service=SimpleNamespace(viking_fs=fs))
         with pytest.raises(Exception, match="lock|Lock|conflict"):
             await _cleanup_once(cleanup, record)
-        assert await fs.ttl_registry.get(ctx.account_id, owner) == record
     finally:
         finish.set()
         await task
@@ -259,32 +255,6 @@ async def test_explicit_empty_event_mkdir_is_visible_and_unmanaged(
 
 
 @pytest.mark.asyncio
-async def test_disable_retry_repairs_index_even_after_old_deadline(configured_fs, monkeypatch):
-    from openviking.service import ttl_policy
-
-    fs, manager, ctx = configured_fs
-    owner = "viking://user/default/memories/events/2026/10/04"
-    await fs.write_file(owner + "/body.md", "body", ctx=ctx)
-    await patch(fs, manager, ctx, {"user_events": {"mode": "days", "ttl_days": 1}})
-    with monkeypatch.context() as m:
-        m.setattr(
-            fs.ttl_registry,
-            "remove_if_current",
-            AsyncMock(side_effect=OSError("index unavailable")),
-        )
-        with pytest.raises(FailedPreconditionError):
-            await patch(fs, manager, ctx, {"user_events": {"mode": "disabled"}})
-    assert not (await read_directory_fields(fs, owner, ctx=ctx)).get("expires_at")
-    assert await fs.ttl_registry.get(ctx.account_id, owner)
-    # Any old nonempty deadline is now expired. Persisted cleared metadata is
-    # authoritative; an interrupted index removal must still be repairable.
-    monkeypatch.setattr(ttl_policy, "hidden_by_ttl", lambda expiry: bool(expiry))
-    await patch(fs, manager, ctx, {"user_events": {"mode": "disabled"}})
-    assert await fs.ttl_registry.get(ctx.account_id, owner) is None
-    assert await fs.read_file(owner + "/body.md", ctx=ctx) == "body"
-
-
-@pytest.mark.asyncio
 async def test_absolute_policy_uses_deadline_without_fabricating_history_time(configured_fs):
     fs, manager, ctx = configured_fs
     owner = "viking://user/default/memories/events/2000/01/01"
@@ -297,3 +267,164 @@ async def test_absolute_policy_uses_deadline_without_fabricating_history_time(co
     assert not fields.get("received_at") and not fields.get("ttl_days")
     with pytest.raises(FailedPreconditionError):
         await patch(fs, manager, ctx, {"user_events": {"mode": "days", "ttl_days": 7}})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_first", [False, True])
+async def test_session_config_waiting_on_expiry_cannot_restore_old_metadata(
+    configured_fs, monkeypatch, cleanup_first
+):
+    from openviking.service.session_service import SessionService
+    from openviking.service.ttl_cleanup import TTLCleanupService
+
+    fs, manager, ctx = configured_fs
+    service = SessionService(viking_fs=fs)
+    await patch(fs, manager, ctx, {"sessions": {"mode": "days", "ttl_days": 7}})
+    session = await service.create(ctx, session_id="stale-config")
+    old_expiry = session.meta.expires_at
+    entered, resume = asyncio.Event(), asyncio.Event()
+    original = Session.update_config
+
+    async def delayed(self, **kwargs):
+        entered.set()
+        await resume.wait()
+        await original(self, **kwargs)
+
+    monkeypatch.setattr(Session, "update_config", delayed)
+    request = asyncio.create_task(
+        service.update_config(session.session_id, ctx, event_tags=["a=b"])
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await patch(
+            fs, manager, ctx, {"sessions": {"mode": "absolute", "ttl_absolute": 1000000000}}
+        )
+        if cleanup_first:
+            cleanup = TTLCleanupService(service=SimpleNamespace(viking_fs=fs))
+            record = await read_record(fs, ctx.account_id, session.uri)
+            assert (await _cleanup_once(cleanup, record))["deleted"]
+        resume.set()
+        with pytest.raises(NotFoundError):
+            await request
+        fields = await read_directory_fields(fs, session.uri, ctx=ctx)
+        assert fields.get("expires_at") != old_expiry
+        assert not await fs.exists(session.uri, ctx=ctx)
+        assert await fs.exists(session.uri, ctx=ctx, include_expired=True) is not cleanup_first
+    finally:
+        resume.set()
+        await asyncio.gather(request, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_legacy_session_without_metadata_still_accepts_config(configured_fs):
+    from openviking.service.session_service import SessionService
+
+    fs, _, ctx = configured_fs
+    service = SessionService(viking_fs=fs)
+    session = await service.create(ctx, session_id="legacy-config")
+    await session.add_message_async("user", [TextPart("keep this message")])
+    messages = await fs.read_file(session.uri + "/messages.jsonl", ctx=ctx)
+    await fs._async_agfs.rm(fs._uri_to_path(session.uri + "/.meta.json", ctx=ctx))
+    updated = await service.update_config(session.session_id, ctx, event_tags=["case=legacy"])
+    assert updated.meta.event_search_tags == ["case=legacy"]
+    assert not updated.meta.expires_at
+    assert await fs.read_file(session.uri + "/messages.jsonl", ctx=ctx) == messages
+
+
+@pytest.mark.asyncio
+async def test_policy_application_keeps_later_siblings_when_cleanup_removes_an_earlier_one(
+    configured_fs, monkeypatch
+):
+    from openviking.service import ttl_policy
+    from openviking.service.ttl_cleanup import TTLCleanupService
+
+    fs, manager, ctx = configured_fs
+    sessions = [Session(viking_fs=fs, ctx=ctx, session_id=f"case-{i:03}") for i in range(101)]
+    for start in range(0, len(sessions), 8):
+        await asyncio.gather(*(session.ensure_exists() for session in sessions[start : start + 8]))
+    victim = sessions[0].uri
+    fields = await read_directory_fields(fs, victim, ctx=ctx)
+    await fs.write_file(
+        victim + "/.meta.json",
+        json.dumps({**fields, "expires_at": "2000-01-01T00:00:00Z"}),
+        ctx=ctx,
+    )
+    cleanup = TTLCleanupService(service=SimpleNamespace(viking_fs=fs))
+    apply_owner = ttl_policy._apply_owner
+    removed = False
+
+    async def concurrent_cleanup(fs, uri, ctx, *args, **kwargs):
+        nonlocal removed
+        result = await apply_owner(fs, uri, ctx, *args, **kwargs)
+        if uri == sessions[95].uri:
+            record = await read_record(fs, ctx.account_id, victim)
+            assert (await _cleanup_once(cleanup, record))["deleted"]
+            removed = True
+        return result
+
+    monkeypatch.setattr(ttl_policy, "_apply_owner", concurrent_cleanup)
+    await patch(fs, manager, ctx, {"sessions": {"mode": "days", "ttl_days": 7}})
+    assert removed
+    for session in sessions[1:]:
+        fields = await read_directory_fields(fs, session.uri, ctx=ctx)
+        assert parse_iso_datetime(fields["expires_at"]) - parse_iso_datetime(
+            fields["created_at"]
+        ) == timedelta(days=7)
+        assert await read_record(fs, ctx.account_id, session.uri) is not None
+
+
+@pytest.mark.asyncio
+async def test_other_workers_override_wins_and_new_objects_use_saved_policy(
+    configured_fs, monkeypatch
+):
+    from openviking.config.ttl import resolve_ttl_config
+
+    fs, writer, ctx = configured_fs
+    reader = manager_over_source(writer._source, base_config=writer._base_config)
+    await reader.initialize()
+    fs.runtime_config_manager = reader
+    await resolve_ttl_config(fs, ctx.account_id)
+    fs.runtime_config_manager = writer
+    await patch(fs, writer, ctx, {"sessions": {"mode": "days", "ttl_days": 30}})
+    session = Session(viking_fs=fs, ctx=ctx, session_id="other-worker")
+    await session.ensure_exists()
+    fs.runtime_config_manager = reader
+    await patch_ttl_configuration(fs, reader, {"ttl": {"global": {"mode": "days", "ttl_days": 7}}})
+    fields = await read_directory_fields(fs, session.uri, ctx=ctx)
+    assert parse_iso_datetime(fields["expires_at"]) - parse_iso_datetime(
+        fields["created_at"]
+    ) == timedelta(days=30)
+    new_session = Session(viking_fs=fs, ctx=ctx, session_id="fresh-policy")
+    await new_session.ensure_exists()
+    assert parse_iso_datetime(new_session.meta.expires_at) - parse_iso_datetime(
+        new_session.meta.created_at
+    ) == timedelta(days=30)
+
+    # Initialization reads current policies; ordinary writes use saved lifetimes.
+    fs.runtime_config_manager = writer
+    await patch(fs, writer, ctx, {"user_events": {"mode": "days", "ttl_days": 15}})
+    fs.runtime_config_manager = reader
+    event = "viking://user/default/memories/events/2020/01/01"
+    await fs.write_file(event + "/body.md", "body", ctx=ctx)
+    fields = await read_directory_fields(fs, event, ctx=ctx)
+    assert parse_iso_datetime(fields["expires_at"]) - parse_iso_datetime(
+        fields["received_at"]
+    ) == timedelta(days=15)
+    original_load = reader._source.load
+    reads = []
+
+    async def counting_load(scope):
+        reads.append(scope)
+        return await original_load(scope)
+
+    monkeypatch.setattr(reader._source, "load", counting_load)
+    await fs.write_file(event + "/more.md", "more", ctx=ctx)
+    await new_session.add_message_async("user", [TextPart("ordinary append")])
+    assert not reads
+    await patch(fs, reader, ctx, {"sessions": {"ttl_days": 60}})
+    # One fresh pair before the patch and one for the entire account application.
+    assert len(reads) == 4
+    fields = await read_directory_fields(fs, new_session.uri, ctx=ctx)
+    assert parse_iso_datetime(fields["expires_at"]) - parse_iso_datetime(
+        fields["created_at"]
+    ) == timedelta(days=60)

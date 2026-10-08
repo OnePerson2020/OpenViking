@@ -2,7 +2,70 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Minimal raw storage for snapshot lifecycle tests."""
 
-from tests.unit.storage.test_ttl_registry import _MemoryAGFS
+import asyncio
+
+from openviking.pyagfs import AsyncAGFSClient
+from openviking.pyagfs.exceptions import AGFSDirectoryNotEmptyError
+
+
+class _MemoryAGFS(AsyncAGFSClient):
+    def __init__(self):
+        self.files = {}
+        self.ensure_calls = []
+        self.write_calls = []
+        self.read_calls = []
+        self.stat_calls = []
+        self.rm_calls = []
+        self.ls_calls = []
+        self.locks = {}
+
+    async def ensure_parent_dirs(self, path, **kwargs):
+        self.ensure_calls.append(path)
+
+    async def pathlock_acquire_exact(self, path, **kwargs):
+        lock = self.locks.setdefault(path, asyncio.Lock())
+        await lock.acquire()
+        return path
+
+    async def pathlock_release(self, lease):
+        self.locks[lease].release()
+
+    async def write(self, path, data, **kwargs):
+        self.write_calls.append(path)
+        self.files[path] = data
+
+    async def read(self, path, **kwargs):
+        self.read_calls.append(path)
+        if path not in self.files:
+            raise FileNotFoundError(path)
+        return self.files[path]
+
+    async def stat(self, path, **kwargs):
+        self.stat_calls.append(path)
+        if path not in self.files:
+            raise FileNotFoundError(path)
+        return {"path": path}
+
+    async def rm(self, path, **kwargs):
+        self.rm_calls.append(path)
+        if path in self.files:
+            del self.files[path]
+        elif any(key.startswith(path + "/") for key in self.files):
+            raise AGFSDirectoryNotEmptyError("directory not empty")
+        else:
+            raise FileNotFoundError(path)
+
+    async def ls(self, path, *, offset=0, limit=None, sort_by=None, **kwargs):
+        self.ls_calls.append((path, limit))
+        prefix = path.rstrip("/") + "/"
+        names = {}
+        for key in self.files:
+            if key.startswith(prefix):
+                suffix = key[len(prefix) :]
+                name = suffix.split("/")[0]
+                names[name] = {"name": name, "isDir": "/" in suffix}
+        values = [names[name] for name in sorted(names)]
+        return values[offset:] if limit is None else values[offset : offset + limit]
 
 
 class MemoryAGFS(_MemoryAGFS):
@@ -24,3 +87,24 @@ class MemoryAGFS(_MemoryAGFS):
         if any(key.startswith(path.rstrip("/") + "/") for key in self.files):
             return {"isDir": True}
         raise FileNotFoundError(path)
+
+
+async def read_record(fs, account_id, uri):
+    """Read a queue candidate from authoritative directory metadata."""
+    from openviking.core.ttl import ttl_object_for_uri
+    from openviking.server.identity import RequestContext, Role
+    from openviking.storage.directory_ttl import read_directory_fields
+    from openviking.storage.ttl_registry import record_from_fields
+    from openviking_cli.session.user_id import UserIdentifier
+
+    target = ttl_object_for_uri(uri)
+    if target is None or target[1] != uri:
+        return None
+    user_id = uri.removeprefix("viking://").split("/")[1]
+    ctx = RequestContext(user=UserIdentifier(account_id, user_id), role=Role.ROOT)
+    return record_from_fields(
+        uri=uri,
+        object_type=target[0],
+        fields=await read_directory_fields(fs, uri, ctx=ctx),
+        ctx=ctx,
+    )
