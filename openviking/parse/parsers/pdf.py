@@ -808,7 +808,8 @@ class PDFParser(BaseParser):
             return markdown_content, meta
 
         except Exception as e:
-            logger.error(f"MinerU API call failed: {e}")
+            # Some transport errors (e.g. httpx.ReadError) stringify to "".
+            logger.error(f"MinerU API call failed: {type(e).__name__}: {e!r}")
             raise
 
     def _format_table_markdown(self, table: List[List[Optional[str]]]) -> str:
