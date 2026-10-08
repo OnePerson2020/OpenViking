@@ -158,7 +158,14 @@ class ResourceMemoryLinkService:
         source_name: Optional[str] = None,
         timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Bridge add-resource reason extraction through normal session commit."""
+        """Queue add-resource reason extraction as a normal session commit.
+
+        Returns once the commit is queued. All reason commits serialize on one
+        shared session, so waiting here (up to 30 min each) held the caller's
+        AddResource worker behind every earlier reason; one stalled commit
+        blocked resource ingestion for 12h on 2026-10-07. ``timeout`` is kept
+        for caller compatibility and no longer used.
+        """
         reason = (reason or "").strip()
         if not reason:
             return {"status": "skipped", "reason": "empty_reason"}
@@ -174,7 +181,6 @@ class ResourceMemoryLinkService:
         session_id = _RESOURCE_REASON_SESSION_ID
         target_peer_id = _resource_reason_peer_id(ctx, resource_uri)
         commit_result: Dict[str, Any] = {}
-        task_result: Optional[Dict[str, Any]] = None
 
         async with self._reason_session_lock:
             session = await self._session_service.get(
@@ -211,19 +217,11 @@ class ResourceMemoryLinkService:
                 keep_recent_count=0,
             )
 
-        task_id = commit_result.get("task_id")
-        if task_id:
-            task_result = await self._wait_for_commit_task(
-                task_id=str(task_id),
-                ctx=ctx,
-                timeout=timeout,
-            )
         return {
             "status": "success",
             "session_id": session_id,
-            "commit_task_id": task_id,
+            "commit_task_id": commit_result.get("task_id"),
             "archive_uri": commit_result.get("archive_uri"),
-            "commit_task": task_result,
         }
 
     async def on_resource_deleted(
