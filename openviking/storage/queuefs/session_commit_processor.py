@@ -41,7 +41,9 @@ class SessionCommitProcessor(DequeueHandlerBase):
         )
         return msg, ctx
 
-    async def _process(self, msg: SessionCommitMsg, ctx: RequestContext) -> bool:
+    async def _process(
+        self, msg: SessionCommitMsg, ctx: RequestContext
+    ) -> tuple[bool, Optional[str]]:
         # Bind a root observability context so Phase-2 extraction VLM/embedding
         # token events are attributed to the committing account/user rather than
         # "__unknown__" (mirrors SemanticProcessor.on_dequeue). Restore the
@@ -77,7 +79,7 @@ class SessionCommitProcessor(DequeueHandlerBase):
                     account_id=ctx.account_id,
                     user_id=ctx.user.user_id,
                 )
-                return True
+                return True, error
             await session.load()
             with bind_task_context(msg.task_id, ctx.account_id, ctx.user.user_id):
                 processed = await session.resume_queued_commit(msg)
@@ -88,7 +90,15 @@ class SessionCommitProcessor(DequeueHandlerBase):
                     QueueManager.SESSION_COMMIT,
                     msg.to_dict(),
                 )
-            return processed
+                return False, None
+            task = await get_task_tracker().get(
+                msg.task_id,
+                account_id=ctx.account_id,
+                user_id=ctx.user.user_id,
+            )
+            if task is not None and task.status.value == "failed":
+                return True, task.error or "session commit failed"
+            return True, None
         finally:
             reset_root_observability_context(root_context_token)
 
@@ -121,5 +131,7 @@ class SessionCommitProcessor(DequeueHandlerBase):
             msg, ctx = self._parse_message(data)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             return ProcessResult.failed(str(exc))
-        processed = await self._process(msg, ctx)
+        processed, business_error = await self._process(msg, ctx)
+        if business_error:
+            return ProcessResult.failed(business_error)
         return ProcessResult.success() if processed else ProcessResult.requeued()
