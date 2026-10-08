@@ -1116,6 +1116,9 @@ def clone_operation_for_uri(op: ResolvedOperation, uri: str) -> ResolvedOperatio
             "memory_fields": dict(getattr(op, "memory_fields", {}) or {}),
             "old_memory_file_content": getattr(op, "old_memory_file_content", None),
             "source": getattr(op, "source", None),
+            "partial_read_fields": dict(
+                getattr(op, "partial_read_fields", {}) or {}
+            ),
         },
         deep=True,
     )
