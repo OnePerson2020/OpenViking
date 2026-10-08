@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from typing import Any, BinaryIO, Dict, List, Union
 
 from openviking.service.task_tracker_concurrency import run_to_completion
+from openviking.storage.errors import LockAcquisitionError
 
 from .protocols import AGFSSyncClientProtocol
 
@@ -364,6 +365,28 @@ class AsyncAGFSClient:
     # -- pathlock async wrappers ------------------------------------------------
 
     async def _acquire_pathlock(self, method_name: str, *args: Any) -> Dict[str, Any]:
+        """Wait for a lock without parking a worker thread per waiter.
+
+        A native wait holds a ``to_thread`` worker for its whole timeout. Enough
+        waiters exhaust the default executor, and the holder's own release, which
+        needs a worker too, then waits behind them. Poll nonblocking attempts
+        within the same overall deadline instead.
+        """
+        *head, timeout_secs, owner_lease_ref = args
+        if timeout_secs <= 0:
+            return await self._acquire_pathlock_once(method_name, *args)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_secs
+        while True:
+            try:
+                return await self._acquire_pathlock_once(method_name, *head, 0.0, owner_lease_ref)
+            except LockAcquisitionError:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                await asyncio.sleep(min(0.05, remaining))
+
+    async def _acquire_pathlock_once(self, method_name: str, *args: Any) -> Dict[str, Any]:
         """Keep a newly acquired lease owned until cancellation cleanup finishes.
 
         The generic I/O runner intentionally propagates cancellation after its
