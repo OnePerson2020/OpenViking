@@ -353,8 +353,13 @@ class QueueManager:
                     # Ack after successful processing (delete from persistent storage).
                     await queue.ack(msg_id, data)
                 except Exception as e:
-                    # The message remains in processing and will be recovered.
-                    logger.error(f"[QueueManager] Concurrent worker error for {queue.name}: {e}")
+                    # NamedQueue records the failure; do not count it twice.
+                    # The message remains unacknowledged for restart recovery.
+                    logger.error(
+                        "[QueueManager] Concurrent worker error for %s message_id=%s; "
+                        "message retained for restart recovery: %s",
+                        queue.name, msg_id, e, exc_info=True,
+                    )
 
         while not stop_event.is_set():
             # Prune completed tasks
