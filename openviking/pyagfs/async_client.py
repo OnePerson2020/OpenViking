@@ -371,14 +371,44 @@ class AsyncAGFSClient:
         *,
         fs_ctx: Dict[str, str] | None = None,
     ) -> Dict[str, Any]:
-        """Acquire an exact lock on a single path."""
-        return await self.run(
-            "pathlock_acquire_exact",
-            _fs_ctx_or_default(path, fs_ctx),
-            path,
-            timeout_secs,
-            owner_lease_ref,
-        )
+        """Acquire without blocking executor threads needed by the lock holder.
+
+        Waiting in the synchronous binding can exhaust the default executor:
+        the holder may need another exact child lock or IO to release its lease.
+        Poll nonblocking native acquisition with the same overall deadline.
+        """
+        from openviking.storage.errors import LockAcquisitionError
+
+        if timeout_secs <= 0:
+            return await self.run(
+                "pathlock_acquire_exact", _fs_ctx_or_default(path, fs_ctx),
+                path, timeout_secs, owner_lease_ref,
+            )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_secs
+        while True:
+            attempt = asyncio.create_task(self.run(
+                "pathlock_acquire_exact", _fs_ctx_or_default(path, fs_ctx),
+                path, 0.0, owner_lease_ref,
+            ))
+            try:
+                return await asyncio.shield(attempt)
+            except asyncio.CancelledError:
+                # Native acquisition may already have succeeded; reclaim the
+                # lease before propagating cancellation, rather than leaking it.
+                async def settle() -> None:
+                    try:
+                        lease = await attempt
+                    except Exception:
+                        return
+                    await self.pathlock_release(lease, fs_ctx=fs_ctx)
+                await run_to_completion(settle)
+                raise
+            except LockAcquisitionError:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                await asyncio.sleep(min(0.05, remaining))
 
     async def pathlock_acquire_exact_batch(
         self,
