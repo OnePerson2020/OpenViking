@@ -1,6 +1,13 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""Provider-constrained JSON actions; no Python, JSON repair or partial acceptance."""
+"""Provider-constrained JSON actions; no Python and no JSON text repair.
+
+Two deterministic, meaning-preserving adjustments are applied to final
+operations: new-page ids the provider cannot constrain (``minimum``) are
+renumbered, and deletions of types that can never be deleted are dropped.
+When retries are exhausted, ``salvage`` keeps the valid items of the last
+response and drops only the individually invalid ones.
+"""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -12,13 +19,19 @@ from jsonschema import Draft202012Validator, ValidationError
 
 from openviking.models.vlm.base import ToolCall, VLMResponse
 from openviking.session.memory.extraction_output_protocol.json_protocol import JsonExtractionOutputProtocol
+from openviking_cli.utils import get_logger
+
+logger = get_logger(__name__)
 
 
 class StrictActionError(ValueError):
     """Safe, actionable diagnostics: codes/known schema fields, never response text."""
-    def __init__(self, code, message, path=""):
+    def __init__(self, code, message, path="", item=None):
         self.code = code
         self.path = path
+        # (operations key, list index) of the single offending item, when the
+        # error is confined to one item and dropping it is a valid salvage.
+        self.item = item
         super().__init__(f"{code}" + (f" path={path}" if path else "") + f": {message}")
 
 
@@ -107,9 +120,16 @@ class StrictJsonExtractionOutputProtocol(JsonExtractionOutputProtocol):
             raise StrictActionError('RESPONSE_METADATA_MISSING', 'Structured response metadata is required')
         if response.finish_reason != 'stop' or response.has_tool_calls:
             raise StrictActionError('RESPONSE_NOT_COMPLETE', 'Return complete JSON with stop; native tool wrappers are not accepted')
+        self._last_operations = None
         if not isinstance(response.content, str):
             raise StrictActionError('RESPONSE_CONTENT_MISSING', 'JSON string content is required')
         raw = strict_loads(response.content)
+        pending = raw.get('action') if isinstance(raw, dict) else None
+        if isinstance(pending, dict) and isinstance(pending.get('operations'), dict):
+            # Before schema validation: providers do not enforce `minimum`, so a
+            # new event numbered 0/1 would otherwise fail the whole response.
+            self.normalize_new_page_ids(pending['operations'], context)
+            self._last_operations = deepcopy(pending['operations'])
         Draft202012Validator(response_format['json_schema']['schema']).validate(raw)
         action = raw['action']
         if 'tool_calls' in action:
@@ -129,58 +149,155 @@ class StrictJsonExtractionOutputProtocol(JsonExtractionOutputProtocol):
         # Validate complete original business schema before Pydantic's compatibility
         # validators can fill defaults/coerce or silently ignore malformed fields.
         Draft202012Validator(context.operations_model.model_json_schema()).validate(operations)
-        self.validate_business_shape(operations, context)
+        dropped = []
+        self.validate_business_shape(operations, context, dropped)
+        if dropped:
+            logger.warning("Strict extraction dropped unsafe deletion(s): %s", dropped)
         model = context.operations_model.model_validate_json(json.dumps(operations), strict=True)
         return None, model
 
     @staticmethod
-    def validate_business_shape(operations, context):
-        """Preserve the Python protocol's complete-create and safe-delete boundary."""
+    def normalize_new_page_ids(operations, context):
+        """Renumber add-only (event) page ids into the unused >=100 range.
+
+        An add-only item whose id names no existing page is a new page, so the
+        id carries no reference: one below 100 or one repeated by another new
+        item is renumbered. Ids of existing pages and all mutable types are left
+        for the business checks, since there the id may mean a real target.
+        """
+        add_only = [s.memory_type for s in context.schemas if s.operation_mode == 'add_only']
+        if not add_only:
+            return
+        resolve = context.page_id_map.resolve
+        used = {item.get('page_id') for s in context.schemas for item in operations.get(s.memory_type) or []
+                if isinstance(item, dict)}
+        ints = [pid for pid in used if isinstance(pid, int) and not isinstance(pid, bool)]
+        next_id = max([99, *ints]) + 1
+        # New ids already claimed by mutable-type items win over event ids.
+        new_seen = {item.get('page_id') for s in context.schemas if s.memory_type not in add_only
+                    for item in operations.get(s.memory_type) or [] if isinstance(item, dict)}
+        for name in add_only:
+            for item in operations.get(name) or []:
+                pid = item.get('page_id') if isinstance(item, dict) else None
+                if not isinstance(pid, int) or isinstance(pid, bool):
+                    continue
+                if resolve(pid):
+                    continue
+                if pid < 100 or pid in new_seen:
+                    while next_id in used or resolve(next_id):
+                        next_id += 1
+                    used.add(next_id)
+                    item['page_id'] = next_id
+                new_seen.add(item['page_id'])
+
+    @staticmethod
+    def validate_business_shape(operations, context, dropped=None):
+        """Preserve the Python protocol's complete-create and safe-delete boundary.
+
+        A deletion of a type that may never be deleted is dropped (recorded in
+        ``dropped``) rather than failing the response: not deleting is the safe
+        outcome. Item-level errors carry ``item`` so ``salvage`` can drop them.
+        """
         seen = set()
         singleton_targets = set()
         by_type = {s.memory_type: s for s in context.schemas}
         for name, schema in by_type.items():
-            for item in operations.get(name, []):
+            for index, item in enumerate(operations.get(name, [])):
+                at = (name, index)
                 page_id = item['page_id']
                 if page_id in seen:
-                    raise StrictActionError('DUPLICATE_PAGE_ID', 'Combine changes for an existing page or assign distinct new page IDs', name)
+                    raise StrictActionError('DUPLICATE_PAGE_ID', 'Combine changes for an existing page or assign distinct new page IDs', name, at)
                 seen.add(page_id)
                 uri = context.page_id_map.resolve(page_id)
                 if schema.operation_mode == 'add_only' and uri:
-                    raise StrictActionError('ADD_ONLY_EXISTING_PAGE', 'Use a new unregistered page_id >=100 for add-only memories', name)
+                    raise StrictActionError('ADD_ONLY_EXISTING_PAGE', 'Use a new unregistered page_id >=100 for add-only memories', name, at)
                 if not uri:
                     if page_id < 100:
-                        raise StrictActionError('NEW_PAGE_ID_RANGE', 'New memory page_id must be at least 100', name)
+                        raise StrictActionError('NEW_PAGE_ID_RANGE', 'New memory page_id must be at least 100', name, at)
                     for field in schema.fields:
                         # Presence is required. Nullability is decided by the
                         # already-validated original schema, just as in the Python
                         # compiler (e.g. supersedes=null means no replaced experience).
                         if field.name not in item:
-                            raise StrictActionError('NEW_FIELD_MISSING', 'Supply every new-memory field; nullable fields may be null', name + '.' + field.name)
+                            raise StrictActionError('NEW_FIELD_MISSING', 'Supply every new-memory field; nullable fields may be null', name + '.' + field.name, at)
                         if isinstance(item[field.name], dict) and 'blocks' in item[field.name]:
-                            raise StrictActionError('NEW_VALUE_IS_PATCH', 'New memories need complete values, not patch blocks', name + '.' + field.name)
+                            raise StrictActionError('NEW_VALUE_IS_PATCH', 'New memories need complete values, not patch blocks', name + '.' + field.name, at)
                 if not schema.filename_has_variables():
                     target = (name, item.get('peer_id'))
                     if target in singleton_targets:
-                        raise StrictActionError('DUPLICATE_SINGLETON', 'Combine changes into one operation per singleton target', name)
+                        raise StrictActionError('DUPLICATE_SINGLETON', 'Combine changes into one operation per singleton target', name, at)
                     singleton_targets.add(target)
-        for deletion in operations.get('delete_ids', []):
+        deletions = operations.get('delete_ids', [])
+        for index in range(len(deletions) - 1, -1, -1):
+            deletion = deletions[index]
+            at = ('delete_ids', index)
             uri = context.page_id_map.resolve(deletion['delete_page_id'])
             memory = context.read_file_contents.get(uri)
             if memory is None:
-                raise StrictActionError('DELETE_UNREAD', 'Read the existing target before proposing its deletion', 'delete_ids')
+                raise StrictActionError('DELETE_UNREAD', 'Read the existing target before proposing its deletion', 'delete_ids', at)
             resolver = context.memory_type_resolver
             memory_type = resolver(uri) if callable(resolver) else memory.memory_type
-            if callable(resolver) and memory.memory_type and memory_type != memory.memory_type:
-                raise StrictActionError('DELETE_TYPE_CONFLICT', 'Target metadata and authorized schema path disagree', 'delete_ids')
             schema = by_type.get(memory_type)
-            if schema is None or schema.operation_mode == 'add_only':
-                raise StrictActionError('DELETE_TYPE_NOT_ALLOWED', 'Only an unambiguously identified, deletable allowed type may be deleted', 'delete_ids')
+            conflict = callable(resolver) and memory.memory_type and memory_type != memory.memory_type
+            if conflict or schema is None or schema.operation_mode == 'add_only':
+                if dropped is None:
+                    code = 'DELETE_TYPE_CONFLICT' if conflict else 'DELETE_TYPE_NOT_ALLOWED'
+                    raise StrictActionError(code, 'Only an unambiguously identified, deletable allowed type may be deleted', 'delete_ids', at)
+                dropped.append(f"delete_ids[{index}]:{'DELETE_TYPE_CONFLICT' if conflict else 'DELETE_TYPE_NOT_ALLOWED'}")
+                del deletions[index]
+                continue
             if deletion['delete_page_id'] in seen:
-                raise StrictActionError('DELETE_UPDATE_CONFLICT', 'Do not update and delete the same page', 'delete_ids')
+                raise StrictActionError('DELETE_UPDATE_CONFLICT', 'Do not update and delete the same page', 'delete_ids', at)
             replacement = deletion.get('replacement_page_id')
             if replacement is not None and replacement not in seen and not context.page_id_map.resolve(replacement):
-                raise StrictActionError('DELETE_REPLACEMENT_UNKNOWN', 'Reference an existing or newly declared replacement page', 'delete_ids')
+                raise StrictActionError('DELETE_REPLACEMENT_UNKNOWN', 'Reference an existing or newly declared replacement page', 'delete_ids', at)
+
+    def salvage(self, context):
+        """Last resort after retries: keep the valid items of the last final response.
+
+        Drops only items whose own schema or business check fails; any error
+        that is not confined to one item, or a result with nothing left, returns
+        ``(None, dropped)`` so the failure stays visible.
+        """
+        operations = deepcopy(getattr(self, '_last_operations', None))
+        dropped = []
+        if not isinstance(operations, dict):
+            return None, dropped
+        original = sum(len(v) for v in operations.values() if isinstance(v, list))
+        schema = context.operations_model.model_json_schema()
+        allowed = set(schema.get('properties', {}))
+        for key in [k for k in operations if allowed and k not in allowed]:
+            dropped.append(f"{key}:unknown")
+            del operations[key]
+        validator = Draft202012Validator(schema)
+        for _ in range(500):
+            error = next(iter(validator.iter_errors(operations)), None)
+            if error is not None:
+                path = list(error.absolute_path)
+                if (len(path) >= 2 and isinstance(path[1], int)
+                        and isinstance(operations.get(path[0]), list) and path[1] < len(operations[path[0]])):
+                    dropped.append(f"{path[0]}[{path[1]}]:{error.validator}")
+                    del operations[path[0]][path[1]]
+                    continue
+                return None, dropped
+            try:
+                self.validate_business_shape(operations, context, dropped)
+            except StrictActionError as exc:
+                if exc.item is None:
+                    return None, dropped
+                name, index = exc.item
+                dropped.append(f"{name}[{index}]:{exc.code}")
+                del operations[name][index]
+                continue
+            kept = sum(len(v) for v in operations.values() if isinstance(v, list))
+            if original and not kept:
+                return None, dropped
+            try:
+                model = context.operations_model.model_validate_json(json.dumps(operations), strict=True)
+            except ValueError:
+                return None, dropped
+            return model, dropped
+        return None, dropped
 
     def _field_scoped_result(self, result, context):
         if not isinstance(result, dict):
