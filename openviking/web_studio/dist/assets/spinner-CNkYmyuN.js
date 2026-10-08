@@ -1,0 +1,1 @@
+import{u as e,j as i,M as o,h as r}from"./index-Dw3VdSiZ.js";function l({className:a,...s}){const{t:n}=e("common");return i.jsx(o,{role:"status","aria-label":n("ui.loading"),className:r("size-4 animate-spin",a),...s})}export{l as S};
