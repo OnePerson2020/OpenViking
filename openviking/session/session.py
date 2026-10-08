@@ -101,8 +101,15 @@ _SESSION_PHASE1_LOCK_TIMEOUT_SECONDS = 30.0
 # Archives committed without an auto-commit policy (backfills, manual commits)
 # get no extraction batching upstream; a large one then exceeds the long-term
 # input budget in a single call. Split those into budget-sized batches.
+#
+# Batch sizes follow memory.extraction_input_token_budget (one knob, a defensive
+# ceiling below the model context) instead of fixed small batches. The floors
+# keep the previous sizes as the minimum.
 _LONG_TERM_FALLBACK_BATCH_TOKENS = 48_000
 _WM_MAX_CONVERSATION_TOKEN_BUDGET = 12_000
+# Room left in a WM request for the prompt template and checkpoint text, on top
+# of the prior Working Memory (bounded by _WM_MAX_OVERVIEW_OUTPUT_TOKENS).
+_WM_PROMPT_RESERVE_TOKENS = 16_000
 _WM_MAX_OVERVIEW_OUTPUT_TOKENS = 16_000
 _WM_MAX_CHECKPOINT_OUTPUT_TOKENS = 2_048
 _WM_MAX_CHECKPOINT_OUTPUT_TOTAL_TOKENS = 8_192
@@ -111,6 +118,24 @@ _WM_MAX_MODEL_OUTPUT_TOKENS = (
 )
 _WM_PROGRESS_VERSION = 1
 _WM_PROGRESS_FILE = ".working-memory-progress.json"
+
+
+def _extraction_input_budget() -> int:
+    memory_config = getattr(get_openviking_config(), "memory", None)
+    return int(getattr(memory_config, "extraction_input_token_budget", 48_000))
+
+
+def _wm_conversation_token_budget() -> int:
+    """Conversation tokens per WM call: the input budget minus prior WM and prompt."""
+    return max(
+        _WM_MAX_CONVERSATION_TOKEN_BUDGET,
+        _extraction_input_budget() - _WM_MAX_OVERVIEW_OUTPUT_TOKENS - _WM_PROMPT_RESERVE_TOKENS,
+    )
+
+
+def _long_term_fallback_batch_tokens() -> int:
+    """Half the input budget: the rest is left for the schema and memory reads."""
+    return max(_LONG_TERM_FALLBACK_BATCH_TOKENS, _extraction_input_budget() // 2)
 
 
 def _load_render_prompt() -> Callable[..., str]:
@@ -2679,10 +2704,10 @@ class Session:
                             if (
                                 not long_term_limits.enabled
                                 and estimate_extraction_message_tokens(long_term_messages)
-                                > _LONG_TERM_FALLBACK_BATCH_TOKENS
+                                > _long_term_fallback_batch_tokens()
                             ):
                                 long_term_limits = ExtractionBatchLimits(
-                                    max_message_tokens=_LONG_TERM_FALLBACK_BATCH_TOKENS
+                                    max_message_tokens=_long_term_fallback_batch_tokens()
                                 )
                             if long_term_limits.enabled:
                                 extraction_tasks.append(
@@ -3665,7 +3690,7 @@ class Session:
 
         requests = list(checkpoint_requests or [])
         limits = limits or ExtractionBatchLimits()
-        conversation_budget = _WM_MAX_CONVERSATION_TOKEN_BUDGET
+        conversation_budget = _wm_conversation_token_budget()
         if limits.max_message_tokens is not None:
             conversation_budget = min(conversation_budget, limits.max_message_tokens)
         request_anchor_by_message_id: Dict[str, str] = {}
