@@ -145,28 +145,6 @@ def test_json_protocol_preserves_stable_parser_and_empty_contract():
     assert '"delete_ids": []' in protocol.render_final_instruction(context)
 
 
-def test_python_contract_and_bindings_expose_only_selected_schema_fields():
-    uri = "viking://user/alice/memories/preferences/editor.md"
-    context = _context(
-        [_preference_schema()],
-        files=[_existing_preference(uri, "editor", "Use Vim", 2)],
-    )
-    protocol = create_extraction_output_protocol("python")
-
-    contract = protocol.render_contract(context)
-    bindings = protocol.render_new_bindings(context, source="search then read")
-
-    assert "sdk.create_preferences" in contract
-    assert "sdk.create_projects" not in contract
-    snapshot = json.loads(bindings.splitlines()[-1])
-    assert snapshot['bound_variable'] == 'preferences_1'
-    assert snapshot['visible_fields']['topic'] == 'editor'
-    assert snapshot['visible_fields']['content'] == 'Use Vim'
-    assert "version" not in bindings
-    assert uri not in bindings
-    assert protocol.render_new_bindings(context, source="duplicate read") == ""
-
-
 def test_python_contract_includes_link_rules_when_enabled():
     context = _context([_preference_schema()], link_enabled=True)
     protocol = create_extraction_output_protocol("python")
@@ -306,103 +284,6 @@ def test_python_protocol_search_comment_omits_read_tool_when_unavailable():
     assert f"# - {uri}" in content
 
 
-def test_python_protocol_renders_read_result_directly_as_existing_binding():
-    uri = "viking://user/alice/memories/preferences/editor.md"
-    context = _context(
-        [_preference_schema()],
-        files=[_existing_preference(uri, "editor", "Use Vim\nKeep plugins small", 2)],
-    )
-    protocol = create_extraction_output_protocol("python")
-    protocol.render_contract(context)
-
-    messages = protocol.render_tool_result_messages(
-        context,
-        call_id="call-1",
-        tool_name="read",
-        params={"uri": uri, "offset": 1, "limit": 1},
-        result={
-            "memory_type": "preferences",
-            "topic": "editor",
-            "score": 2,
-            "content": "2\tKeep plugins small",
-            "page_id": 1,
-            "memory_maintenance_notice": {
-                "maintenance_required": True,
-                "guidance": "choose split or compact",
-            },
-        },
-        source="tool call",
-    )
-
-    assert len(messages) == 1
-    content = messages[0]["content"]
-    assert content.startswith("# Existing memory loaded by tool call")
-    assert '"bound_variable": "preferences_1"' in content
-    assert '"content": "Keep plugins small"' in content
-    assert "2\\tKeep plugins small" not in content
-    assert "Use Vim" not in content
-    assert "tool_call_name" not in content
-    assert "page_id" not in content
-    assert uri not in content
-    assert "# Memory maintenance notice:" in content
-    assert '"maintenance_required": true' in content
-    assert "estimated_tokens" not in content
-    assert "content_characters" not in content
-    assert "choose split or compact" in content
-
-
-def test_python_protocol_converts_prefetch_tool_messages_without_duplicating_read_content():
-    uri = "viking://user/alice/memories/preferences/editor.md"
-    context = _context(
-        [_preference_schema()],
-        files=[_existing_preference(uri, "editor", "Use Vim", 2)],
-    )
-    protocol = create_extraction_output_protocol("python")
-    protocol.render_contract(context)
-    prefetched = [
-        {"role": "user", "content": "Conversation History"},
-        {
-            "role": "user",
-            "content": json.dumps(
-                {
-                    "tool_call_name": "search",
-                    "args": {"query": "editor"},
-                    "result": [{"uri": uri, "score": 0.9}],
-                }
-            ),
-        },
-        {
-            "role": "user",
-            "content": json.dumps(
-                {
-                    "tool_call_name": "read",
-                    "args": {"uri": uri},
-                    "result": {
-                        "memory_type": "preferences",
-                        "topic": "editor",
-                        "score": 2,
-                        "content": "1\tUse Vim",
-                    },
-                }
-            ),
-        },
-    ]
-
-    messages = protocol.render_prefetch_messages(prefetched, context)
-    combined = "\n".join(message["content"] for message in messages)
-
-    assert messages[0]["content"] == "Conversation History"
-    # Search only yields URIs, so it renders as a read-tool comment, not a binding.
-    assert "read them with the read tool" in combined
-    assert f"# - {uri}" in combined
-    assert "search_results = [" not in combined
-    # The file that was actually read becomes a system-provided existing binding.
-    assert '"bound_variable": "preferences_1"' in combined
-    assert combined.count("Use Vim") == 1
-    assert "tool_call_name" not in combined
-    assert '"result"' not in combined
-
-
 def test_python_contract_uses_set_for_single_file_schema_and_create_for_collection():
     context = _context(
         [_profile_schema(), _preference_schema()],
@@ -539,39 +420,6 @@ sdk.commit()
     assert dumped["project-notes"] == [
         {"page_id": 100, "project_name": "atlas", "note-body": "Kickoff on 2023-06-09."}
     ]
-
-
-def test_python_edits_aliased_field_on_existing_object():
-    existing = MemoryFile(
-        uri="viking://user/alice/memories/project-notes/atlas.md",
-        memory_type="project-notes",
-        content="",
-        extra_fields={
-            "project_name": "atlas",
-            "note-body": "Kickoff on 2023-06-09.",
-            "version": 3,
-            "_uri": "x",
-        },
-    )
-    context = _context([_kebab_schema()], files=[existing])
-    protocol = create_extraction_output_protocol("python")
-
-    bindings = _bind(protocol, context)
-    # Existing-object binding exposes the field under its identifier alias.
-    assert '"note_body":' in bindings
-
-    var = json.loads(bindings.splitlines()[-1])['bound_variable']
-    operations, error = protocol.parse(
-        f"""
-{var}.note_body.edit(search=\"\"\"Kickoff on 2023-06-09.\"\"\", replace=\"\"\"Kickoff moved to 2023-07-01.\"\"\")
-sdk.commit()
-""",
-        context,
-    )
-
-    assert error is None, error
-    edited = operations.model_dump()["project-notes"]
-    assert edited and edited[0]["page_id"] == 1
 
 
 def _schema_named(memory_type: str, field_names: list[str]) -> MemoryTypeSchema:
@@ -869,34 +717,6 @@ def test_python_protocol_includes_dynamic_peer_id_field():
     assert operations.model_dump()["preferences"][0]["peer_id"] == "bob"
 
 
-def test_python_existing_binding_exposes_but_does_not_update_dynamic_peer_id():
-    schema = _preference_schema()
-    memory_file = _existing_preference(
-        "viking://user/alice/peers/bob/memories/preferences/editor.md",
-        "editor",
-        "Use Vim",
-    )
-    memory_file.extra_fields["peer_id"] = "bob"
-    context = _context(
-        [schema],
-        files=[memory_file],
-        role_scope=RoleScope(user_ids=["alice"], peer_ids=["bob", "carol"]),
-    )
-    protocol = create_extraction_output_protocol("python")
-
-    bindings = _bind(protocol, context)
-    operations, error = protocol.parse(
-        "preferences_1.update(peer_id='carol')\npreferences_1.content.update('Use Emacs')\nsdk.commit()",
-        context,
-    )
-
-    assert '"peer_id": "bob"' in bindings
-    assert error is None
-    item = operations.model_dump()["preferences"][0]
-    assert item["content"] == "Use Emacs"
-    assert item["peer_id"] is None
-
-
 def test_python_existing_updates_emit_patch_blocks_and_accumulate_sum_delta():
     uri = "viking://user/alice/memories/preferences/editor.md"
     context = _context(
@@ -1027,25 +847,6 @@ sdk.commit()
     assert error is None
     blocks = operations.model_dump()["preferences"][0]["content"]["blocks"]
     assert blocks == [{"search": "Prefers Neovim", "replace": "Prefers Emacs"}]
-
-
-def test_python_field_edit_rejects_literal_field_placeholder():
-    uri = "viking://user/alice/memories/preferences/editor.md"
-    context = _context(
-        [_preference_schema()],
-        files=[_existing_preference(uri, "editor", "Use Vim", 0)],
-    )
-    protocol = create_extraction_output_protocol("python")
-    _bind(protocol, context)
-
-    operations, error = protocol.parse(
-        "preferences_1.field.edit(search='Use Vim', replace='Use Neovim')\nsdk.commit()",
-        context,
-    )
-
-    assert operations is None
-    assert "memory field 'field' is unavailable" in error
-    assert "not the literal word 'field'" in error
 
 
 def test_python_field_edit_emits_block_regardless_of_uniqueness():

@@ -1211,7 +1211,7 @@ class TestPageIdInstruction:
         assert "## Read Format Rules" in system_content
         assert 'Every memory item you create or edit MUST include "page_id".' in system_content
         assert (
-            "The read tool accepts `uri`, optional `offset` (0-indexed), and optional `limit`."
+            "The read tool accepts `uri`, optional line `offset`/`limit`, and optional exact-field"
             in system_content
         )
         assert "each visible line is prefixed with `line_number<TAB>`" in system_content
@@ -1298,12 +1298,15 @@ class TestFinalOperationsHydration:
         )
 
         context_provider = Mock()
-        schema = SimpleNamespace(memory_type="experiences", fields=[])
+        schema = SimpleNamespace(
+            memory_type="experiences", fields=[], identity_fields=lambda **_: ()
+        )
         context_provider.get_memory_schemas.return_value = [schema]
         context_provider.get_output_language.return_value = "zh-CN"
         context_provider.get_tools.return_value = []
         extract_context = Mock()
         extract_context.page_id_map = PageIdMap()
+        context_provider.partial_read_fields = {}
         extract_context.page_id_map.get_page_id(old_file.uri)
         context_provider.get_extract_context.return_value = extract_context
         context_provider.prefetch = AsyncMock(return_value=[])
@@ -1367,7 +1370,7 @@ class TestExtractionMaxOutputTokens:
 
     def _loop(self, *, vlm_max_tokens, per_loop=None):
         loop = ExtractLoop(
-            vlm=Mock(model="test-model"),
+            vlm=Mock(model="test-model", max_tokens=vlm_max_tokens),
             viking_fs=Mock(),
             context_provider=Mock(),
             isolation_handler=Mock(),
