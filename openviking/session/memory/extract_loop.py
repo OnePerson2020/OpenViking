@@ -228,6 +228,8 @@ class ExtractLoop:
         tools_used: List[Dict[str, Any]] = []
         # Reset format retry counter for each run
         self._format_retry_count = 0
+        self._salvaged_operations = None
+        salvage_count = 0
         patch_repair_count = 0
         resolution_repair_count = 0
         pending_resolution_repair: Optional[Tuple[ResolvedOperations, List]] = None
@@ -345,7 +347,13 @@ class ExtractLoop:
             # Call LLM with tools - model decides: tool calls OR final operations.
             # The VLM backend traces the (human-readable) input and output, so we do
             # not re-dump them here (avoids duplicate, oversized span events).
-            tool_calls, operations = await self._call_llm(messages)
+            if self._salvaged_operations is not None:
+                # Valid items kept from the last response after retries ran out;
+                # they go through the same resolution/refetch/patch checks.
+                tool_calls, operations = None, self._salvaged_operations
+                self._salvaged_operations = None
+            else:
+                tool_calls, operations = await self._call_llm(messages)
 
             if tool_calls:
                 has_unknown_tool = await self._execute_tool_calls(messages, tool_calls, tools_used)
@@ -432,7 +440,12 @@ class ExtractLoop:
                     )
                     continue
                 if partial_errors or (patch_errors and self._output_protocol.name == "json_schema"):
-                    raise ValueError(self._build_patch_repair_instruction(patch_errors))
+                    # The repair attempt is spent: drop only the operations whose
+                    # patch cannot apply instead of discarding the whole archive.
+                    if not self._drop_failed_patch_operations(
+                        final_operations, patch_errors + partial_errors
+                    ):
+                        raise ValueError(self._build_patch_repair_instruction(patch_errors))
                 break
             # If no tool calls either, continue to next iteration (don't break!)
             failure_kind = self._last_llm_failure_kind or "unknown"
@@ -480,6 +493,21 @@ class ExtractLoop:
                         console=True,
                     )
                     break
+                salvage = getattr(self._output_protocol, "salvage", None)
+                # A salvaged result may trigger a refetch and a fresh response that
+                # fails again; allow a few salvages, each bounded by one iteration.
+                if callable(salvage) and salvage_count < 3:
+                    salvaged, dropped = salvage(self._output_context)
+                    if salvaged is not None:
+                        salvage_count += 1
+                        self._salvaged_operations = salvaged
+                        max_iterations += 1
+                        logger.warning(
+                            "Memory extraction kept the valid items of the last response "
+                            "after %s iterations; dropped %d invalid item(s): %s",
+                            iteration, len(dropped), dropped[:20],
+                        )
+                        continue
                 raise ExtractionOutputInvalidError(
                     "Final response could not be parsed as operations: memory extraction "
                     f"output invalid after {max_iterations} iterations (failure_kind={failure_kind}): "
@@ -1614,6 +1642,30 @@ class ExtractLoop:
                             }
                         )
         return errors
+
+    @staticmethod
+    def _drop_failed_patch_operations(
+        operations: ResolvedOperations, errors: List[Dict[str, Any]]
+    ) -> bool:
+        """Remove operations named by patch/partial-read errors; False if nothing survives."""
+        bad_uris = {e["uri"] for e in errors if e.get("uri")}
+        bad_page_ids = {e["page_id"] for e in errors if e.get("page_id") is not None}
+        kept = [
+            op for op in operations.upsert_operations
+            if op.page_id not in bad_page_ids and not bad_uris.intersection(op.uris or [])
+        ]
+        kept_deletes = [m for m in operations.delete_file_contents if m.uri not in bad_uris]
+        if not kept and not kept_deletes:
+            return False
+        logger.warning(
+            "Memory extraction dropped %d operation(s) whose patch could not apply: %s",
+            len(operations.upsert_operations) + len(operations.delete_file_contents)
+            - len(kept) - len(kept_deletes),
+            sorted(bad_uris)[:20],
+        )
+        operations.upsert_operations = kept
+        operations.delete_file_contents = kept_deletes
+        return True
 
     def _build_patch_repair_instruction(self, patch_errors: List[Dict[str, Any]]) -> str:
         return self._output_protocol.render_patch_repair(patch_errors)
