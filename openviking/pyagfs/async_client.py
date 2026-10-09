@@ -404,10 +404,13 @@ class AsyncAGFSClient:
                     await self.pathlock_release(lease, fs_ctx=fs_ctx)
                 await run_to_completion(settle)
                 raise
-            except LockAcquisitionError:
+            except LockAcquisitionError as exc:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
-                    raise
+                    raise LockAcquisitionError(
+                        f"lock acquire timed out after {timeout_secs * 1000:.0f}ms "
+                        f"(polled): {path}"
+                    ) from exc
                 await asyncio.sleep(min(0.05, remaining))
 
     async def pathlock_acquire_exact_batch(
