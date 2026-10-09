@@ -12,14 +12,18 @@ from openviking.observability.context import (
 from openviking.server.identity import RequestContext, Role
 from openviking.service.task_tracker import get_task_tracker
 from openviking.service.task_work_index import bind_task_context
+from openviking.storage.errors import LockAcquisitionError
 from openviking.storage.queuefs.named_queue import DequeueHandlerBase
 from openviking.storage.queuefs.process_result import ProcessResult
 from openviking.storage.queuefs.session_commit_msg import SessionCommitMsg
 from openviking.telemetry.span_models import create_root_span_attributes
 from openviking_cli.session.user_id import UserIdentifier
+from openviking_cli.utils.logger import get_logger
 
 if TYPE_CHECKING:
     from openviking.service.session_service import SessionService
+
+logger = get_logger(__name__)
 
 
 class SessionCommitProcessor(DequeueHandlerBase):
@@ -80,9 +84,14 @@ class SessionCommitProcessor(DequeueHandlerBase):
                     user_id=ctx.user.user_id,
                 )
                 return True, error
-            await session.load()
-            with bind_task_context(msg.task_id, ctx.account_id, ctx.user.user_id):
-                processed = await session.resume_queued_commit(msg)
+            try:
+                await session.load()
+            except LockAcquisitionError as exc:
+                logger.warning("Session %s is locked, requeueing commit: %s", msg.session_id, exc)
+                processed = False
+            else:
+                with bind_task_context(msg.task_id, ctx.account_id, ctx.user.user_id):
+                    processed = await session.resume_queued_commit(msg)
             if not processed:
                 from openviking.storage.queuefs import QueueManager, get_queue_manager
 
