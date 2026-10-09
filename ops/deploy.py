@@ -5,7 +5,7 @@
 
 Export REF (default `local`) -> plan vs live -> local_tests on a temp stage -> [--apply:]
 wait for an idle queue -> back up live files -> stop -> install -> start -> health;
-any failure restores the backup. Then refresh the overlay record (port/merged, stage, files.txt).
+any failure restores the backup, then records the deployed commit in local_patches/deployed.
 Files whose patch was dropped (e.g. merged upstream) go back to the upstream version.
 Code only: data and ov.conf are untouched. Logs: local_patches/deploys/<timestamp>/.
 """
@@ -13,8 +13,8 @@ import argparse, glob, hashlib, io, json, os, shutil, subprocess, tarfile, time,
 from pathlib import Path
 
 H = Path.home(); OV = H/".openviking"; LP = OV/"local_patches"; FORK = LP/"ov-fork"
-SITE = H/".local/lib/python3.13/site-packages"; OVL = LP/"upgrade-0423-20261005"
-RUNLOCAL = LP/"improve-20261006/runlocal.sh"
+SITE = H/".local/lib/python3.13/site-packages"; DEPLOYED = LP/"deployed"  # commit now live
+RUNTESTS = FORK/"ops/test.sh"
 ap = argparse.ArgumentParser(); ap.add_argument("--apply", action="store_true"); ap.add_argument("--ref", default="local")
 ap.add_argument("--idle-wait", type=int, default=7200, help="seconds to wait for an idle queue; 0 = restart now, interrupting running work")
 a = ap.parse_args()
@@ -50,11 +50,12 @@ def systemctl(verb): subprocess.run(["sudo", "-n", "systemctl", verb, "openvikin
 # 1. what to deploy
 ver = [Path(d).name[len("openviking-"):-len(".dist-info")] for d in glob.glob(f"{SITE}/openviking-*.dist-info")]
 assert len(ver) == 1, f"expected one openviking dist-info, got {ver}"
-UP = f"upstream/{ver[0]}"
+UP = f"v{ver[0]}"  # upstream release tag
 git("rev-parse", "--verify", UP)
 rev = git("rev-parse", "--short", a.ref)
-new = git("diff", "--name-only", "--diff-filter=d", UP, a.ref, "--", "openviking", "openviking_cli").split()
-old = (OVL/"port/files.txt").read_text().split()
+overlay = lambda ref: git("diff", "--name-only", "--diff-filter=d", UP, ref, "--", "openviking", "openviking_cli").split()
+cur = DEPLOYED.read_text().strip()
+new, old = overlay(a.ref), overlay(cur)
 exp = OUT/"export"; exp.mkdir()
 tarfile.open(fileobj=io.BytesIO(git("archive", a.ref, *new, "local_tests", raw=True))).extractall(exp, filter="data")
 up = OUT/"upstream"  # pristine versions of files whose patch was dropped
@@ -62,13 +63,14 @@ for f in set(old) - set(new):
     if subprocess.run(["git", "-C", str(FORK), "cat-file", "-e", f"{UP}:{f}"]).returncode == 0:
         (up/f).parent.mkdir(parents=True, exist_ok=True); (up/f).write_bytes(git("show", f"{UP}:{f}", raw=True))
 src = {f: exp/f for f in new} | {f: up/f for f in set(old) - set(new)}  # missing path = delete
-drift = [f for f in old if sha(SITE/f) != sha(OVL/"port/merged"/f)]
-assert not drift, f"live differs from the overlay record, refusing: {drift}"
+drift = [f for f in old if sha(SITE/f) != hashlib.sha256(git("show", f"{cur}:{f}", raw=True)).hexdigest()]
+assert not drift, f"live differs from deployed {cur[:9]}, refusing: {drift}"
 plan = sorted(f for f, s in src.items() if sha(SITE/f) != sha(s))
 log(f"{a.ref}={rev} on {UP}: {len(new)} overlay files, {len(plan)} to change")
 for f in plan: log(f"  {'delete' if not src[f].exists() else 'install' if f in new else 'revert'} {f}")
 if not plan:
-    shutil.rmtree(exp); log("live already matches; nothing to do"); raise SystemExit(0)
+    shutil.rmtree(exp); DEPLOYED.write_text(git("rev-parse", a.ref) + "\n")
+    log("live already matches; nothing to do"); raise SystemExit(0)
 
 # 2. local_tests against live + plan
 stage = OUT/"stage"
@@ -78,7 +80,7 @@ def put(root, f):
     if src[f].exists(): (root/f).parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src[f], root/f)
     elif (root/f).exists(): (root/f).unlink()
 for f in plan: put(stage, f)
-t = subprocess.run([str(RUNLOCAL), str(stage)], env=os.environ | {"TESTS": str(exp/"local_tests")},
+t = subprocess.run([str(RUNTESTS), str(stage)], env=os.environ | {"TESTS": str(exp/"local_tests")},
                    capture_output=True, text=True)
 (OUT/"tests.log").write_text(t.stdout + t.stderr); log("tests: " + (t.stdout.strip().splitlines() or ["?"])[-1])
 shutil.rmtree(stage)
@@ -115,9 +117,7 @@ except Exception as e:
     subprocess.run(["sudo", "-n", "systemctl", "restart", "openviking.service"])
     log(f"rollback {'healthy' if healthy() else 'NOT HEALTHY, check journalctl -u openviking'}"); raise
 
-# 4. overlay record = what is now live
-merged = OVL/"port/merged"; shutil.rmtree(merged); shutil.copytree(exp, merged, ignore=shutil.ignore_patterns("local_tests"))
-for f in plan: put(OVL/"stage", f)
-(OVL/"port/files.txt").write_text("".join(f + "\n" for f in new))
+# 4. record what is now live
+DEPLOYED.write_text(git("rev-parse", a.ref) + "\n")
 shutil.rmtree(exp); shutil.rmtree(up, ignore_errors=True)
-log(f"overlay record updated to {a.ref}={rev}")
+log(f"deployed {a.ref}={rev}")
