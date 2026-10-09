@@ -33,12 +33,14 @@ def _identifier(value: Any) -> str | None:
     return re.sub(r'[^a-zA-Z0-9_.:/,@+-]', '_', str(value))[:256]
 
 
-def _emit(record: dict[str, Any]) -> None:
+def _emit(record: dict[str, Any], file_name: str | None = None) -> None:
     try:
         from openviking_cli.utils.config import get_openviking_config
         path = getattr(get_openviking_config().log, 'model_calls_output', '')
         if not path:
             return
+        if file_name:
+            path = str(Path(path).expanduser().with_name(file_name))
         with _lock:
             sink = _sinks.get(path)
             if sink is None:
@@ -122,6 +124,12 @@ class CallObservation:
         if headers_at is not None:
             fields['after_headers_s'] = round(fields['elapsed_s'] - headers_at, 3)
         _emit(fields)
+        if fields['finish_reason'] == 'length' and choices:
+            # Local-only sample of runaway outputs (2026-10-09 diagnosis); never the prompt.
+            text = str(getattr(getattr(choices[0], 'message', None), 'content', None) or '')
+            _emit({'call_id': fields['call_id'], 'task_id': fields.get('task_id'),
+                   'completion_tokens': fields['completion_tokens'], 'chars': len(text),
+                   'head': text[:500], 'tail': text[-2000:]}, 'truncated-outputs.jsonl')
 
     def __exit__(self, exc_type, exc, tb):
         if exc_type is not None:
