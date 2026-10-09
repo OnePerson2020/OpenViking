@@ -63,6 +63,17 @@ A file whose patch was dropped goes back to the upstream version. Logs + backups
 A new upstream *version* still needs the wheel built (`upgrade-0423-20261005/build.sh`) and
 installed first; deploy.py only manages the overlay files.
 
+## Failed archives and daily check
+
+    python3.13 ops/healthcheck.py                                   # read-only; exit 1 = attention
+    python3.13 ops/retry_archive.py <session_id> <archive_id>       # hash-bound retry, waits while busy
+    python3.13 ops/purge_task.py <backup_dir> <task_id> <session_id> <archive_id>
+
+`purge_task.py` only removes the old failed task record after the archive has `.done`
+(tar backup first, idle-queue restart). On the Mac, `ops/ov-healthcheck-mac.sh --install
+[HH:MM]` installs LaunchAgent `com.openviking.healthcheck` (daily 09:30): runs the check over
+ssh, logs to `~/Library/Logs/ov-healthcheck.log`, posts a notification on problems.
+
 ## Toolchain
 
 `ops/setup-toolchain.sh` rebuilds `local_patches/toolchain/` (cmake for `build.sh`, pytest for
