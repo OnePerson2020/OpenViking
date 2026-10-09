@@ -22,7 +22,7 @@
     "max_retries": 5,
     "timeout": 1800.0,
     "api_key": "<secret>",
-    "max_tokens": 65536
+    "max_tokens": 40000
   },
   "server": {
     "host": "::",

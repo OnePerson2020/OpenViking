@@ -87,8 +87,9 @@ ssh, logs to `~/Library/Logs/ov-healthcheck.log`, posts a notification on proble
 `<secret>`. `python3.13 ops/ovconf.py` diffs live against it (exit 1 on drift);
 `--write` refreshes it, then commit. Non-default values and why:
 
-- `vlm.max_tokens` 65536, `vlm.timeout` 1800: long extractions were truncated at the 32768
-  floor; Ark clamps silently, so 65536 was proven by a real 65536-token generation (784 s).
+- `vlm.max_tokens` 40000, `vlm.timeout` 1800: the largest normal output in 19,839 calls was
+  30,795 tokens; every `finish_reason=length` call was a runaway that fills any cap (65536 only
+  doubled the waste, ~13 min per call). Samples: `logs/truncated-outputs.jsonl`.
 - `memory.extraction_input_token_budget` 160000 / `extraction_read_token_budget` 16000: WM and
   fallback batch sizes derive from these (local patch).
 - `memory.*_format|transport` = `json_schema`: strict extraction (local patch; upstream
