@@ -38,6 +38,19 @@ For v0.4.23 the sdist python sources equal that tag except the generated
 - Upstream has no failed-archive retry route; `621eb8e` is the cleanest
   candidate to propose upstream.
 
+## Backup to GitHub
+
+Remote `github` here is volcengine upstream (fetch only). The backup is branch
+`devbox/local-<ver>` on OnePerson2020/OpenViking, pushed from the Mac (devbox has no
+GitHub credentials):
+
+    cd ~/.openviking/openviking-repo   # remote devbox-fork = devbox:.openviking/local_patches/ov-fork
+    git fetch --no-tags devbox-fork local
+    git -c http.proxyAuthMethod=basic -c credential.helper= \
+        -c credential.helper='!gh auth git-credential' \
+        push --force https://github.com/OnePerson2020/OpenViking.git \
+        devbox-fork/local:refs/heads/devbox/local-0.4.23
+
 ## Deploy
 
     python3.13 ops/deploy.py            # plan + local_tests on a temp stage (dry run)
