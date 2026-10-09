@@ -1,42 +1,38 @@
 # OpenViking local patch series
 
-`upstream` = pristine PyPI sdist python packages (tag `upstream/<ver>`).
-`local` = our patches, one feature per commit, rebased onto each new upstream.
-Replaces hand-merging `upgrade-0423-20261005/port/merged`.
+`local` = our patches, one feature per commit, on top of the upstream release tag
+(`v0.4.23` from volcengine/OpenViking; this clone is shallow at that tag). Upstream's
+README is `README.md`; this file is ours. Fixes worth proposing upstream are
+cherry-picked from `local` onto `upstream/main` on the Mac (`~/.openviking/openviking-repo`).
+Until 2026-10-09 the series sat on a synthetic sdist import; that history is kept in
+branches `sdist-local-0.4.23` / `sdist-upstream-0.4.23`.
 
 ## Upgrade to a new upstream version
 
-    # 1. import the new sdist onto the upstream branch
-    pip download --no-deps --no-binary :all: openviking==X.Y.Z -d /tmp/ovsd
-    tar -xzf /tmp/ovsd/openviking-X.Y.Z.tar.gz -C /tmp/ovsd
-    git checkout upstream && git rm -rq openviking openviking_cli
-    cp -r /tmp/ovsd/openviking-X.Y.Z/{openviking,openviking_cli} .
-    git add -A && git commit -m "openviking X.Y.Z (PyPI sdist, python packages only)"
-    git tag upstream/X.Y.Z
-    # 2. replay the patches; conflicts are per feature
-    git checkout local && git rebase upstream/X.Y.Z
-    # 3. drop commits upstream has absorbed (git rebase skips empty ones)
-
-Alternative to step 1: the `github` remote (volcengine/openviking). devbox has no
-direct GitHub access, so run git through the Mac proxy with `devbox-gh` (on the Mac):
+devbox has no direct GitHub access; fetch the tag through the Mac proxy (on the Mac):
 
     devbox-gh git -C .openviking/local_patches/ov-fork fetch --depth 1 github \
-        refs/tags/vX.Y.Z:refs/tags/github/vX.Y.Z
+        refs/tags/vX.Y.Z:refs/tags/vX.Y.Z
 
-For v0.4.23 the sdist python sources equal that tag except the generated
-`_version.py` and `web_studio/dist` assets, so `git rebase github/vX.Y.Z` also works
-(the build still needs the sdist).
+Then on devbox:
 
-## Next-upgrade notes (upstream main as of 2026-10-08)
+    git rebase --onto vX.Y.Z vOLD local   # conflicts are per feature; drop commits upstream absorbed
+    ops/build.sh X.Y.Z                    # upstream wheel from the PyPI sdist (GLIBC 2.28 build)
+    # install that wheel (stop service, pip install --user --force-reinstall, start), then
+    python3.13 ops/deploy.py --apply      # overlay `local` on it
 
-- #5696 makes Working Memory **opt-in**: default off unless the user's
-  `memory_policy.working_memory.enabled` is true or a commit passes
-  `enable_working_memory=true`. Not an ov.conf key; set the policy before
-  deploying a version that contains it, or WM archives silently stop.
-- `2f1306a` (WM budget batching/resume) builds on upstream `extraction_batch.py`
-  (present since 0.4.23); expect conflicts with #5696/#5591 in session.py.
-- Upstream has no failed-archive retry route; `621eb8e` is the cleanest
-  candidate to propose upstream.
+## Next-upgrade notes (upstream main as of 2026-10-09)
+
+- Trial rebase onto upstream main (2026-10-09): 14/28 commits apply as is; real code
+  conflicts only in "session: Working Memory budget batching…" (vs #5696), the #5591
+  backport (drop: merged upstream) and volcengine_vlm.py (upstream changed 8 lines).
+- #5696 makes Working Memory **opt-in** (default off). WM is already off for user
+  `mayunxiang` (user policy, 2026-10-09), so drop the WM part of "session: Working Memory
+  budget batching, resume and deadline retry" instead of porting it; keep only the
+  48k long-term fallback batching (~10 lines in `Session`, `_long_term_fallback_batch_tokens`).
+- Open upstream PRs (drop the matching local commit once merged, then deploy): #5758
+  orphan race, #5759 VLM deadline, #5765 pathlock polling, #5802 archive retry route,
+  #5812 JSON image redaction, #5818 C++ log append.
 
 ## Backup to GitHub
 
@@ -57,10 +53,11 @@ GitHub credentials):
     python3.13 ops/deploy.py --apply    # wait idle queue, back up, install, health, rollback on failure
 
 Deploys the committed `local` ref (not the worktree) as an overlay over the installed
-upstream wheel and refreshes `upgrade-0423-20261005/port/{merged,files.txt}` + `stage`.
+upstream wheel; the live commit is recorded in `local_patches/deployed`, and deploy refuses
+to run if live files differ from it.
 A file whose patch was dropped goes back to the upstream version. Logs + backups:
 `local_patches/deploys/<timestamp>/`. A new local fix = a new commit on `local`, then deploy.
-A new upstream *version* still needs the wheel built (`upgrade-0423-20261005/build.sh`) and
+A new upstream *version* still needs the wheel built (`ops/build.sh X.Y.Z`) and
 installed first; deploy.py only manages the overlay files.
 
 ## Failed archives and daily check
@@ -76,10 +73,11 @@ ssh, logs to `~/Library/Logs/ov-healthcheck.log`, posts a notification on proble
 
 ## Toolchain
 
-`ops/setup-toolchain.sh` rebuilds `local_patches/toolchain/` (cmake for `build.sh`, pytest for
-`improve-20261006/runlocal.sh` / `runut.sh`). Run it after a devbox wipe. Local tests:
+`ops/setup-toolchain.sh` rebuilds `local_patches/toolchain/` (cmake for `ops/build.sh`, pytest
+for `ops/test.sh`). Run it after a devbox wipe. Tests (offline, throwaway workspace):
 
-    ~/.openviking/local_patches/improve-20261006/runlocal.sh ~/.local/lib/python3.13/site-packages
+    ops/test.sh ~/.local/lib/python3.13/site-packages                              # local_tests
+    TESTS=$PWD ops/test.sh ~/.local/lib/python3.13/site-packages tests/session     # upstream tests
 
 ## Config
 
