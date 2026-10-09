@@ -77,8 +77,22 @@ def test_processor_requeues_when_session_load_is_locked():
                               resume_queued_commit=AsyncMock())
     proc = SessionCommitProcessor(SimpleNamespace(session=Mock(return_value=session)))
     qm = SimpleNamespace(enqueue=AsyncMock())
-    with patch("openviking.storage.queuefs.get_queue_manager", return_value=qm):
+    with patch("openviking.storage.queuefs.get_queue_manager", return_value=qm), \
+         patch("openviking.storage.queuefs.session_commit_processor.asyncio.sleep", AsyncMock()):
         result = asyncio.run(proc.on_dequeue({"data": json.dumps(_msg().to_dict())}))
     session.resume_queued_commit.assert_not_awaited()
     qm.enqueue.assert_awaited_once()
     assert result.outcome.value == "requeued"
+
+
+def test_requeue_pauses_before_reenqueue():
+    session = SimpleNamespace(exists=AsyncMock(return_value=True), load=AsyncMock(),
+                              resume_queued_commit=AsyncMock(return_value=False))
+    proc = SessionCommitProcessor(SimpleNamespace(session=Mock(return_value=session)))
+    order = []
+    qm = SimpleNamespace(enqueue=AsyncMock(side_effect=lambda *a: order.append("enqueue")))
+    async def fake_sleep(s): order.append(("sleep", s))
+    with patch("openviking.storage.queuefs.get_queue_manager", return_value=qm), \
+         patch("openviking.storage.queuefs.session_commit_processor.asyncio.sleep", fake_sleep):
+        result = asyncio.run(proc.on_dequeue({"data": json.dumps(_msg().to_dict())}))
+    assert order == [("sleep", 2.0), "enqueue"] and result.outcome.value == "requeued"
