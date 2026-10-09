@@ -1,0 +1,81 @@
+{
+  "allow_private_networks": true,
+  "storage": {
+    "workspace": "/home/mayunxiang.26/.openviking/data"
+  },
+  "embedding": {
+    "dense": {
+      "provider": "volcengine",
+      "model": "skylark-embedding-vision-251215",
+      "api_key": "<secret>",
+      "api_base": "https://ark.ap-southeast.bytepluses.com/api/v3",
+      "dimension": 1024
+    },
+    "max_concurrent": 20,
+    "max_retries": 6
+  },
+  "vlm": {
+    "provider": "volcengine",
+    "model": "ep-20260924165853-hxg5k",
+    "api_base": "https://ark-cn-beijing.bytedance.net/api/v3",
+    "temperature": 0.0,
+    "max_retries": 5,
+    "timeout": 1800.0,
+    "api_key": "<secret>",
+    "max_tokens": 65536
+  },
+  "server": {
+    "host": "::",
+    "port": 1933,
+    "root_api_key": "<secret>",
+    "agent_evolution": {
+      "enabled": true
+    }
+  },
+  "log": {
+    "level": "WARNING",
+    "output": "/home/mayunxiang.26/.openviking/logs/openviking.log",
+    "rotation": true,
+    "rotation_days": 7,
+    "rotation_interval": "midnight",
+    "model_calls_output": "/home/mayunxiang.26/.openviking/logs/model-calls.jsonl"
+  },
+  "retrieval": {
+    "recall_intent_timeout_s": 20.0
+  },
+  "queue_workers": {
+    "session_commit": {
+      "max_concurrent": 12
+    }
+  },
+  "memory": {
+    "eager_prefetch": false,
+    "extraction_input_token_budget": 160000,
+    "extraction_read_token_budget": 16000,
+    "session_auto_commit": {
+      "enabled": true
+    },
+    "working_memory_transport": "json_schema",
+    "extraction_output_format": "json_schema"
+  },
+  "pdf": {
+    "strategy": "mineru",
+    "mineru_endpoint": "http://127.0.0.1:8666",
+    "mineru_timeout": 900.0
+  },
+  "bot": {
+    "ov_server": {
+      "api_key": "<secret>",
+      "api_key_type": "user"
+    }
+  },
+  "query_planner": {
+    "provider": "volcengine",
+    "model": "ep-20260924165918-mpzlm",
+    "api_base": "https://ark-cn-beijing.bytedance.net/api/v3",
+    "temperature": 0.0,
+    "max_retries": 5,
+    "timeout": 300.0,
+    "api_key": "<secret>"
+  }
+}
