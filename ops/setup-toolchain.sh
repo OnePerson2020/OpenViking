@@ -1,5 +1,5 @@
 #!/bin/bash
-# Rebuild ~/.openviking/local_patches/toolchain (used by build.sh, runlocal.sh, runut.sh).
+# Rebuild ~/.openviking/local_patches/toolchain (used by ops/build.sh, ops/test.sh).
 # Idempotent; re-run after a devbox wipe. Was /tmp/openviking-audit.AhRt7j until 2026-10-09.
 #   build-tools: cmake for the sdist native build (system cmake too old)
 #   testsite:    pytest only; openviking itself comes from <pkg-root> / user site
