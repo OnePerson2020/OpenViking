@@ -7,7 +7,13 @@ set -euo pipefail
 V=$1; LP=$HOME/.openviking/local_patches; B=$LP/build/$V
 mkdir -p "$B"; cd "$B"
 [ -d "openviking-$V" ] || {
-  python3.13 -m pip download -q --no-deps --no-binary :all: "openviking==$V" -d .
+  # not `pip download --no-binary :all:`: that builds every build dependency from source
+  IDX=$(python3.13 -m pip config get global.index-url 2>/dev/null || echo https://pypi.org/simple/)
+  PAGE=${IDX%/}/openviking/
+  HREF=$(curl -fsS "$PAGE" | grep -o "href=\"[^\"]*openviking-$V\.tar\.gz#sha256=[0-9a-f]*" | head -1 | cut -d'"' -f2)
+  [ -n "$HREF" ] || { echo "openviking-$V.tar.gz not on $PAGE" >&2; exit 1; }
+  curl -fsSL -o "openviking-$V.tar.gz" "$(python3.13 -c 'import sys, urllib.parse as u; print(u.urljoin(*sys.argv[1:]))' "$PAGE" "${HREF%%#*}")"
+  echo "${HREF##*=}  openviking-$V.tar.gz" | sha256sum -c --quiet -
   tar -xzf "openviking-$V.tar.gz"
 }
 cd "openviking-$V"
