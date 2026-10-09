@@ -27,6 +27,17 @@ For v0.4.23 the sdist python sources equal that tag except the generated
 `_version.py` and `web_studio/dist` assets, so `git rebase github/vX.Y.Z` also works
 (the build still needs the sdist).
 
+## Next-upgrade notes (upstream main as of 2026-10-08)
+
+- #5696 makes Working Memory **opt-in**: default off unless the user's
+  `memory_policy.working_memory.enabled` is true or a commit passes
+  `enable_working_memory=true`. Not an ov.conf key; set the policy before
+  deploying a version that contains it, or WM archives silently stop.
+- `2f1306a` (WM budget batching/resume) builds on upstream `extraction_batch.py`
+  (present since 0.4.23); expect conflicts with #5696/#5591 in session.py.
+- Upstream has no failed-archive retry route; `621eb8e` is the cleanest
+  candidate to propose upstream.
+
 ## Deploy
 
     python3.13 ops/deploy.py            # plan + local_tests on a temp stage (dry run)
