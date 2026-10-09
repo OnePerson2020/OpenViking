@@ -2916,11 +2916,14 @@ class Session:
             telemetry.set_error("session.commit.phase2", "CANCELLED", "session commit cancelled")
             snapshot = telemetry.finish("cancelled")
             _publish_telemetry_summary_best_effort(snapshot)
-            await self._write_failed_marker(
-                archive_uri,
-                stage="cancelled",
-                error="session commit cancelled",
-            )
+            # Backport of upstream #5591: a shutdown also cancels in-flight work; only
+            # a user-requested cancel is terminal, otherwise the queue redelivers it.
+            if tracker.is_cancellation_requested(task_id):
+                await self._write_failed_marker(
+                    archive_uri,
+                    stage="cancelled",
+                    error="session commit cancelled",
+                )
             raise
         except LockAcquisitionError as e:
             # Contention is transient. Completed steps are checkpointed, so hand
