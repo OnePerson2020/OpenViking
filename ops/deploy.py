@@ -16,7 +16,7 @@ H = Path.home(); OV = H/".openviking"; LP = OV/"local_patches"; FORK = LP/"ov-fo
 SITE = H/".local/lib/python3.13/site-packages"; OVL = LP/"upgrade-0423-20261005"
 RUNLOCAL = LP/"improve-20261006/runlocal.sh"
 ap = argparse.ArgumentParser(); ap.add_argument("--apply", action="store_true"); ap.add_argument("--ref", default="local")
-ap.add_argument("--idle-wait", type=int, default=7200, help="seconds to wait for an idle queue")
+ap.add_argument("--idle-wait", type=int, default=7200, help="seconds to wait for an idle queue; 0 = restart now, interrupting running work")
 a = ap.parse_args()
 OUT = LP/"deploys"/time.strftime("%Y%m%d-%H%M%S"); OUT.mkdir(parents=True)
 
@@ -88,13 +88,16 @@ if not a.apply:
     log("dry run; re-run with --apply to deploy"); raise SystemExit(0)
 
 # 3. deploy
-for i in range(a.idle_wait // 30 + 1):
-    n = busy()
-    if n == 0: break
-    if i % 10 == 0: log(f"waiting for idle queue: {n} running/pending")
-    time.sleep(30)
+if a.idle_wait == 0:  # forced: QueueFS redelivers interrupted commits after the restart
+    log(f"not waiting for idle queue: {busy()} running/pending will be interrupted")
 else:
-    raise SystemExit("queue never idle; nothing changed")
+    for i in range(a.idle_wait // 30 + 1):
+        n = busy()
+        if n == 0: break
+        if i % 10 == 0: log(f"waiting for idle queue: {n} running/pending")
+        time.sleep(30)
+    else:
+        raise SystemExit("queue never idle; nothing changed")
 bk = OUT/"backup"
 for f in plan:
     if (SITE/f).exists(): (bk/f).parent.mkdir(parents=True, exist_ok=True); shutil.copy2(SITE/f, bk/f)
