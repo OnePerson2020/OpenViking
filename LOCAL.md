@@ -23,9 +23,10 @@ Then on devbox:
 
 ## Next-upgrade notes (upstream main as of 2026-10-09)
 
-- Trial rebase onto upstream main (2026-10-09): 14/28 commits apply as is; real code
-  conflicts only in "session: Working Memory budget batching…" (vs #5696), the #5591
-  backport (drop: merged upstream) and volcengine_vlm.py (upstream changed 8 lines).
+- Trial rebase onto upstream main 7967eca (2026-10-09): 24/30 commits apply as is. Code
+  conflicts: "session: Working Memory budget batching…" and "memory: improve extraction
+  robustness" (session.py, vs #5696), the #5591 backport (drop: merged upstream), and
+  volcengine_vlm.py (upstream changed 8 lines; the call-diagnostics commit cascades from it).
 - #5696 makes Working Memory **opt-in** (default off). WM is already off for user
   `mayunxiang` (user policy, 2026-10-09), so drop the WM part of "session: Working Memory
   budget batching, resume and deadline retry" instead of porting it; keep only the
