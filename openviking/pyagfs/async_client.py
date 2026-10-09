@@ -380,10 +380,14 @@ class AsyncAGFSClient:
         while True:
             try:
                 return await self._acquire_pathlock_once(method_name, *head, 0.0, owner_lease_ref)
-            except LockAcquisitionError:
+            except LockAcquisitionError as exc:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
-                    raise
+                    # The native error describes only the last 0 ms attempt.
+                    raise LockAcquisitionError(
+                        f"lock acquire timed out after {timeout_secs * 1000:.0f}ms "
+                        f"(polled): {head[-1]}"
+                    ) from exc
                 await asyncio.sleep(min(0.05, remaining))
 
     async def _acquire_pathlock_once(self, method_name: str, *args: Any) -> Dict[str, Any]:
