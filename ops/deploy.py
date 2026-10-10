@@ -87,8 +87,9 @@ if not plan and not a.wheel:
 
 # 2. local_tests + edited upstream tests against live + plan
 stage = OUT/"stage"
-for d in ("openviking", "openviking_cli"):
-    shutil.copytree(BASE/d, stage/d, ignore=shutil.ignore_patterns("__pycache__"), symlinks=True)
+for d in (BASE/f"openviking-{ver[0]}.dist-info/top_level.txt").read_text().split():  # e.g. +openviking_gateway in 0.5
+    if (BASE/d).is_dir():
+        shutil.copytree(BASE/d, stage/d, ignore=shutil.ignore_patterns("__pycache__"), symlinks=True)
 def put(root, f):
     if src[f].exists(): (root/f).parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src[f], root/f)
     elif (root/f).exists(): (root/f).unlink()
