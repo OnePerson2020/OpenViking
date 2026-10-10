@@ -50,7 +50,7 @@ GitHub credentials):
 
 ## Deploy
 
-    python3.13 ops/deploy.py            # plan + local_tests on a temp stage (dry run)
+    python3.13 ops/deploy.py            # plan + tests on a temp stage (dry run)
     python3.13 ops/deploy.py --apply    # wait idle queue, back up, install, health, rollback on failure
 
 Deploys the committed `local` ref (not the worktree) as an overlay over the installed
@@ -79,6 +79,10 @@ for `ops/test.sh`). Run it after a devbox wipe. Tests (offline, throwaway worksp
 
     ops/test.sh ~/.local/lib/python3.13/site-packages                              # local_tests
     TESTS=$PWD ops/test.sh ~/.local/lib/python3.13/site-packages tests/session     # upstream tests
+
+Upstream tests that a patch changes are edited in place under `tests/` (never copied into
+`local_tests/`); `deploy.py` runs `local_tests` plus every upstream test file that differs
+from the release tag.
 
 ## Config
 

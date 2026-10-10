@@ -3,7 +3,7 @@
     python3.13 ov-fork/ops/deploy.py            # plan + test only (dry run)
     python3.13 ov-fork/ops/deploy.py --apply    # deploy
 
-Export REF (default `local`) -> plan vs live -> local_tests on a temp stage -> [--apply:]
+Export REF (default `local`) -> plan vs live -> tests on a temp stage -> [--apply:]
 wait for an idle queue -> back up live files -> stop -> install -> start -> health;
 any failure restores the backup, then records the deployed commit in local_patches/deployed.
 Files whose patch was dropped (e.g. merged upstream) go back to the upstream version.
@@ -56,8 +56,10 @@ rev = git("rev-parse", "--short", a.ref)
 overlay = lambda ref: git("diff", "--name-only", "--diff-filter=d", UP, ref, "--", "openviking", "openviking_cli").split()
 cur = DEPLOYED.read_text().strip()
 new, old = overlay(a.ref), overlay(cur)
+# upstream test files our commits edit run too (with tests/ for their conftests)
+edited_tests = git("diff", "--name-only", "--diff-filter=d", UP, a.ref, "--", "tests").split()
 exp = OUT/"export"; exp.mkdir()
-tarfile.open(fileobj=io.BytesIO(git("archive", a.ref, *new, "local_tests", raw=True))).extractall(exp, filter="data")
+tarfile.open(fileobj=io.BytesIO(git("archive", a.ref, *new, "local_tests", "tests", raw=True))).extractall(exp, filter="data")
 up = OUT/"upstream"  # pristine versions of files whose patch was dropped
 for f in set(old) - set(new):
     if subprocess.run(["git", "-C", str(FORK), "cat-file", "-e", f"{UP}:{f}"]).returncode == 0:
@@ -72,7 +74,7 @@ if not plan:
     shutil.rmtree(exp); DEPLOYED.write_text(git("rev-parse", a.ref) + "\n")
     log("live already matches; nothing to do"); raise SystemExit(0)
 
-# 2. local_tests against live + plan
+# 2. local_tests + edited upstream tests against live + plan
 stage = OUT/"stage"
 for d in ("openviking", "openviking_cli"):
     shutil.copytree(SITE/d, stage/d, ignore=shutil.ignore_patterns("__pycache__"), symlinks=True)
@@ -80,11 +82,14 @@ def put(root, f):
     if src[f].exists(): (root/f).parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src[f], root/f)
     elif (root/f).exists(): (root/f).unlink()
 for f in plan: put(stage, f)
-t = subprocess.run([str(RUNTESTS), str(stage)], env=os.environ | {"TESTS": str(exp/"local_tests")},
-                   capture_output=True, text=True)
-(OUT/"tests.log").write_text(t.stdout + t.stderr); log("tests: " + (t.stdout.strip().splitlines() or ["?"])[-1])
+runs = [("local_tests", exp/"local_tests", [])] + ([("upstream", exp, edited_tests)] if edited_tests else [])
+for name, cwd, args in runs:
+    t = subprocess.run([str(RUNTESTS), str(stage), *args], env=os.environ | {"TESTS": str(cwd)},
+                       capture_output=True, text=True)
+    (OUT/f"tests-{name}.log").write_text(t.stdout + t.stderr)
+    log(f"tests {name}: " + (t.stdout.strip().splitlines() or ["?"])[-1])
+    assert t.returncode == 0, f"{name} tests failed; see tests-{name}.log"
 shutil.rmtree(stage)
-assert t.returncode == 0, "local_tests failed; see tests.log"
 if not a.apply:
     shutil.rmtree(exp); shutil.rmtree(up, ignore_errors=True)
     log("dry run; re-run with --apply to deploy"); raise SystemExit(0)
