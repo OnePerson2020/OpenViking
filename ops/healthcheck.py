@@ -4,7 +4,7 @@
     python3.13 ops/healthcheck.py --json
 
 Checks: /health; archives with .failed.json or stuck without .done > STUCK_H hours;
-failed tasks; queue errors/backlog; ERROR lines in today's openviking.log.
+failed tasks; queue errors/backlog; ERROR lines in the last 24 h of openviking.log.
 """
 import glob, json, os, re, sys, time, urllib.request
 from pathlib import Path
@@ -43,16 +43,18 @@ if info["healthy"]:
             if errors: issues.append(f"queue {name}: {errors} error(s)")
             if pending > 50: issues.append(f"queue {name}: {pending} pending")
 
-log = OV/"logs/openviking.log"; today = time.strftime("%Y-%m-%d")
-errs = [l.strip()[:200] for l in open(log, errors="replace")
-        if l.startswith(today) and " - ERROR - " in l] if log.exists() else []
-info["log_errors_today"] = errs[-10:]
-if errs: issues.append(f"{len(errs)} ERROR log line(s) today")
+# last 24 h, so a morning run also sees yesterday's daytime (rotated at midnight)
+log = OV/"logs/openviking.log"; since = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 86400))
+logs = [Path(f"{log}.{time.strftime('%Y-%m-%d', time.localtime(now - 86400))}"), log]
+errs = [l.strip()[:200] for f in logs if f.exists() for l in open(f, errors="replace")
+        if l[:19] >= since and l[:4].isdigit() and " - ERROR - " in l]
+info["log_errors_24h"] = errs[-10:]
+if errs: issues.append(f"{len(errs)} ERROR log line(s) in 24h")
 
 info["issues"] = issues
 if "--json" in sys.argv: print(json.dumps(info, ensure_ascii=False, indent=1))
 else:
     print("OK" if not issues else "ATTENTION: " + "; ".join(issues))
-    for k in ("failed_archives", "stuck_archives", "failed_tasks", "log_errors_today"):
+    for k in ("failed_archives", "stuck_archives", "failed_tasks", "log_errors_24h"):
         for x in info.get(k, [])[:10]: print(f"  {k}: {x}")
 sys.exit(1 if issues else 0)

@@ -2728,7 +2728,9 @@ class Session:
                         extraction_error: Optional[BaseException] = None
                         for label, result in zip(extraction_labels, _results, strict=True):
                             if isinstance(result, Exception):
-                                logger.error(
+                                # lock contention is requeued below, not a failure
+                                (logger.warning if isinstance(result, LockAcquisitionError)
+                                 else logger.error)(
                                     "Phase 2 step %s failed: %s",
                                     label,
                                     result,
