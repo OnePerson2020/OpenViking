@@ -143,6 +143,15 @@ class ProtocolTests(TestCase):
             {'page_id': 100, 'topic': None, 'content': 'x', 'score': 0}]
         with self.assertRaises(ValueError): self.parse()
 
+    def test_add_only_fields_offer_no_patch_branch(self):
+        ctx = _context([_preference_schema(operation_mode='add_only')])
+        fields = self.protocol.response_format(ctx, [])['json_schema']['schema']['$defs']['PreferencesData']['properties']
+        self.assertNotIn('StrPatch', json.dumps(fields))
+        self.assertIn('StrPatch', json.dumps(self.fmt['json_schema']['schema']['$defs']['PreferencesData']))
+
+    def test_contract_does_not_repeat_the_response_schema(self):
+        self.assertNotIn('"properties"', self.protocol.render_contract(self.ctx))
+
     def test_original_schema_unmodified(self):
         old = self.ctx.operations_model.model_json_schema(); snapshot = deepcopy(old)
         strict_schema(old); self.assertEqual(old, snapshot)
