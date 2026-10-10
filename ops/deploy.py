@@ -124,12 +124,17 @@ else:
         raise SystemExit("queue never idle; nothing changed")
 systemctl("stop")
 if a.wheel:  # no file-level rollback across versions: undo = rerun with the previous wheel
-    subprocess.run(["python3.13", "-m", "pip", "install", "-q", "--user", "--force-reinstall", "--no-deps",
-                    str(a.wheel)], check=True)
-    for f in plan: put(SITE, f)
+    prev = DEPLOYED_WHEEL.read_text().strip() if DEPLOYED_WHEEL.exists() else "<previous wheel>"
+    try:
+        subprocess.run(["python3.13", "-m", "pip", "install", "-q", "--user", "--force-reinstall", "--no-deps",
+                        str(a.wheel)], check=True)
+        for f in plan: put(SITE, f)
+    except Exception as e:  # never leave the service stopped
+        log(f"FAILED {e!r}; starting whatever is installed")
+        subprocess.run(["sudo", "-n", "systemctl", "start", "openviking.service"])
+        raise SystemExit(f"install failed; roll back: deploy.py --apply --wheel {prev} --ref {cur}")
     systemctl("start")
     if not healthy():
-        prev = DEPLOYED_WHEEL.read_text().strip() if DEPLOYED_WHEEL.exists() else "<previous wheel>"
         raise SystemExit(f"NOT HEALTHY on {a.wheel.name}; roll back: deploy.py --apply --wheel {prev} --ref {cur}")
     DEPLOYED_WHEEL.write_text(f"{a.wheel}\n")
 else:

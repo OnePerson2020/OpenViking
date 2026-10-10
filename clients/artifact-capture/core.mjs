@@ -477,10 +477,7 @@ export function scanCodex(entries, { cwd } = {}) {
 
 const PI_WRITE_TOOLS = new Set(["write", "edit"]);
 
-/**
- * pi branch entries -> artifact candidates. pi's own image-capture already
- * handles image blocks durably, so only files and mentioned paths here.
- */
+/** pi branch entries -> artifact candidates (image blocks, written files, mentioned paths). */
 export function scanPi(entries, { cwd } = {}) {
   const images = [];
   const files = [];
