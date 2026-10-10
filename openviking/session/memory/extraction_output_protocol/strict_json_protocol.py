@@ -47,6 +47,14 @@ def strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(node, dict):
             return
         node.pop('default', None)
+        # Ark drops every constraint of an object whose schema has if/then
+        # (probed 2026-10-10: extra keys and missing fields passed). The closed
+        # `required` below covers the conditional fields, and parse_response
+        # re-validates the original schema, conditionals included.
+        if 'allOf' in node:
+            node['allOf'] = [s for s in node['allOf'] if not {'if', 'then', 'else'} & s.keys()]
+            if not node['allOf']:
+                del node['allOf']
         if node.get('type') == 'object' or 'properties' in node:
             if node.get('additionalProperties') not in (None, False):
                 raise ValueError('Strict extraction does not support open-ended objects')

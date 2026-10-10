@@ -137,6 +137,12 @@ class ProtocolTests(TestCase):
         self.payload['action']['operations']['preferences'] = [{'page_id': 3, 'topic': 'x', 'content': 'x', 'score': 0}]
         with self.assertRaises(ValueError): self.parse()
 
+    def test_provider_schema_has_no_conditionals_but_they_still_apply(self):
+        self.assertNotIn('"if"', json.dumps(self.fmt))
+        self.payload['action']['operations']['preferences'] = [
+            {'page_id': 100, 'topic': None, 'content': 'x', 'score': 0}]
+        with self.assertRaises(ValueError): self.parse()
+
     def test_original_schema_unmodified(self):
         old = self.ctx.operations_model.model_json_schema(); snapshot = deepcopy(old)
         strict_schema(old); self.assertEqual(old, snapshot)
