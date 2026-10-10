@@ -56,9 +56,9 @@ rev = git("rev-parse", "--short", a.ref)
 overlay = lambda ref: git("diff", "--name-only", "--diff-filter=d", UP, ref, "--", "openviking", "openviking_cli").split()
 cur = DEPLOYED.read_text().strip()
 new, old = overlay(a.ref), overlay(cur)
-# upstream test files our commits edit + ops/upstream-tests.txt run too (tests/ for conftests)
+# upstream test files our commits edit + ops/upstream-tests.txt (worktree, so old refs work) run too
 edited_tests = sorted(set(git("diff", "--name-only", "--diff-filter=d", UP, a.ref, "--", "tests").split())
-                      | {l for l in git("show", f"{a.ref}:ops/upstream-tests.txt").splitlines() if l and not l.startswith("#")})
+                      | {l for l in (FORK/"ops/upstream-tests.txt").read_text().splitlines() if l and not l.startswith("#")})
 exp = OUT/"export"; exp.mkdir()
 tarfile.open(fileobj=io.BytesIO(git("archive", a.ref, *new, "local_tests", "tests", raw=True))).extractall(exp, filter="data")
 up = OUT/"upstream"  # pristine versions of files whose patch was dropped
