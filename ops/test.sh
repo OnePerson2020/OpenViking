@@ -11,4 +11,4 @@ cd "${TESTS:-$FORK/local_tests}" || exit 2
 export PYTHONPATH=$S:$PWD:$HOME/.local/lib/python3.13/site-packages:$HOME/.openviking/local_patches/toolchain/testsite
 export OPENVIKING_CONFIG_FILE=$W/ov.conf PYTHONNOUSERSITE=1 LITELLM_LOCAL_MODEL_COST_MAP=true
 export HOME=$W/home; mkdir -p "$HOME"
-timeout 1200 python3.13 -m pytest -q -p no:cacheprovider -o addopts= -rfE "$@" 2>&1 | tail -25
+timeout 1200 python3.13 -m pytest -q -p no:cacheprovider -o addopts= -rfE "$@" 2>&1
