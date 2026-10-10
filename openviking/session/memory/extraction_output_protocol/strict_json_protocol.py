@@ -178,9 +178,9 @@ class StrictJsonExtractionOutputProtocol(JsonExtractionOutputProtocol):
             'name': 'memory_extraction_action', 'strict': True, 'schema': schema}}
 
     def parse_response(self, response, context, response_format, tools):
+        self._last_operations = None
         if not isinstance(response, VLMResponse):
             raise StrictActionError('RESPONSE_METADATA_MISSING', 'Structured response metadata is required')
-        self._last_operations = None
         if response.finish_reason != 'stop' or response.has_tool_calls:
             if response.finish_reason == 'length' and not response.has_tool_calls:
                 # Runaway generations (whitespace / repeated-key loops) hit the cap

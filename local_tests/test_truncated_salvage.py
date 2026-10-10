@@ -65,3 +65,8 @@ class TruncatedParseTests(TestCase):
         with self.assertRaisesRegex(Exception, "RESPONSE_NOT_COMPLETE"):
             self.parse('{"action":{"tool_calls":[' + " " * 50, "length")
         self.assertEqual(self.protocol.salvage(self.ctx), (None, []))
+        with self.assertRaises(Exception):
+            self.parse(json.dumps(bad), "stop")
+        with self.assertRaisesRegex(Exception, "RESPONSE_METADATA_MISSING"):
+            self.protocol.parse_response("plain text", self.ctx, self.fmt, [])
+        self.assertEqual(self.protocol.salvage(self.ctx), (None, []))
