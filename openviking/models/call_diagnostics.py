@@ -119,6 +119,8 @@ class CallObservation:
             'finish_reason': _identifier(getattr(choices[0], 'finish_reason', None)) if choices else None,
             'prompt_tokens': getattr(usage, 'prompt_tokens', None),
             'completion_tokens': getattr(usage, 'completion_tokens', None),
+            # Provider prefix-cache hits (Ark: usage.prompt_tokens_details.cached_tokens).
+            'cached_tokens': getattr(getattr(usage, 'prompt_tokens_details', None), 'cached_tokens', None),
         }
         headers_at = self.transport.get('headers_elapsed_s')
         if headers_at is not None:
