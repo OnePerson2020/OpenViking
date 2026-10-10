@@ -143,10 +143,8 @@ class BudgetTests(TestCase):
 
     def test_batches_follow_input_budget(self):
         with self.budget(160_000):
-            self.assertEqual(session_module._wm_conversation_token_budget(), 128_000)
             self.assertEqual(session_module._long_term_fallback_batch_tokens(), 80_000)
 
     def test_floors_keep_previous_sizes(self):
         with self.budget(16_000):
-            self.assertEqual(session_module._wm_conversation_token_budget(), 12_000)
             self.assertEqual(session_module._long_term_fallback_batch_tokens(), 48_000)

@@ -55,7 +55,6 @@
     "session_auto_commit": {
       "enabled": true
     },
-    "working_memory_transport": "json_schema",
     "extraction_output_format": "json_schema"
   },
   "pdf": {

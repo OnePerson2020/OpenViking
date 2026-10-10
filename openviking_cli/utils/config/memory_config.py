@@ -105,13 +105,6 @@ class MemoryConfig(BaseModel):
             "and rejects malformed JSON locally without repair. Requires a verified backend."
         ),
     )
-    working_memory_transport: Literal["legacy", "strict_tool", "json_schema"] = Field(
-        default="legacy",
-        description=(
-            "WM output transport: legacy tool calls, strict tool parameters, or "
-            "provider-constrained JSON Schema. Opt in only on a verified backend."
-        ),
-    )
     session_skill_extraction_enabled: bool = Field(
         default=False,
         description=(

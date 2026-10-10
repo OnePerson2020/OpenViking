@@ -12,10 +12,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import replace
 from typing import Any
 
-from openviking.message.part import ContextPart, TextPart, ToolPart
 from openviking.utils.token_estimation import estimate_text_tokens
 
 
@@ -39,134 +37,6 @@ def _text_prefix(text: str, budget: int) -> str:
         else:
             high = middle - 1
     return text[:low]
-
-
-def split_rendered_message_batches(
-    messages: list[Any],
-    budget: int,
-    *,
-    render_message: Any,
-    render_batch: Any,
-    extra_cost: Any = None,
-) -> list[list[Any]]:
-    """Losslessly split render-visible message fields into bounded batches.
-
-    The original messages are never mutated.  Oversized text, tool output, and
-    context abstracts are copied into ordered fragments that retain the source
-    message id, so checkpoint ownership remains stable across batch boundaries.
-    """
-    if budget <= 0:
-        raise MemoryInputBudgetError("Message input budget must be positive")
-
-    def additional_cost(batch: list[Any]) -> int | float:
-        if extra_cost is None:
-            return 0
-        value = extra_cost(batch)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
-            raise ValueError("extra_cost must return a non-negative token count")
-        return value
-
-    def message_cost(message: Any) -> int:
-        rendered = render_message(message)
-        if not isinstance(rendered, str):
-            raise TypeError("render_message must return str")
-        return estimate_text_tokens(rendered)
-
-    def batch_cost(batch: list[Any]) -> int | float:
-        rendered = render_batch(batch)
-        if not isinstance(rendered, str):
-            raise TypeError("render_batch must return str")
-        return estimate_text_tokens(rendered) + additional_cost(batch)
-
-    def fragment_fits(message: Any) -> bool:
-        return message_cost(message) <= budget and batch_cost([message]) <= budget
-
-    def copy_message(message: Any, parts: list[Any]) -> Any:
-        return replace(message, parts=parts)
-
-    def split_field(message: Any, part: Any, field_name: str) -> list[Any]:
-        value = getattr(part, field_name)
-
-        def fragment(text: str) -> Any:
-            return copy_message(message, [replace(part, **{field_name: text})])
-
-        if not fragment_fits(fragment("")):
-            raise MemoryInputBudgetError(
-                f"Fixed message metadata cannot fit input budget: message_id={message.id}"
-            )
-        if not value:
-            return []
-
-        result: list[Any] = []
-        offset = 0
-        while offset < len(value):
-            remainder = value[offset:]
-            whole = fragment(remainder)
-            if fragment_fits(whole):
-                result.append(whole)
-                break
-            low, high = 0, len(remainder)
-            while low < high:
-                middle = (low + high + 1) // 2
-                if fragment_fits(fragment(remainder[:middle])):
-                    low = middle
-                else:
-                    high = middle - 1
-            if low == 0:
-                raise MemoryInputBudgetError(
-                    f"Message content fragment cannot fit input budget: message_id={message.id}"
-                )
-            result.append(fragment(remainder[:low]))
-            offset += low
-        return result
-
-    fragments: list[Any] = []
-    for message in messages:
-        if fragment_fits(message):
-            fragments.append(copy_message(message, list(message.parts)))
-            continue
-        if not message.parts:
-            empty = copy_message(message, [])
-            if not fragment_fits(empty):
-                raise MemoryInputBudgetError(
-                    f"Fixed message metadata cannot fit input budget: message_id={message.id}"
-                )
-            fragments.append(empty)
-            continue
-        for part in message.parts:
-            if isinstance(part, TextPart):
-                fragments.extend(split_field(message, part, "text"))
-            elif isinstance(part, ToolPart):
-                if not part.tool_name:
-                    continue
-                if not part.tool_output:
-                    fixed = copy_message(message, [replace(part)])
-                    if not fragment_fits(fixed):
-                        raise MemoryInputBudgetError(
-                            f"Fixed tool metadata cannot fit input budget: message_id={message.id}"
-                        )
-                    fragments.append(fixed)
-                else:
-                    fragments.extend(split_field(message, part, "tool_output"))
-            elif isinstance(part, ContextPart):
-                fragments.extend(split_field(message, part, "abstract"))
-
-    batches: list[list[Any]] = []
-    batch: list[Any] = []
-    for fragment in fragments:
-        candidate = [*batch, fragment]
-        if batch and batch_cost(candidate) > budget:
-            batches.append(batch)
-            batch = [fragment]
-        else:
-            batch = candidate
-        if batch_cost(batch) > budget:
-            raise MemoryInputBudgetError(
-                f"Rendered singleton batch cannot fit input budget: message_id={fragment.id}"
-            )
-    if batch:
-        batches.append(batch)
-    return batches
 
 
 def _visible_text(
