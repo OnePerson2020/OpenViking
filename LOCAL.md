@@ -1,11 +1,12 @@
 # OpenViking local patch series
 
 `local` = our patches, one feature per commit, on top of the upstream release tag
-(`v0.4.23` from volcengine/OpenViking; this clone is shallow at that tag). Upstream's
+(`v0.5.0` from volcengine/OpenViking; this clone is shallow). Upstream's
 README is `README.md`; this file is ours. Fixes worth proposing upstream are
 cherry-picked from `local` onto `upstream/main` on the Mac (`~/.openviking/openviking-repo`).
 Until 2026-10-09 the series sat on a synthetic sdist import; that history is kept in
-branches `sdist-local-0.4.23` / `sdist-upstream-0.4.23`.
+branches `sdist-local-0.4.23` / `sdist-upstream-0.4.23`. The last v0.4.23-based series is
+branch `local-0.4.23` (2026-10-10).
 
 ## Upgrade to a new upstream version
 
@@ -16,24 +17,28 @@ devbox has no direct GitHub access; fetch the tag through the Mac proxy (on the 
 
 Then on devbox:
 
-    git rebase --onto vX.Y.Z vOLD local   # conflicts are per feature; drop commits upstream absorbed
-    ops/build.sh X.Y.Z                    # upstream wheel from the PyPI sdist (GLIBC 2.28 build)
-    # install that wheel (stop service, pip install --user --force-reinstall, start), then
-    python3.13 ops/deploy.py --apply      # overlay `local` on it
+    git branch local-OLD local                       # keep the previous series
+    git rebase --onto vX.Y.Z vOLD local             # conflicts are per feature; drop absorbed commits
+    ops/build.sh X.Y.Z                              # wheel -> local_patches/build/X.Y.Z/ (~20 min cold)
+    python3.13 ops/deploy.py --wheel W.whl          # gate on a stage unpacked from the new wheel
+    python3.13 ops/deploy.py --wheel W.whl --apply  # stop, pip install wheel, overlay, start, health
 
-## Next-upgrade notes (upstream main as of 2026-10-09)
+There is no file-level rollback across versions: undo = `deploy.py --apply --wheel <previous
+wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-wheel`). Plain
+`pip install -U openviking` would silently drop every patch, and the stock package refuses
+`extraction_output_format: json_schema`, so it would not even start.
 
-- Trial rebase onto upstream main 7967eca (2026-10-09): 24/30 commits apply as is. Code
-  conflicts: "session: Working Memory budget batching…" and "memory: improve extraction
-  robustness" (session.py, vs #5696), the #5591 backport (drop: merged upstream), and
-  volcengine_vlm.py (upstream changed 8 lines; the call-diagnostics commit cascades from it).
-- #5696 makes Working Memory **opt-in** (default off). WM is already off for user
-  `mayunxiang` (user policy, 2026-10-09), so drop the WM part of "session: Working Memory
-  budget batching, resume and deadline retry" instead of porting it; keep only the
-  48k long-term fallback batching (~10 lines in `Session`, `_long_term_fallback_batch_tokens`).
+## Upgrade notes
+
+- v0.5.0 (2026-10-10): 36 of 38 v0.4.23 commits carried over unchanged. Dropped: the #5591
+  backport (in v0.5.0) and "session: Working Memory budget batching, resume and deadline
+  retry" (WM is default-off since #5696 and off for our user), replaced by "session:
+  long-term extraction falls back to budget batches…"; WM leftovers removed in "drop
+  Working Memory leftovers after the v0.5.0 port" (incl. `memory.working_memory_transport`).
 - Open upstream PRs (drop the matching local commit once merged, then deploy): #5758
   orphan race, #5759 VLM deadline, #5765 pathlock polling, #5802 archive retry route,
   #5812 JSON image redaction, #5818 C++ log append.
+- Client plugins (Claude Code, Codex, pi on the Mac) are upgraded separately from the server.
 
 ## Backup to GitHub
 
@@ -46,7 +51,7 @@ GitHub credentials):
     git -c http.proxyAuthMethod=basic -c credential.helper= \
         -c credential.helper='!gh auth git-credential' \
         push --force https://github.com/OnePerson2020/OpenViking.git \
-        devbox-fork/local:refs/heads/devbox/local-0.4.23
+        devbox-fork/local:refs/heads/devbox/local-0.5.0
 
 ## Deploy
 
