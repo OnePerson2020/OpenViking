@@ -94,6 +94,11 @@ def put(root, f):
     if src[f].exists(): (root/f).parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src[f], root/f)
     elif (root/f).exists(): (root/f).unlink()
 for f in plan: put(stage, f)
+# a patch can rely on an upstream import that a new version dropped: rebase is clean, runtime NameError
+lint = subprocess.run(["python3.13", "-m", "pyflakes", *[str(stage/f) for f in new if f.endswith(".py")]],
+                      capture_output=True, text=True, env=os.environ | {"PYTHONPATH": str(LP/"toolchain/testsite")})
+undefined = [l for l in lint.stdout.splitlines() if "undefined name" in l]
+log(f"pyflakes: {len(undefined)} undefined name(s)"); assert not undefined, "\n".join(undefined)
 runs = [("local_tests", exp/"local_tests", [])] + ([("upstream", exp, edited_tests)] if edited_tests else [])
 for name, cwd, args in runs:
     t = subprocess.run([str(RUNTESTS), str(stage), *args], env=os.environ | {"TESTS": str(cwd)},
