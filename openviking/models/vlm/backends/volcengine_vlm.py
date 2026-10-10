@@ -282,6 +282,12 @@ class VolcEngineVLM(OpenAIVLM):
 
         if response_format is not None:
             kwargs["response_format"] = response_format
+            if response_format.get("type") == "json_schema":
+                # Ark escapes newlines inside JSON strings, so a blank line or a
+                # trailing space can only be runaway whitespace between tokens
+                # (all 12 whitespace loops sampled 2026-10-09/10, ~9 min and 40k
+                # tokens each). Stop there; the truncated JSON is retried/salvaged.
+                kwargs["stop"] = ["\n\n", " \n"]
         client = self.get_async_client()
 
         observation = CallObservation(

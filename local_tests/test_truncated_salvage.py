@@ -58,6 +58,13 @@ class TruncatedParseTests(TestCase):
         self.assertEqual([p.page_id for p in model.preferences], [100])
         self.assertEqual(dropped, [])
 
+    def test_stop_sequence_cut_keeps_complete_items_for_salvage(self):
+        text = '{"action":{"operations":{"delete_ids":[],"preferences":[' + json.dumps(_pref(100)) + ","
+        with self.assertRaisesRegex(Exception, r"STRICT_JSON_SYNTAX.*at \d+%"):
+            self.parse(text, "stop")
+        model, _ = self.protocol.salvage(self.ctx)
+        self.assertEqual([p.page_id for p in model.preferences], [100])
+
     def test_earlier_response_operations_are_not_reused(self):
         bad = {"action": {"operations": {"delete_ids": [], "preferences": [_pref(5)]}}}
         with self.assertRaises(Exception):

@@ -156,6 +156,16 @@ class StrictJsonExtractionOutputProtocol(JsonExtractionOutputProtocol):
     def response_format(self, context, tools):
         operations = strict_schema(context.operations_model.model_json_schema())
         definitions = operations.pop('$defs', {})
+        # Add-only pages are never edited, so their fields get no patch branch and
+        # the provider cannot emit one (NEW_VALUE_IS_PATCH: 14 rejections 10-09/10).
+        patch_refs = {f'#/$defs/{n}' for n, d in definitions.items() if 'blocks' in d.get('properties', {})}
+        for memory in context.schemas:
+            if memory.operation_mode != 'add_only':
+                continue
+            ref = operations['properties'].get(memory.memory_type, {}).get('items', {}).get('$ref', '')
+            for field in definitions.get(ref.rsplit('/', 1)[-1], {}).get('properties', {}).values():
+                if 'anyOf' in field:
+                    field['anyOf'] = [b for b in field['anyOf'] if b.get('$ref') not in patch_refs]
         branches = [{'type': 'object', 'properties': {'operations': operations},
                      'required': ['operations'], 'additionalProperties': False}]
         tool_branches = []
@@ -193,14 +203,18 @@ class StrictJsonExtractionOutputProtocol(JsonExtractionOutputProtocol):
             if response.finish_reason == 'length' and not response.has_tool_calls:
                 # Runaway generations (whitespace / repeated-key loops) hit the cap
                 # after complete items; only the terminal salvage may use those.
-                ops = truncated_operations(response.content)
-                if ops:
-                    self.normalize_new_page_ids(ops, context)
-                    self._last_operations = ops
+                self._keep_truncated_items(response.content, context)
             raise StrictActionError('RESPONSE_NOT_COMPLETE', 'Return complete JSON with stop; native tool wrappers are not accepted')
         if not isinstance(response.content, str):
             raise StrictActionError('RESPONSE_CONTENT_MISSING', 'JSON string content is required')
-        raw = strict_loads(response.content)
+        try:
+            raw = strict_loads(response.content)
+        except json.JSONDecodeError as exc:
+            # A whitespace stop sequence ends a runaway as 'stop' with cut-off JSON.
+            self._keep_truncated_items(response.content, context)
+            at = exc.pos * 100 // max(len(response.content), 1)  # position only, never content
+            raise StrictActionError('STRICT_JSON_SYNTAX',
+                                    f'return exactly one valid JSON object ({exc.msg} at {at}%)') from exc
         pending = raw.get('action') if isinstance(raw, dict) else None
         if isinstance(pending, dict) and isinstance(pending.get('operations'), dict):
             # Before schema validation: providers do not enforce `minimum`, so a
@@ -232,6 +246,13 @@ class StrictJsonExtractionOutputProtocol(JsonExtractionOutputProtocol):
             logger.warning("Strict extraction dropped unsafe deletion(s): %s", dropped)
         model = context.operations_model.model_validate_json(json.dumps(operations), strict=True)
         return None, model
+
+    def _keep_truncated_items(self, content, context):
+        """Complete items of a cut-off response, for the terminal salvage only."""
+        ops = truncated_operations(content)
+        if ops:
+            self.normalize_new_page_ids(ops, context)
+            self._last_operations = ops
 
     @staticmethod
     def normalize_new_page_ids(operations, context):
@@ -425,6 +446,10 @@ class StrictJsonExtractionOutputProtocol(JsonExtractionOutputProtocol):
         return result
 
     def render_contract(self, context):
+        # ponytail: Ark injects the response_format schema (with descriptions) into
+        # the prompt itself (probe 2026-10-10: +8.4k prompt tokens); a second copy
+        # here cost ~8k tokens per call. Re-check before using another provider.
+        del context
         return (
             '## Output Format: strict JSON memory actions\n'
             'Return exactly one JSON object matching the response schema; never Python code, '
@@ -441,8 +466,7 @@ class StrictJsonExtractionOutputProtocol(JsonExtractionOutputProtocol):
             'Do not manufacture empty changes on error.\n'
             'Use exact SEARCH/REPLACE or DELETE blocks for partial updates; all existing '
             'page_id, ownership, ranges and partial-read rules still apply. '
-            'The complete operations schema is:\n' +
-            json.dumps(strict_schema(context.operations_model.model_json_schema()), ensure_ascii=False)
+            'The complete schema, with every field description, is the attached response schema.'
         )
 
     def parse(self, content, context):
