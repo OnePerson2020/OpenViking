@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -67,7 +68,7 @@ def strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def strict_loads(content: str) -> Any:
+def _strict_decoder() -> json.JSONDecoder:
     def pairs(values):
         result = {}
         for key, value in values:
@@ -77,7 +78,68 @@ def strict_loads(content: str) -> Any:
         return result
     def constant(_):
         raise StrictActionError('JSON_NONFINITE', 'JSON numbers must be finite')
-    return json.loads(content, object_pairs_hook=pairs, parse_constant=constant)
+    return json.JSONDecoder(object_pairs_hook=pairs, parse_constant=constant)
+
+
+def strict_loads(content: str) -> Any:
+    return _strict_decoder().decode(content)
+
+
+_OPERATIONS_PREFIX = re.compile(r'\s*\{\s*"action"\s*:\s*\{\s*"operations"\s*:\s*\{')
+
+
+def truncated_operations(content: Any) -> dict[str, list] | None:
+    """Complete list items of `action.operations` in a cut-off response, else None.
+
+    Walks `{"action":{"operations":{"<type>":[item, ...], ...` and keeps every
+    item that decodes completely; stops at the first incomplete or malformed
+    token. Items are returned unvalidated: ``salvage`` checks each of them.
+    """
+    if not isinstance(content, str):
+        return None
+    match = _OPERATIONS_PREFIX.match(content)
+    if not match:
+        return None
+    decoder = _strict_decoder()
+    def decode(pos):
+        try:
+            return decoder.raw_decode(content, pos)
+        except ValueError:  # includes StrictActionError
+            return None, pos
+    def skip(pos):
+        while pos < len(content) and content[pos] in ' \t\n\r':
+            pos += 1
+        return pos
+    ops, pos = {}, match.end()
+    while True:
+        pos = skip(pos)
+        key, pos = decode(pos)
+        pos = skip(pos)
+        if not isinstance(key, str) or key in ops or content[pos:pos + 1] != ':':
+            break
+        pos = skip(pos + 1)
+        if content[pos:pos + 1] != '[':
+            break
+        items, pos = [], pos + 1
+        ops[key] = items
+        while True:
+            pos = skip(pos)
+            if content[pos:pos + 1] == ']':
+                pos += 1
+                break
+            item, end = decode(pos)
+            if end == pos:
+                return {k: v for k, v in ops.items() if v} or None
+            items.append(item)
+            pos = skip(end)
+            if content[pos:pos + 1] == ',':
+                pos += 1
+        pos = skip(pos)
+        if content[pos:pos + 1] != ',':
+            break
+        pos += 1
+    return {k: v for k, v in ops.items() if v} or None
+
 
 
 class StrictJsonExtractionOutputProtocol(JsonExtractionOutputProtocol):
@@ -118,9 +180,16 @@ class StrictJsonExtractionOutputProtocol(JsonExtractionOutputProtocol):
     def parse_response(self, response, context, response_format, tools):
         if not isinstance(response, VLMResponse):
             raise StrictActionError('RESPONSE_METADATA_MISSING', 'Structured response metadata is required')
-        if response.finish_reason != 'stop' or response.has_tool_calls:
-            raise StrictActionError('RESPONSE_NOT_COMPLETE', 'Return complete JSON with stop; native tool wrappers are not accepted')
         self._last_operations = None
+        if response.finish_reason != 'stop' or response.has_tool_calls:
+            if response.finish_reason == 'length' and not response.has_tool_calls:
+                # Runaway generations (whitespace / repeated-key loops) hit the cap
+                # after complete items; only the terminal salvage may use those.
+                ops = truncated_operations(response.content)
+                if ops:
+                    self.normalize_new_page_ids(ops, context)
+                    self._last_operations = ops
+            raise StrictActionError('RESPONSE_NOT_COMPLETE', 'Return complete JSON with stop; native tool wrappers are not accepted')
         if not isinstance(response.content, str):
             raise StrictActionError('RESPONSE_CONTENT_MISSING', 'JSON string content is required')
         raw = strict_loads(response.content)
