@@ -39,6 +39,8 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   orphan race, #5759 VLM deadline, #5765 pathlock polling, #5802 archive retry route,
   #5812 JSON image redaction, #5818 C++ log append.
 - Client plugins (Claude Code, Codex, pi on the Mac) are upgraded separately from the server.
+- Pre-fork work dirs (0.4.23 port, Oct 6–9 improvements) and the only full data backup
+  (2026-10-06, before 0.4.23) are in `local_patches/archive/`; wheels in `local_patches/build/`.
 
 ## Backup to GitHub
 

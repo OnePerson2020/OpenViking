@@ -12,7 +12,7 @@ Files whose patch was dropped (e.g. merged upstream) go back to the upstream ver
 Rollback = the same with the previous wheel (local_patches/deployed-wheel) and --ref <previous deployed>.
 Code only: data and ov.conf are untouched. Logs: local_patches/deploys/<timestamp>/.
 """
-import argparse, glob, hashlib, io, json, os, shutil, subprocess, tarfile, time, urllib.request, zipfile
+import argparse, atexit, glob, hashlib, io, json, os, shutil, subprocess, tarfile, time, urllib.request, zipfile
 from pathlib import Path
 
 H = Path.home(); OV = H/".openviking"; LP = OV/"local_patches"; FORK = LP/"ov-fork"
@@ -24,6 +24,8 @@ ap.add_argument("--wheel", type=Path, help="upstream wheel to switch to (version
 ap.add_argument("--idle-wait", type=int, default=7200, help="seconds to wait for an idle queue; 0 = restart now, interrupting running work")
 a = ap.parse_args()
 OUT = LP/"deploys"/time.strftime("%Y%m%d-%H%M%S"); OUT.mkdir(parents=True)
+# keep logs and backups, drop the bulky work dirs on every exit (also failed runs)
+atexit.register(lambda: [shutil.rmtree(OUT/d, ignore_errors=True) for d in ("export", "stage", "wheel", "upstream")])
 
 def log(m):
     line = f"{time.strftime('%F %T')} {m}"; print(line, flush=True)
@@ -82,7 +84,7 @@ plan = sorted(f for f, s in src.items() if sha(BASE/f) != sha(s))
 log(f"{a.ref}={rev} on {UP}{f' ({a.wheel.name})' if a.wheel else ''}: {len(new)} overlay files, {len(plan)} to change")
 for f in plan: log(f"  {'delete' if not src[f].exists() else 'install' if f in new else 'revert'} {f}")
 if not plan and not a.wheel:
-    shutil.rmtree(exp); DEPLOYED.write_text(git("rev-parse", a.ref) + "\n")
+    DEPLOYED.write_text(git("rev-parse", a.ref) + "\n")
     log("live already matches; nothing to do"); raise SystemExit(0)
 
 # 2. local_tests + edited upstream tests against live + plan
@@ -106,9 +108,7 @@ for name, cwd, args in runs:
     (OUT/f"tests-{name}.log").write_text(t.stdout + t.stderr)
     log(f"tests {name}: " + (t.stdout.strip().splitlines() or ["?"])[-1])
     assert t.returncode == 0, f"{name} tests failed; see tests-{name}.log"
-shutil.rmtree(stage)
 if not a.apply:
-    shutil.rmtree(exp); shutil.rmtree(up, ignore_errors=True); shutil.rmtree(OUT/"wheel", ignore_errors=True)
     log("dry run; re-run with --apply to deploy"); raise SystemExit(0)
 
 # 3. deploy
@@ -151,5 +151,4 @@ log("installed; healthy")
 
 # 4. record what is now live
 DEPLOYED.write_text(git("rev-parse", a.ref) + "\n")
-shutil.rmtree(exp); shutil.rmtree(up, ignore_errors=True); shutil.rmtree(OUT/"wheel", ignore_errors=True)
 log(f"deployed {a.ref}={rev}")
