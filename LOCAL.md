@@ -81,8 +81,8 @@ for `ops/test.sh`). Run it after a devbox wipe. Tests (offline, throwaway worksp
     TESTS=$PWD ops/test.sh ~/.local/lib/python3.13/site-packages tests/session     # upstream tests
 
 Upstream tests that a patch changes are edited in place under `tests/` (never copied into
-`local_tests/`); `deploy.py` runs `local_tests` plus every upstream test file that differs
-from the release tag.
+`local_tests/`); `deploy.py` runs `local_tests`, every upstream test file that differs from the
+release tag, and the files listed in `ops/upstream-tests.txt`.
 
 ## Config
 

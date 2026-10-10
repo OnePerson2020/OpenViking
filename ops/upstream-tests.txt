@@ -1,0 +1,2 @@
+# Upstream test files deploy.py runs besides the ones our commits edit (those are automatic).
+tests/session/memory/test_extraction_output_protocol.py
