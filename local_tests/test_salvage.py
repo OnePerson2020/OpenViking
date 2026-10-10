@@ -50,14 +50,19 @@ class RenumberTests(TestCase):
         self.assertEqual(ops.preferences[0].page_id, 100)
         self.assertNotEqual(ops.events[0].page_id, 100)
 
-    def test_existing_event_page_is_not_renumbered(self):
+    def test_event_on_existing_page_becomes_a_new_page(self):
+        # 2026-10-10: the model kept reusing an existing add-only page id until
+        # ADD_ONLY_EXISTING_PAGE failed the archive (trajectories, 11x that day).
         uri = "viking://user/a/memories/events/2026/10/06/x.md"
         existing = MemoryFile(uri=uri, memory_type="events", content="old", extra_fields={})
         ctx = _context([self.events], files=[existing])
-        operations = {"events": [_event(1)]}
-        with self.assertRaises(Exception):  # schema minimum / ADD_ONLY_EXISTING_PAGE
-            self.parse(ctx, operations)
-        self.assertEqual(self.protocol._last_operations["events"][0]["page_id"], 1)
+        existing_id = ctx.page_id_map.get_page_id(uri)
+        _, ops = self.parse(ctx, {"events": [_event(existing_id, "a"), _event(150, "b")]})
+        ids = [e.page_id for e in ops.events]
+        self.assertNotIn(existing_id, ids)
+        self.assertIn(150, ids)
+        self.assertTrue(all(i >= 100 for i in ids))
+        self.assertIsNone(ctx.page_id_map.resolve(ids[0]))
 
     def test_mutable_small_unknown_id_still_needs_retry(self):
         ctx = _context([_preference_schema()])

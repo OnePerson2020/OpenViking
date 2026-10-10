@@ -229,10 +229,12 @@ class StrictJsonExtractionOutputProtocol(JsonExtractionOutputProtocol):
     def normalize_new_page_ids(operations, context):
         """Renumber add-only (event) page ids into the unused >=100 range.
 
-        An add-only item whose id names no existing page is a new page, so the
-        id carries no reference: one below 100 or one repeated by another new
-        item is renumbered. Ids of existing pages and all mutable types are left
-        for the business checks, since there the id may mean a real target.
+        An add-only item is always a new page, so its id carries no reference:
+        one below 100, one repeated by another new item, or one naming an
+        existing page (an add-only page can never be updated; rejecting it made
+        the model repeat it until the archive failed) is renumbered. Ids of
+        mutable types are left for the business checks: there the id may mean a
+        real target.
         """
         add_only = [s.memory_type for s in context.schemas if s.operation_mode == 'add_only']
         if not add_only:
@@ -250,9 +252,10 @@ class StrictJsonExtractionOutputProtocol(JsonExtractionOutputProtocol):
                 pid = item.get('page_id') if isinstance(item, dict) else None
                 if not isinstance(pid, int) or isinstance(pid, bool):
                     continue
-                if resolve(pid):
-                    continue
-                if pid < 100 or pid in new_seen:
+                if resolve(pid) or pid < 100 or pid in new_seen:
+                    if resolve(pid):
+                        logger.info("Strict extraction: add-only %s item on existing page_id=%s "
+                                    "becomes a new page", name, pid)
                     while next_id in used or resolve(next_id):
                         next_id += 1
                     used.add(next_id)
