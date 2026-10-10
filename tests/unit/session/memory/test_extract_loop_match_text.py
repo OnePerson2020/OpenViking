@@ -1211,7 +1211,7 @@ class TestPageIdInstruction:
         assert "## Read Format Rules" in system_content
         assert 'Every memory item you create or edit MUST include "page_id".' in system_content
         assert (
-            "The read tool accepts `uri`, optional `offset` (0-indexed), and optional `limit`."
+            "The read tool accepts `uri`, optional line `offset`/`limit`, and optional exact-field"
             in system_content
         )
         assert "each visible line is prefixed with `line_number<TAB>`" in system_content
@@ -1298,12 +1298,15 @@ class TestFinalOperationsHydration:
         )
 
         context_provider = Mock()
-        schema = SimpleNamespace(memory_type="experiences", fields=[])
+        schema = SimpleNamespace(
+            memory_type="experiences", fields=[], identity_fields=lambda **_: ()
+        )
         context_provider.get_memory_schemas.return_value = [schema]
         context_provider.get_output_language.return_value = "zh-CN"
         context_provider.get_tools.return_value = []
         extract_context = Mock()
         extract_context.page_id_map = PageIdMap()
+        context_provider.partial_read_fields = {}
         extract_context.page_id_map.get_page_id(old_file.uri)
         context_provider.get_extract_context.return_value = extract_context
         context_provider.prefetch = AsyncMock(return_value=[])
@@ -1373,7 +1376,14 @@ class TestExtractionMaxOutputTokens:
             isolation_handler=Mock(),
             max_output_tokens=per_loop,
         )
-        loop._resolve_effective_max_output_tokens()
+        with patch(
+            "openviking.session.memory.extract_loop.get_openviking_config"
+        ) as mock_config:
+            mock_config.return_value = SimpleNamespace(
+                memory=SimpleNamespace(link_enabled=False, extraction_output_format="python"),
+                vlm=SimpleNamespace(max_tokens=vlm_max_tokens),
+            )
+            loop._resolve_effective_max_output_tokens()
         return loop
 
     def test_default_floor_used_when_unconfigured(self):
