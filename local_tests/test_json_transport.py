@@ -36,5 +36,5 @@ class JsonTransport(unittest.IsolatedAsyncioTestCase):
         result=await backend.get_completion_async('source',response_format=fmt)
         await backend.get_completion_async('plain text');self.assertIsNone(seen[1].get('stop'))  # text calls keep blank lines
         await client.aclose();self.assertIsInstance(result,VLMResponse);self.assertEqual(result.finish_reason,'length');self.assertEqual(seen[0]['response_format'],fmt);self.assertIsNone(seen[0].get('tools'))
-        self.assertEqual(seen[0]['stop'],['\n\n',' \n'])  # runaway whitespace ends the call
+        self.assertEqual(seen[0]['stop'],['\n\n\n\n',' \n'])  # runaway whitespace ends the call
         with self.assertRaises(ValueError):await backend.get_completion_async('source',response_format=fmt,tools=[TOOL])
