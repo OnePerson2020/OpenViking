@@ -95,6 +95,18 @@ _MEMORY_EXTRACTION_RETRY_BASE_DELAY_SECONDS = 1.0
 _MEMORY_EXTRACTION_RETRY_MAX_DELAY_SECONDS = 8.0
 _AGENT_TRAINING_REQUIRED_MEMORY_TYPES = frozenset({"experiences"})
 _SESSION_PHASE1_LOCK_TIMEOUT_SECONDS = 30.0
+# Archives committed without an auto-commit policy (backfills, manual commits)
+# get no extraction batching upstream; a large one then exceeds the long-term
+# input budget in a single call. Split those into batches of half the
+# memory.extraction_input_token_budget (the rest is left for the schema and
+# memory reads), never below the previous fixed 48k.
+_LONG_TERM_FALLBACK_BATCH_TOKENS = 48_000
+
+
+def _long_term_fallback_batch_tokens() -> int:
+    memory_config = getattr(get_openviking_config(), "memory", None)
+    budget = int(getattr(memory_config, "extraction_input_token_budget", 0) or 0)
+    return max(_LONG_TERM_FALLBACK_BATCH_TOKENS, budget // 2)
 
 
 def _load_render_prompt() -> Callable[..., str]:
@@ -2671,11 +2683,20 @@ class Session:
                                     event_search_tags=event_search_tags,
                                 )
 
-                            if extraction_batch_limits.enabled:
+                            long_term_limits = extraction_batch_limits
+                            if (
+                                not long_term_limits.enabled
+                                and estimate_extraction_message_tokens(long_term_messages)
+                                > _long_term_fallback_batch_tokens()
+                            ):
+                                long_term_limits = ExtractionBatchLimits(
+                                    max_message_tokens=_long_term_fallback_batch_tokens()
+                                )
+                            if long_term_limits.enabled:
                                 extraction_tasks.append(
                                     self._extract_long_term_memories_with_batching(
                                         messages=long_term_messages,
-                                        limits=extraction_batch_limits,
+                                        limits=long_term_limits,
                                         archive_uri=archive_uri,
                                         extract_batch=_run_long_term_memory_extraction,
                                         record_batch=_run_recorded_memory_step,
