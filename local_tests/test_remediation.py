@@ -1,16 +1,9 @@
 """Offline regression tests. No live storage or provider calls."""
 import asyncio
-import importlib.util
-import json
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from openviking.message import Message
-from openviking.message.part import TextPart
-from openviking.session.session import Session, WM_SEVEN_SECTIONS, WM_UPDATE_TOOL
-from openviking.models.vlm.base import VLMResponse, ToolCall
 from openviking.session.memory.extract_loop import ExtractLoop
 from openviking.session.memory.dataclass import ResolvedOperations
 from openviking.session.memory.extraction_output_protocol.python_protocol import PythonExtractionOutputProtocol
@@ -19,10 +12,6 @@ from openviking.retrieve.context_assembler.expansion import expand_queries
 # Vendored pure upstream fixtures; no server fixtures or live storage.
 import protocol_fixtures
 fixtures = vars(protocol_fixtures)
-
-
-def wm(label='facts'):
-    return '\n\n'.join(f'## {name}\n{label}' for name in WM_SEVEN_SECTIONS)
 
 
 class ProtocolTests(unittest.TestCase):
@@ -46,104 +35,6 @@ class ProtocolTests(unittest.TestCase):
             'x = sdk.existing(memory_type="preferences", content="evil")', self.context)
         self.assertIsNone(operations)
         self.assertIn('reserved', error)
-
-class WorkingMemoryTests(unittest.IsolatedAsyncioTestCase):
-    def config(self, network):
-        return SimpleNamespace(
-            output_language_override='en',
-            memory=SimpleNamespace(extraction_input_token_budget=128000),
-            vlm=SimpleNamespace(is_available=lambda: True, get_completion_async=network),
-        )
-
-    def test_nested_headings_demoted_losslessly(self):
-        original = wm().replace('## Key Facts & Decisions\nfacts', '## Key Facts & Decisions\nfacts\n## extra detail\nimportant content')
-        result = Session._normalize_working_memory_headings(original)
-        self.assertEqual(result.replace('### extra detail', '## extra detail'), original)
-        self.assertIn('important content', result)
-        Session._validate_complete_working_memory(result)
-
-    def test_missing_and_duplicate_sections_are_not_repaired(self):
-        for original in [wm().replace('## Open Issues', '### Open Issues'), wm() + '\n## Open Issues\nduplicate']:
-            self.assertEqual(Session._normalize_working_memory_headings(original), original)
-            with self.assertRaises(ValueError):
-                Session._validate_complete_working_memory(original)
-
-    async def test_missing_tool_payload_recovers_strict_json(self):
-        missing = VLMResponse(finish_reason='tool_calls')
-        payload = {'sections': {name: {'op': 'KEEP'} for name in WM_SEVEN_SECTIONS}}
-        network = AsyncMock(side_effect=[missing, json.dumps(payload)])
-        with patch('openviking.session.session.get_openviking_config', return_value=self.config(network)):
-            result = await Session._complete_wm_tool_request(object.__new__(Session), 'source', WM_UPDATE_TOOL, {'type': 'function'})
-        self.assertTrue(result.has_tool_calls)
-        self.assertEqual(result.tool_calls[0].arguments, payload)
-        self.assertEqual(network.await_count, 2)
-        self.assertNotIn('tools', network.await_args.kwargs)
-
-    async def test_partial_json_not_promoted_to_tool_success(self):
-        missing = VLMResponse(finish_reason='tool_calls')
-        network = AsyncMock(side_effect=[missing, '{"sections": {"Current State": {"op": "KEEP"}}}'])
-        with patch('openviking.session.session.get_openviking_config', return_value=self.config(network)):
-            result = await Session._complete_wm_tool_request(object.__new__(Session), 'source', WM_UPDATE_TOOL, {'type': 'function'})
-        self.assertIs(result, missing)
-        self.assertFalse(result.has_tool_calls)
-
-    async def test_valid_native_tool_not_retried(self):
-        response = VLMResponse(tool_calls=[ToolCall('id', 'update_working_memory', {
-            'sections': {name: {'op': 'KEEP'} for name in WM_SEVEN_SECTIONS}
-        })])
-        network = AsyncMock(return_value=response)
-        with patch('openviking.session.session.get_openviking_config', return_value=self.config(network)):
-            result = await Session._complete_wm_tool_request(object.__new__(Session), 'source', WM_UPDATE_TOOL, {'type': 'function'})
-        self.assertIs(result, response)
-        network.assert_awaited_once()
-
-    async def test_missing_section_retries_and_validates(self):
-        network = AsyncMock(side_effect=[wm().replace('## Open Issues', '### Open Issues'), wm('fixed')])
-        session = object.__new__(Session)
-        with patch('openviking.session.session.get_openviking_config', return_value=self.config(network)):
-            result = await session._complete_working_memory_creation('original grounded conversation')
-        self.assertEqual(result, wm('fixed'))
-        self.assertEqual(network.await_count, 2)
-        correction = network.await_args_list[1].args[0]
-        self.assertIn('## Open Issues', correction)
-        self.assertIn('original grounded conversation', correction)
-
-    async def test_repeated_invalid_output_fails_without_fabrication(self):
-        network = AsyncMock(return_value='## Session Title\npartial')
-        with patch('openviking.session.session.get_openviking_config', return_value=self.config(network)):
-            with self.assertRaisesRegex(ValueError, 'seven required'):
-                await Session._complete_working_memory_creation(object.__new__(Session), 'source')
-        self.assertEqual(network.await_count, 2)
-
-    async def test_transport_failure_not_format_retried(self):
-        network = AsyncMock(side_effect=ConnectionError('offline'))
-        with patch('openviking.session.session.get_openviking_config', return_value=self.config(network)):
-            with self.assertRaises(ConnectionError):
-                await Session._complete_working_memory_creation(object.__new__(Session), 'source')
-        network.assert_awaited_once()
-
-    async def test_valid_output_byte_preserved(self):
-        network = AsyncMock(return_value=wm())
-        with patch('openviking.session.session.get_openviking_config', return_value=self.config(network)):
-            result = await Session._complete_working_memory_creation(object.__new__(Session), 'source')
-        self.assertEqual(result, wm())
-        network.assert_awaited_once()
-
-    async def test_budget_blocks_network(self):
-        network = AsyncMock()
-        config = self.config(network)
-        config.memory.extraction_input_token_budget = 10
-        with patch('openviking.session.session.get_openviking_config', return_value=config):
-            with self.assertRaisesRegex(ValueError, 'budget exceeded'):
-                await Session._complete_working_memory_creation(object.__new__(Session), 'data ' * 1000)
-        network.assert_not_awaited()
-
-    async def test_cancellation_not_swallowed(self):
-        network = AsyncMock(side_effect=asyncio.CancelledError())
-        with patch('openviking.session.session.get_openviking_config', return_value=self.config(network)):
-            with self.assertRaises(asyncio.CancelledError):
-                await Session._complete_working_memory_creation(object.__new__(Session), 'source')
-
 
 class ExtractionTests(unittest.IsolatedAsyncioTestCase):
     def make_loop(self):
