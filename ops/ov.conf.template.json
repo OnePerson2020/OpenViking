@@ -9,7 +9,8 @@
       "model": "skylark-embedding-vision-251215",
       "api_key": "<secret>",
       "api_base": "https://ark.ap-southeast.bytepluses.com/api/v3",
-      "dimension": 1024
+      "dimension": 1024,
+      "query_param": "Target_modality: text.\nInstruction:根据问题检索相关的记忆笔记\nQuery:"
     },
     "max_concurrent": 20,
     "max_retries": 6

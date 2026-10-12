@@ -185,6 +185,7 @@ class VolcengineDenseEmbedder(DenseEmbedderBase):
         input_type: str = "multimodal",
         extra_headers: Optional[Dict[str, str]] = None,
         config: Optional[Dict[str, Any]] = None,
+        query_param: Optional[str] = None,
     ):
         """Initialize Volcengine Dense Embedder
 
@@ -195,6 +196,8 @@ class VolcengineDenseEmbedder(DenseEmbedderBase):
             dimension: Target dimension for truncation (optional)
             input_type: Input type - "text" or "multimodal" (default: "multimodal")
             config: Additional configuration dict
+            query_param: Instruction prefix for text queries (is_query=True); documents
+                are embedded unchanged, so setting it needs no reindex
 
         Raises:
             ValueError: If api_key is not provided
@@ -206,6 +209,7 @@ class VolcengineDenseEmbedder(DenseEmbedderBase):
         self.api_base = api_base or "https://ark.cn-beijing.volces.com/api/v3"
         self.dimension = dimension
         self.input_type = input_type
+        self.query_param = query_param
         self.extra_headers = _build_volcengine_headers(extra_headers)
 
         if not self.api_key:
@@ -267,6 +271,12 @@ class VolcengineDenseEmbedder(DenseEmbedderBase):
             duration_seconds=duration_seconds,
         )
 
+    def _query_input(self, content: "EmbeddingInput", is_query: bool) -> "EmbeddingInput":
+        # Text queries only; image queries (content parts) keep the plain input.
+        if is_query and self.query_param and isinstance(content, str):
+            return self.query_param + content
+        return content
+
     def embed(self, content: "EmbeddingInput", is_query: bool = False) -> EmbedResult:
         """Perform dense embedding on text or multimodal content
 
@@ -281,6 +291,7 @@ class VolcengineDenseEmbedder(DenseEmbedderBase):
         Raises:
             RuntimeError: When API call fails
         """
+        content = self._query_input(content, is_query)
 
         def _embed_call():
             if self.input_type == "multimodal":
@@ -332,6 +343,7 @@ class VolcengineDenseEmbedder(DenseEmbedderBase):
 
     async def embed_async(self, content: "EmbeddingInput", is_query: bool = False) -> EmbedResult:
         client = self._get_async_client()
+        content = self._query_input(content, is_query)
 
         async def _embed_call() -> EmbedResult:
             if self.input_type == "multimodal":

@@ -106,5 +106,7 @@ release tag, and the files listed in `ops/upstream-tests.txt`.
 - `memory.*_format|transport` = `json_schema`: strict extraction (local patch; upstream
   rejects the value, so an unpatched install fails to start).
 - `embedding.max_retries` 6 with the bounded embedder (20 s/request): BytePlus SG stalls.
+- `embedding.dense.query_param` = vision-embedding instruction prefix on text queries (local
+  patch; documents unchanged, no reindex). 90 vague queries / 300-doc pool: MRR .831 -> .906.
 - `queue_workers.session_commit.max_concurrent` 12.
 - Restart only on an idle queue (running+pending == 0), as deploy.py does.
