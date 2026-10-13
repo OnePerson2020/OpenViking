@@ -38,6 +38,9 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
 - Open upstream PRs (drop the matching local commit once merged, then deploy): #5758
   orphan race, #5759 VLM deadline, #5765 pathlock polling, #5802 archive retry route,
   #5812 JSON image redaction, #5818 C++ log append.
+- Upstream issues our commits work around (drop once fixed upstream): #6006 agent evolution
+  reruns per case ("session: train agent evolution once per commit…"), #3526 entity
+  duplicates across categories ("memory: route a new entity to the existing card…").
 - Client plugins (Claude Code, Codex, pi on the Mac) are upgraded separately from the server.
 - Pre-fork work dirs (0.4.23 port, Oct 6–9 improvements) and the only full data backup
   (2026-10-06, before 0.4.23) are in `local_patches/archive/`; wheels in `local_patches/build/`.
