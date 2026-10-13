@@ -84,6 +84,13 @@ new writes are routed by), per space, losslessly: the largest card stays verbati
 the others have; groups the model calls different entities are skipped (`--keys K.. --same` overrides
 that for groups the user confirmed). 2026-10-13: 288 groups (94 from a manual review of fuzzy candidates),
 349 cards removed; runs in `local_patches/entity-merge/<run>/` (plan, apply log, tar backup).
+    python3.13 ops/split_entity_history.py plan DIR KEEP_URI URI..  /  apply DIR  # oversized cards -> card + events
+
+`split_entity_history.py` turns overlapping oversized cards into one compact card: originals verbatim into one
+resource (`viking://resources/entity-archive/...`), dated records into events unless a semantically similar
+event already states them (grouped per day/topic), still-true facts into the kept card. 2026-10-13: the 8
+LocalBridge cards (329k chars) -> `开发工具/localbridge.md` (7k) + 101 events. Other 40k+ cards (multi_label,
+sara, openviking, codex) are candidates.
 `purge_task.py` removes failed task records in one restart: session_commit ones only after
 their archive has `.done`, bare ids only for non-session tasks (tar backup first; idle queue
 unless `--now`). On the Mac, `ops/ov-healthcheck-mac.sh --install
