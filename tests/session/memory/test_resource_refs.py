@@ -153,3 +153,29 @@ def test_unlink_resource_references_removes_bare_uri_but_keeps_sentence():
     assert changed is True
     assert mf.content == "用户保存了越前龙马照片。"
     assert "resource_refs" not in mf.extra_fields
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("## Notes\n- saved at viking://resources/a\n- other", "## Notes\n- [saved at](viking://resources/a)\n- other"),
+        ("  * [x] done viking://resources/a", "  * [x] [done](viking://resources/a)"),
+        ("# Title viking://resources/a", "# [Title](viking://resources/a)"),
+        ("> quoted viking://resources/a", "> [quoted](viking://resources/a)"),
+        ("| col | viking://resources/a |", "| col | viking://resources/a |"),
+        ("x - y viking://resources/a", "[x - y](viking://resources/a)"),
+    ],
+)
+def test_sync_memory_resource_refs_keeps_line_markers_outside_link(content, expected):
+    mf = MemoryFile(content=content, extra_fields={})
+
+    sync_memory_resource_refs(mf, source="content.write")
+
+    assert mf.content == expected
+    assert mf.extra_fields["resource_refs"][0]["resource_uri"] == "viking://resources/a"
+
+
+def test_extract_resource_uris_stops_at_fullwidth_open_paren():
+    assert extract_resource_uris("交接 viking://resources/h_1（temp_upload 通道）") == [
+        "viking://resources/h_1"
+    ]

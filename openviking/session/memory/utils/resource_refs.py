@@ -14,8 +14,8 @@ from openviking.session.memory.utils.link_renderer import LinkRenderer
 RESOURCE_REF_SOURCE_CONTENT_WRITE = "content.write"
 RESOURCE_REF_SOURCE_SESSION_COMMIT = "session.commit"
 
-_RESOURCE_URI_PATH_CHARS = r"[^\s<>\]\)\"'，。；：！？、,;:!?）】》]+"
-_RESOURCE_URI_BOUNDARY = r"(?=$|[\s<>\]\)\"'，。；：！？、,;:!?.）】》])"
+_RESOURCE_URI_PATH_CHARS = r"[^\s<>\]\)\"'，。；：！？、,;:!?（）【】《》]+"
+_RESOURCE_URI_BOUNDARY = r"(?=$|[\s<>\]\)\"'，。；：！？、,;:!?.（）【】《》])"
 _RESOURCE_URI_PATTERN = (
     r"viking://(?:"
     rf"resources(?:/{_RESOURCE_URI_PATH_CHARS})?"
@@ -31,7 +31,9 @@ _RESOURCE_URI_RE = re.compile(_RESOURCE_URI_PATTERN)
 _CODE_BLOCK_RE = re.compile(r"```.*?```", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 _TRAILING_URI_PUNCTUATION = ".,;:!?，。；：！？、）】》"
-_SENTENCE_BOUNDARIES = "。！？.!?\n"
+_SENTENCE_BOUNDARIES = "。！？.!?\n|"
+# Markdown markers that open a line (list item, heading, quote) stay outside the link text.
+_LINE_MARKER_RE = re.compile(r"(?:[-*+]|#{1,6}|>)[ \t]+(?:\[[ xX]\][ \t]+)?")
 _MAX_LINKIFIED_SENTENCE_CHARS = 160
 
 
@@ -269,7 +271,7 @@ def _previous_sentence_span(content: str, uri_start: int) -> Optional[tuple[int,
     sentence_end = uri_start
     while sentence_end > 0 and content[sentence_end - 1].isspace():
         sentence_end -= 1
-    if sentence_end <= 0:
+    if sentence_end <= 0 or content[sentence_end - 1] == "|":  # a table cell holds only the URI
         return None
 
     boundary_search_end = sentence_end
@@ -282,6 +284,11 @@ def _previous_sentence_span(content: str, uri_start: int) -> Optional[tuple[int,
             break
     while sentence_start < sentence_end and content[sentence_start].isspace():
         sentence_start += 1
+    line_start = content.rfind("\n", 0, sentence_start) + 1
+    if not content[line_start:sentence_start].strip():
+        marker = _LINE_MARKER_RE.match(content, sentence_start, sentence_end)
+        if marker:
+            sentence_start = marker.end()
 
     anchor = content[sentence_start:sentence_end]
     if not anchor or len(anchor) > _MAX_LINKIFIED_SENTENCE_CHARS:
