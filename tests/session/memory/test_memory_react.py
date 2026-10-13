@@ -736,6 +736,7 @@ class TestExtractLoopFinalJsonRetry:
                 "uri": target_uri,
                 "page_id": None,
                 "field": "content",
+                "found_in_other_fields": [],
                 "block_index": 3,
                 "search": "- Missing",
                 "reason": "not_found",
@@ -1077,3 +1078,4 @@ class TestExtractLoopFinalJsonRetry:
         assert extract_loop._add_refetch_results_to_messages.await_count == 1
         assert tracer_error.call_count == 0
         assert logger_warning.call_count == 0
+
