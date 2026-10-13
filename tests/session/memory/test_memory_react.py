@@ -1130,13 +1130,14 @@ class TestCanonicalEntityUris:
 
     @pytest.mark.asyncio
     async def test_new_entity_routes_to_same_name_in_other_category(self):
-        loop, Operations, Item, root = self._loop(["开发工具/cc_switch.md", "person/alice.md"])
+        loop, Operations, Item, root = self._loop(["开发工具/cc_switch.md", "person/alice.md", "ai模型/glm-5-3-flash.md"])
 
         resolved, _ = await loop.resolve_operations(
             Operations(
                 entities=[
                     Item(category="developer_tool", name="CC-Switch"),
                     Item(category="person", name="bob"),
+                    Item(category="llm", name="GLM-5.3-Flash"),
                 ]
             )
         )
@@ -1144,6 +1145,7 @@ class TestCanonicalEntityUris:
         assert [op.uris for op in resolved.upsert_operations] == [
             [f"{root}/开发工具/cc_switch.md"],
             [f"{root}/person/bob.md"],
+            [f"{root}/ai模型/glm-5-3-flash.md"],
         ]
         assert loop.viking_fs.glob.await_count == 1  # one index per loop
 

@@ -52,9 +52,9 @@ logger = get_logger(__name__)
 
 
 def _entity_name_key(file_name: str) -> str:
-    """Entity identity for dedup: case, separators and the .md suffix do not count."""
+    """Entity identity for dedup: case, separators (space . _ -) and the .md suffix do not count."""
     stem = file_name[:-3] if file_name.endswith(".md") else file_name
-    return re.sub(r"[\s_\-]+", "_", stem.strip().lower())
+    return re.sub(r"[\s._\-]+", "_", stem.strip().lower())
 
 # Memory extraction may rewrite an entire memory file in one response. Without an
 # explicit cap, providers fall back to a small server-side default (e.g. Ark's

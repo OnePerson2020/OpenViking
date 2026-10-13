@@ -6,7 +6,7 @@
     python3.13 ops/merge_entities.py plan DIR --manual groups.json   # reviewed groups: [[uri, uri, ...], ...]
 
 A group = cards in one entities root (user or one peer; never across spaces) whose file names
-match after folding case and -/_/space, the same key extract_loop uses to route new entities.
+match after folding case and ./-/_/space, the same key extract_loop uses to route new entities.
 Lossless: the largest card is kept verbatim (many cards are 10-90k chars, which an LLM rewrite
 shortens); the model only lists facts from the other cards that the kept card lacks, appended as one
 section. The kept card's metadata stays; its body is replaced through POST /content/write (memory
@@ -25,7 +25,7 @@ FIELDS = "<!-- MEMORY_FIELDS"
 
 
 def key(name):
-    return re.sub(r"[\s_\-]+", "_", name[:-3].strip().lower())
+    return re.sub(r"[\s._\-]+", "_", name[:-3].strip().lower())
 
 
 def uri(path):
