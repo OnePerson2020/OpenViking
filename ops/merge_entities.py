@@ -3,6 +3,7 @@
     python3.13 ops/merge_entities.py plan  [--out DIR]   # LLM-merge every group, write DIR/plan.jsonl; no data change
     python3.13 ops/merge_entities.py apply DIR           # tar backup, then write merged card + delete the others
     python3.13 ops/merge_entities.py plan DIR --keys k1 k2 --same   # only these groups, user-confirmed one entity
+    python3.13 ops/merge_entities.py plan DIR --manual groups.json   # reviewed groups: [[uri, uri, ...], ...]
 
 A group = cards in one entities root (user or one peer; never across spaces) whose file names
 match after folding case and -/_/space, the same key extract_loop uses to route new entities.
@@ -100,9 +101,11 @@ def api(method, path, body=None, **query):
         return {"http": e.code, "body": e.read().decode()[:500]}
 
 
-def plan(out, keys=None, same=False):
+def plan(out, keys=None, same=False, manual=None):
     out.mkdir(parents=True, exist_ok=True)
-    gs = list(groups(keys))
+    gs = list(groups(keys)) if not manual else [
+        sorted((DATA/u[len("viking://"):] for u in g), key=lambda p: (-len(body(p)), str(p))) for g in json.load(open(manual))]
+    same = same or bool(manual)
     print(f"{len(gs)} groups, {sum(map(len, gs))} cards")
     with concurrent.futures.ThreadPoolExecutor(6) as pool, open(out/"plan.jsonl", "w") as f:
         for files, res in zip(gs, pool.map(lambda fs: merge(fs, same), gs)):
@@ -154,5 +157,6 @@ if __name__ == "__main__":
     ap.add_argument("out", nargs="?", default=str(OV/f"local_patches/entity-merge/{time.strftime('%Y%m%d-%H%M')}"))
     ap.add_argument("--keys", nargs="+", help="only groups with these folded names")
     ap.add_argument("--same", action="store_true", help="user confirmed each group is one entity")
+    ap.add_argument("--manual", help="JSON list of reviewed groups (lists of entity URIs); implies --same")
     a = ap.parse_args()
-    plan(Path(a.out), a.keys, a.same) if a.cmd == "plan" else apply(Path(a.out))
+    plan(Path(a.out), a.keys, a.same, a.manual) if a.cmd == "plan" else apply(Path(a.out))

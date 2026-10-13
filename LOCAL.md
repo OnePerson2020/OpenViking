@@ -82,8 +82,8 @@ installed first; deploy.py only manages the overlay files.
 `merge_entities.py` merges entity cards whose names match after folding case and -/_/space (the key
 new writes are routed by), per space, losslessly: the largest card stays verbatim plus the facts only
 the others have; groups the model calls different entities are skipped (`--keys K.. --same` overrides
-that for groups the user confirmed). 2026-10-13: 194 groups,
-247 cards removed; runs in `local_patches/entity-merge/<run>/` (plan, apply log, tar backup).
+that for groups the user confirmed). 2026-10-13: 288 groups (94 from a manual review of fuzzy candidates),
+349 cards removed; runs in `local_patches/entity-merge/<run>/` (plan, apply log, tar backup).
 `purge_task.py` removes failed task records in one restart: session_commit ones only after
 their archive has `.done`, bare ids only for non-session tasks (tar backup first; idle queue
 unless `--now`). On the Mac, `ops/ov-healthcheck-mac.sh --install
