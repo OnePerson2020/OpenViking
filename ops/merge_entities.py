@@ -9,7 +9,8 @@ A group = cards in one entities root (user or one peer; never across spaces) who
 match after folding case and ./-/_/space, the same key extract_loop uses to route new entities.
 Lossless: the largest card is kept verbatim (many cards are 10-90k chars, which an LLM rewrite
 shortens); the model only lists facts from the other cards that the kept card lacks, appended as one
-section. The kept card's metadata stays; its body is replaced through POST /content/write (memory
+section. The metadata of the kept card stays (or, when it has none, that of the first card that
+has; the merged text then goes to that card's path); its body is replaced through POST /content/write (memory
 path: schema overview + embedding refresh). The others go through DELETE /fs, then category dirs left
 without cards are removed. A group the model judges to be different entities is skipped, and
 apply skips any group whose files changed since plan. Undo: restore the tar, then /content/reindex.
@@ -111,7 +112,9 @@ def plan(out, keys=None, same=False, manual=None):
         for files, res in zip(gs, pool.map(lambda fs: merge(fs, same), gs)):
             if res.get("same_entity"):
                 res["content"] = merged(body(files[0]), res.get("missing_facts") or [])
+            with_meta = [p for p in files if '"memory_type"' in p.read_text(encoding="utf-8").partition(FIELDS)[2]]
             rec = {"keep": uri(files[0]), "delete": [uri(p) for p in files[1:]],
+                   "meta_from": uri((with_meta or files)[0]),
                    "sha256": {uri(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in files},
                    "sizes": [len(body(p)) for p in files], **res}
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -130,17 +133,18 @@ def apply(out):
         if not rec.get("same_entity") or not rec.get("content") or stale:
             log.write(json.dumps({"keep": rec["keep"], "skipped": "stale" if stale else "not merged", "stale": stale}, ensure_ascii=False) + "\n")
             continue
-        target, delete = re.sub(r"\s", "_", rec["keep"]), list(rec["delete"])
-        if target == rec["keep"]:  # replace keeps the card's metadata, refreshes overview + embedding
+        base = rec.get("meta_from") or rec["keep"]  # the card whose metadata survives
+        target, delete = re.sub(r"\s", "_", base), [u for u in [rec["keep"], *rec["delete"]] if u != base]
+        if target == base:  # replace keeps the card's metadata, refreshes overview + embedding
             w = api("POST", "/content/write", {"uri": target, "content": rec["content"] + "\n", "mode": "replace", "wait": False})
         else:  # the HTTP API maps whitespace in paths to "_": create there with the metadata, drop the old card
-            raw = path(rec["keep"]).read_text(encoding="utf-8")
+            raw = path(base).read_text(encoding="utf-8")
             meta = "\n\n" + FIELDS + raw.split(FIELDS, 1)[1] if FIELDS in raw else "\n"
             w = api("POST", "/content/write", {"uri": target, "content": rec["content"] + meta, "mode": "create", "wait": False})
-            delete.append(rec["keep"])
+            delete.append(base)
         ok = w.get("status") == "ok"
         dels = [{"uri": u, "r": api("DELETE", "/fs", uri=u)} for u in delete] if ok else []
-        dirs.update(path(u).parent for u in rec["delete"])
+        dirs.update(path(u).parent for u in delete)
         log.write(json.dumps({"keep": target, "write": w.get("status") or w, "deleted": [d["uri"] for d in dels if d["r"].get("status") == "ok"],
                               "delete_errors": [d for d in dels if d["r"].get("status") != "ok"]}, ensure_ascii=False) + "\n")
         log.flush()
