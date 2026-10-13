@@ -77,6 +77,12 @@ installed first; deploy.py only manages the overlay files.
     python3.13 ops/retry_archive.py <session_id> <archive_id>       # hash-bound retry, waits while busy
     python3.13 ops/purge_task.py <backup_dir> [--now] TASK_ID[=SESSION/ARCHIVE] ...
 
+    python3.13 ops/merge_entities.py plan [DIR]  /  apply DIR      # same-name entity cards across categories
+
+`merge_entities.py` merges entity cards whose names match after folding case and -/_/space (the key
+new writes are routed by), per space, losslessly: the largest card stays verbatim plus the facts only
+the others have; groups the model calls different entities are skipped. 2026-10-13: 186 groups,
+236 cards removed; runs in `local_patches/entity-merge/<run>/` (plan, apply log, tar backup).
 `purge_task.py` removes failed task records in one restart: session_commit ones only after
 their archive has `.done`, bare ids only for non-session tasks (tar backup first; idle queue
 unless `--now`). On the Mac, `ops/ov-healthcheck-mac.sh --install
