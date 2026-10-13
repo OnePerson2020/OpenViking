@@ -1038,8 +1038,27 @@ class SessionCompressorV3:
 
             case_uri_map = dict(case_uri_by_name or {})
 
+            # Without a rollout evaluator the case never reaches the analyzer prompt:
+            # every case would rerun the same whole-session analysis and write
+            # near-duplicate trajectories/experiences. Train once per commit and
+            # link the remaining cases to that result.
+            case_independent = getattr(self.rollout_analyzer, "evaluator", None) is None
+            shared_training: tuple[RolloutAnalysis, RolloutTrainingResult] | None = None
+
             for case in cases:
                 case_uri = _case_uri_for_case(case, case_uri_map)
+                if shared_training is not None:
+                    if case_uri:
+                        shared_analysis, shared_result = shared_training
+                        await self._link_case_to_training_outputs(
+                            analysis=shared_analysis,
+                            case_uri=case_uri,
+                            plan=shared_result.plan,
+                            apply_result=shared_result.apply_result,
+                            ctx=ctx,
+                            viking_fs=viking_fs,
+                        )
+                    continue
                 rollout = Rollout(
                     case=case,
                     messages=list(messages),
@@ -1126,6 +1145,8 @@ class SessionCompressorV3:
                                     skill_uris.append(str(uri))
 
                 submitted += 1
+                if case_independent:
+                    shared_training = (analysis, exp_training_result)
 
                 if collect_memory_diff:
                     # Build diff from the strongly typed training result returned by
