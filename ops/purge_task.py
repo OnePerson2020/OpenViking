@@ -38,7 +38,7 @@ for rec in a.records:
     record = json.load(open(hits[0]))
     assert record.get("status") == "failed", f"{task} is {record.get('status')}"
     if where:
-        A = V/f"user/mayunxiang/sessions/{where.split('/')[0]}/history/{where.split('/')[1]}"
+        A = V/f"user/{json.load(open(OV/"ovcli.conf"))["user"]}/sessions/{where.split('/')[0]}/history/{where.split('/')[1]}"
         assert (A/".done").exists() and not (A/".failed.json").exists(), f"{task}: archive not resolved"
     else:
         assert record.get("task_type") != "session_commit", f"{task}: session_commit needs =SESSION/ARCHIVE"

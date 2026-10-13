@@ -112,7 +112,8 @@ release tag, and the files listed in `ops/upstream-tests.txt`.
 ## Config
 
 `ops/ov.conf.template.json` is the live `~/.openviking/ov.conf` with keys replaced by
-`<secret>`. `python3.13 ops/ovconf.py` diffs live against it (exit 1 on drift);
+`<secret>`, Ark endpoint IDs and internal hosts by `<private>`, the home directory by `~`
+(the backup branch is public). `python3.13 ops/ovconf.py` diffs live against it (exit 1 on drift);
 `--write` refreshes it, then commit. Non-default values and why:
 
 - `vlm.max_tokens` 40000, `vlm.timeout` 1800: the largest normal output in 19,839 calls was

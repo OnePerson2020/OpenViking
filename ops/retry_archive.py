@@ -1,6 +1,6 @@
 """Hash-bound retry of one failed archive, waiting while its session is busy.
 
-    python3.13 ops/retry_archive.py <session_id> <archive_id> [--user mayunxiang]
+    python3.13 ops/retry_archive.py <session_id> <archive_id> [--user NAME]
 
 Uses the user's key from ~/.openviking/ovcli.conf. Long-term steps already recorded
 are not repeated. Afterwards clear the old task record with ops/purge_task.py.
@@ -8,9 +8,9 @@ are not repeated. Afterwards clear the old task record with ops/purge_task.py.
 import argparse, hashlib, json, time, urllib.request
 from pathlib import Path
 
-ap = argparse.ArgumentParser(); ap.add_argument("session"); ap.add_argument("archive"); ap.add_argument("--user", default="mayunxiang")
+ap = argparse.ArgumentParser(); ap.add_argument("session"); ap.add_argument("archive"); ap.add_argument("--user", help="default: user in ovcli.conf")
 a = ap.parse_args()
-OV = Path.home()/".openviking"; key = json.load(open(OV/"ovcli.conf"))["api_key"]
+OV = Path.home()/".openviking"; cli = json.load(open(OV/"ovcli.conf")); key = cli["api_key"]; a.user = a.user or cli["user"]
 A = OV/f"data/viking/default/user/{a.user}/sessions/{a.session}/history/{a.archive}"
 def call(method, path, body=None):
     req = urllib.request.Request(f"http://127.0.0.1:1933{path}", method=method,

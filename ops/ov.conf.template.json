@@ -1,7 +1,7 @@
 {
   "allow_private_networks": true,
   "storage": {
-    "workspace": "/home/mayunxiang.26/.openviking/data"
+    "workspace": "~/.openviking/data"
   },
   "embedding": {
     "dense": {
@@ -17,8 +17,8 @@
   },
   "vlm": {
     "provider": "volcengine",
-    "model": "ep-20260924165853-hxg5k",
-    "api_base": "https://ark-cn-beijing.bytedance.net/api/v3",
+    "model": "<private>",
+    "api_base": "<private>",
     "temperature": 0.0,
     "max_retries": 5,
     "timeout": 1800.0,
@@ -35,11 +35,11 @@
   },
   "log": {
     "level": "WARNING",
-    "output": "/home/mayunxiang.26/.openviking/logs/openviking.log",
+    "output": "~/.openviking/logs/openviking.log",
     "rotation": true,
     "rotation_days": 7,
     "rotation_interval": "midnight",
-    "model_calls_output": "/home/mayunxiang.26/.openviking/logs/model-calls.jsonl"
+    "model_calls_output": "~/.openviking/logs/model-calls.jsonl"
   },
   "retrieval": {
     "recall_intent_timeout_s": 20.0
@@ -71,8 +71,8 @@
   },
   "query_planner": {
     "provider": "volcengine",
-    "model": "ep-20260924165918-mpzlm",
-    "api_base": "https://ark-cn-beijing.bytedance.net/api/v3",
+    "model": "<private>",
+    "api_base": "<private>",
     "temperature": 0.0,
     "max_retries": 5,
     "timeout": 300.0,
