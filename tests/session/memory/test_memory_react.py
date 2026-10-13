@@ -1079,3 +1079,110 @@ class TestExtractLoopFinalJsonRetry:
         assert tracer_error.call_count == 0
         assert logger_warning.call_count == 0
 
+
+class TestCanonicalEntityUris:
+    @staticmethod
+    def _loop(existing):
+        class Item(BaseModel):
+            category: str
+            name: str
+
+        class Operations(BaseModel):
+            entities: list[Item]
+            delete_ids: list = Field(default_factory=list)
+
+        schema = MemoryTypeSchema(
+            memory_type="entities",
+            directory="viking://user/{{ user_space }}/memories/entities",
+            filename_template="{{ category|lower }}/{{ name|lower }}.md",
+            fields=[
+                MemoryField(name="category", field_type=FieldType.STRING, merge_op=MergeOp.REPLACE),
+                MemoryField(name="name", field_type=FieldType.STRING, merge_op=MergeOp.REPLACE),
+            ],
+        )
+        root = "viking://user/user_a/memories/entities"
+        files = [f"{root}/{rel}" for rel in existing]
+
+        async def exists(uri, ctx=None):
+            return uri in files
+
+        async def glob(pattern, uri, ctx=None):
+            assert uri == root
+            return {"matches": files + [f"{root}/开发工具/.overview.md"], "count": len(files) + 1}
+
+        context_provider = MagicMock()
+        context_provider.get_memory_schemas.return_value = [schema]
+        context_provider.read_file_contents = {}
+        ctx = MagicMock()
+        ctx.user.user_id = "user_a"
+        extract_context = MagicMock()
+        extract_context.messages = []
+        extract_context.page_id_map = PageIdMap()
+        loop = object.__new__(ExtractLoop)
+        loop.ctx = ctx
+        loop.context_provider = context_provider
+        loop._extract_context = extract_context
+        loop._isolation_handler = MemoryIsolationHandler(ctx, extract_context)
+        loop.viking_fs = SimpleNamespace(exists=AsyncMock(side_effect=exists), glob=AsyncMock(side_effect=glob))
+        loop._entity_name_indexes = {}
+        loop._entity_redirects = {}
+        return loop, Operations, Item, root
+
+    @pytest.mark.asyncio
+    async def test_new_entity_routes_to_same_name_in_other_category(self):
+        loop, Operations, Item, root = self._loop(["开发工具/cc_switch.md", "person/alice.md"])
+
+        resolved, _ = await loop.resolve_operations(
+            Operations(
+                entities=[
+                    Item(category="developer_tool", name="CC-Switch"),
+                    Item(category="person", name="bob"),
+                ]
+            )
+        )
+
+        assert [op.uris for op in resolved.upsert_operations] == [
+            [f"{root}/开发工具/cc_switch.md"],
+            [f"{root}/person/bob.md"],
+        ]
+        assert loop.viking_fs.glob.await_count == 1  # one index per loop
+
+        messages = []
+        loop._output_protocol = MagicMock()
+        loop._output_protocol.render_tool_result_messages.return_value = []
+        loop._output_context = None
+        await loop._add_refetch_results_to_messages(messages, {f"{root}/开发工具/cc_switch.md": {}})
+        note = messages[-1]["content"]
+        assert f"{root}/developer_tool/cc-switch.md was routed to the existing card" in note
+        assert "more specific name" in note
+
+    @pytest.mark.asyncio
+    async def test_existing_path_is_kept(self):
+        loop, Operations, Item, root = self._loop(["tool/codex.md", "cli_tool/codex.md"])
+
+        resolved, _ = await loop.resolve_operations(
+            Operations(entities=[Item(category="cli_tool", name="codex")])
+        )
+
+        assert resolved.upsert_operations[0].uris == [f"{root}/cli_tool/codex.md"]
+        loop.viking_fs.glob.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_real_viking_fs_routes_to_existing_card(self, service, request_context):
+        from openviking.storage.viking_fs import get_viking_fs
+
+        viking_fs = get_viking_fs()
+        user_space = request_context.user.user_space_name()
+        root = f"viking://user/{user_space}/memories/entities"
+        await viking_fs.write_file(f"{root}/开发工具/cc_switch.md", "# cc_switch", ctx=request_context)
+        await viking_fs.write_file(f"{root}/开发工具/.overview.md", "overview", ctx=request_context)
+        loop = object.__new__(ExtractLoop)
+        loop.ctx = request_context
+        loop.viking_fs = viking_fs
+        loop._entity_name_indexes = {}
+        loop._entity_redirects = {}
+        schema = SimpleNamespace(memory_type="entities")
+
+        assert await loop._canonical_entity_uris(
+            schema, [f"{root}/developer_tool/cc-switch.md", f"{root}/person/bob.md"]
+        ) == [f"{root}/开发工具/cc_switch.md", f"{root}/person/bob.md"]

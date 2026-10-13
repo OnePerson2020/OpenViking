@@ -44,10 +44,17 @@ from openviking.session.memory.utils.json_parser import JsonUtils
 from openviking.session.memory.utils.uri import generate_uri
 from openviking.storage.viking_fs import VikingFS, get_viking_fs
 from openviking.telemetry import bind_telemetry_stage, tracer
+from openviking_cli.exceptions import NotFoundError
 from openviking_cli.utils import get_logger
 from openviking_cli.utils.config import get_openviking_config
 
 logger = get_logger(__name__)
+
+
+def _entity_name_key(file_name: str) -> str:
+    """Entity identity for dedup: case, separators and the .md suffix do not count."""
+    stem = file_name[:-3] if file_name.endswith(".md") else file_name
+    return re.sub(r"[\s_\-]+", "_", stem.strip().lower())
 
 # Memory extraction may rewrite an entire memory file in one response. Without an
 # explicit cap, providers fall back to a small server-side default (e.g. Ark's
@@ -180,6 +187,8 @@ class ExtractLoop:
         self.model = model or self.vlm.model
         self.max_iterations = max_iterations
         self.ctx = ctx
+        self._entity_name_indexes: Dict[str, Dict[str, str]] = {}
+        self._entity_redirects: Dict[str, str] = {}  # existing card -> path the model asked for
         self.context_provider = context_provider
         self.thinking = bool(thinking)
         self.max_output_tokens = max_output_tokens
@@ -985,6 +994,8 @@ class ExtractLoop:
                         extract_context=self._extract_context,
                     )
 
+                if not is_event:
+                    resolved_op.uris = await self._canonical_entity_uris(schema, resolved_op.uris)
                 upsert_operations.append(resolved_op)
 
         delete_replacements: dict[str, str] = {}
@@ -1116,6 +1127,49 @@ class ExtractLoop:
             extract_context=self._extract_context,
         )
         return candidate_uri if candidate_uri != source_uri else source_uri
+
+    async def _canonical_entity_uris(self, schema: Any, uris: List[str]) -> List[str]:
+        """Route a new entity card to an existing card with the same name.
+
+        Entity paths are ``category/name`` and the model picks the category freely, so
+        one entity forks per category, language and spelling (``开发工具/x.md``,
+        ``developer_tool/x.md``, ``dev_tool/x-y.md``). An unwritten path whose name
+        matches an existing card in another category is redirected to that card; the
+        unread-file refetch then shows it to the model, which merges into it.
+        """
+        if getattr(schema, "memory_type", None) != "entities" or not getattr(self, "viking_fs", None):
+            return uris
+        resolved = []
+        for uri in uris:
+            root, sep, rel = uri.partition("/memories/entities/")
+            match = None
+            if sep:
+                try:
+                    if not await self.viking_fs.exists(uri, ctx=self.ctx):
+                        index = await self._entity_name_index(root + "/memories/entities")
+                        match = index.get(_entity_name_key(rel.rsplit("/", 1)[-1]))
+                except Exception as e:  # best effort: never block the write itself
+                    tracer.info(f"entity name lookup skipped for {uri}: {e}")
+            if match and match != uri:
+                tracer.info(f"entity {uri} -> existing {match}")
+                self._entity_redirects[match] = uri
+            resolved.append(match or uri)
+        return resolved
+
+    async def _entity_name_index(self, root: str) -> Dict[str, str]:
+        cache = self._entity_name_indexes
+        if root not in cache:
+            try:
+                found = await self.viking_fs.glob("**/*.md", uri=root, ctx=self.ctx)
+            except NotFoundError:  # no entity written yet
+                found = {}
+            index: Dict[str, str] = {}
+            for uri in sorted(found.get("matches", []) if isinstance(found, dict) else found):
+                name = uri.rsplit("/", 1)[-1]
+                if not name.startswith("."):
+                    index.setdefault(_entity_name_key(name), uri)
+            cache[root] = index
+        return cache[root]
 
     def _normalize_delete_ids(self, raw_delete_ids: List[Any]) -> List[DeleteId]:
         delete_ids: List[DeleteId] = []
@@ -1692,9 +1746,13 @@ class ExtractLoop:
             call_id_seq += 1
 
         # Add reminder message for the model
-        messages.append(
-            {
-                "role": "user",
-                "content": "Note: The files above were automatically read because they exist and you didn't read them before deciding to write. Please consider the existing content when making write decisions. You can now output updated operations.",
-            }
-        )
+        content = "Note: The files above were automatically read because they exist and you didn't read them before deciding to write. Please consider the existing content when making write decisions. You can now output updated operations."
+        for uri in refetch_uris:
+            requested = getattr(self, "_entity_redirects", {}).get(uri)
+            if requested:
+                content += (
+                    f"\nYour new entity {requested} was routed to the existing card {uri} because the"
+                    " names match. If it is the same entity, merge into that card. If it is a"
+                    " different entity, write it under a more specific name instead."
+                )
+        messages.append({"role": "user", "content": content})
