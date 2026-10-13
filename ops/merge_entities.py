@@ -2,6 +2,7 @@
 
     python3.13 ops/merge_entities.py plan  [--out DIR]   # LLM-merge every group, write DIR/plan.jsonl; no data change
     python3.13 ops/merge_entities.py apply DIR           # tar backup, then write merged card + delete the others
+    python3.13 ops/merge_entities.py plan DIR --keys k1 k2 --same   # only these groups, user-confirmed one entity
 
 A group = cards in one entities root (user or one peer; never across spaces) whose file names
 match after folding case and -/_/space, the same key extract_loop uses to route new entities.
@@ -34,14 +35,14 @@ def body(path):
     return path.read_text(encoding="utf-8").split(FIELDS, 1)[0].rstrip()
 
 
-def groups():
+def groups(keys=None):
     for root in sorted(DATA.glob("user/*/memories/entities")) + sorted(DATA.glob("user/*/peers/*/memories/entities")):
         cards = [p for p in root.rglob("*.md") if not p.name.startswith(".")]
         by_key = collections.defaultdict(list)
         for p in cards:
             by_key[key(p.name)].append(p)
         for files in by_key.values():
-            if len(files) > 1:
+            if len(files) > 1 and (not keys or key(files[0].name) in keys):
                 files.sort(key=lambda p: (-len(body(p)), str(p)))
                 yield files
 
@@ -62,12 +63,13 @@ If they are different entities, set same_entity=false and missing_facts=[].
 Return JSON only."""
 
 
-def merge(files):
+def merge(files, same=False):
     cards = "\n\n".join(f"### card {i + 1}: {uri(p)} (modified {time.strftime('%Y-%m-%d', time.localtime(p.stat().st_mtime))})\n{body(p)}"
                         for i, p in enumerate(files))
     vlm = CONF["vlm"]
     req = {"model": vlm["model"], "temperature": 0, "max_tokens": 16000, "thinking": {"type": "disabled"},
-           "messages": [{"role": "system", "content": PROMPT}, {"role": "user", "content": cards}],
+           "messages": [{"role": "system", "content": PROMPT + ("\nThe user confirmed that all cards describe the same entity: same_entity must be true." if same else "")},
+                        {"role": "user", "content": cards}],
            "response_format": {"type": "json_schema", "json_schema": {"name": "merge", "strict": True, "schema": SCHEMA}}}
     for attempt in range(4):
         try:
@@ -98,12 +100,12 @@ def api(method, path, body=None, **query):
         return {"http": e.code, "body": e.read().decode()[:500]}
 
 
-def plan(out):
+def plan(out, keys=None, same=False):
     out.mkdir(parents=True, exist_ok=True)
-    gs = list(groups())
+    gs = list(groups(keys))
     print(f"{len(gs)} groups, {sum(map(len, gs))} cards")
     with concurrent.futures.ThreadPoolExecutor(6) as pool, open(out/"plan.jsonl", "w") as f:
-        for files, res in zip(gs, pool.map(merge, gs)):
+        for files, res in zip(gs, pool.map(lambda fs: merge(fs, same), gs)):
             if res.get("same_entity"):
                 res["content"] = merged(body(files[0]), res.get("missing_facts") or [])
             rec = {"keep": uri(files[0]), "delete": [uri(p) for p in files[1:]],
@@ -150,5 +152,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["plan", "apply"])
     ap.add_argument("out", nargs="?", default=str(OV/f"local_patches/entity-merge/{time.strftime('%Y%m%d-%H%M')}"))
+    ap.add_argument("--keys", nargs="+", help="only groups with these folded names")
+    ap.add_argument("--same", action="store_true", help="user confirmed each group is one entity")
     a = ap.parse_args()
-    (plan if a.cmd == "plan" else apply)(Path(a.out))
+    plan(Path(a.out), a.keys, a.same) if a.cmd == "plan" else apply(Path(a.out))
