@@ -279,7 +279,10 @@ def _previous_sentence_span(content: str, uri_start: int) -> Optional[tuple[int,
         boundary_search_end = sentence_end - 1
     sentence_start = 0
     for idx in range(boundary_search_end - 1, -1, -1):
-        if content[idx] in _SENTENCE_BOUNDARIES:
+        # An ASCII period inside a token (SKILL.md, v1.2) does not end a sentence.
+        if content[idx] in _SENTENCE_BOUNDARIES and not (
+            content[idx] == "." and not content[idx + 1].isspace()
+        ):
             sentence_start = idx + 1
             break
     while sentence_start < sentence_end and content[sentence_start].isspace():

@@ -175,6 +175,27 @@ def test_sync_memory_resource_refs_keeps_line_markers_outside_link(content, expe
     assert mf.extra_fields["resource_refs"][0]["resource_uri"] == "viking://resources/a"
 
 
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (
+            "- 该 skill 作为 SKILL.md 资源存储，资源路径为 viking://resources/a",
+            "- [该 skill 作为 SKILL.md 资源存储，资源路径为](viking://resources/a)",
+        ),
+        (
+            "release v1.2 notes viking://resources/a",
+            "[release v1.2 notes](viking://resources/a)",
+        ),
+        ("Done. See viking://resources/a", "Done. [See](viking://resources/a)"),
+    ],
+)
+def test_sync_memory_resource_refs_ascii_period_ends_sentence_only_before_space(content, expected):
+    mf = MemoryFile(content=content, extra_fields={})
+
+    assert sync_memory_resource_refs(mf, source="session.commit")
+    assert mf.content == expected
+
+
 def test_extract_resource_uris_stops_at_fullwidth_open_paren():
     assert extract_resource_uris("交接 viking://resources/h_1（temp_upload 通道）") == [
         "viking://resources/h_1"
