@@ -37,7 +37,11 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   Working Memory leftovers after the v0.5.0 port" (incl. `memory.working_memory_transport`).
 - Open upstream PRs (drop the matching local commit once merged, then deploy): #5758
   orphan race, #5759 VLM deadline, #5765 pathlock polling, #5802 archive retry route,
-  #5812 JSON image redaction, #5818 C++ log append.
+  #5812 JSON image redaction, #5818 C++ log append, #6038 filtered path guard, #6065
+  embedding attempt deadline (replaces "embedding: bound Volcengine embedding requests";
+  keep `embedding.timeout` 20 in ov.conf when adopting it). #5759 and #6065 are written
+  against upstream #5950 (RetryVLM/RetryEmbedder, after v0.5.0): on an upgrade past it the
+  local VLM-deadline and Volcengine-embedding commits conflict; take the PR versions.
 - Upstream issues our commits work around (drop once fixed upstream): #6006 agent evolution
   reruns per case ("session: train agent evolution once per commit…"), #3526 entity
   duplicates across categories ("memory: route a new entity to the existing card…").
