@@ -43,8 +43,7 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   keep `embedding.timeout` 20 in ov.conf when adopting it). Merged upstream, drop on the next upgrade: #6054
   (resource-ref linkify; replaces "memory: resource-ref linkify keeps Markdown line markers out
   of the link"; its follow-up #6069, indented list markers, is still open — our commit already
-  handles indentation). Both versions still treat any "." as a sentence end (`SKILL.md 资源`),
-  not reported upstream yet. #5759 and #6065 are written
+  handles indentation). Inner "." (`SKILL.md`): fixed here, upstream #6072 / PR #6073. #5759 and #6065 are written
   against upstream #5950 (RetryVLM/RetryEmbedder, after v0.5.0): on an upgrade past it the
   local VLM-deadline and Volcengine-embedding commits conflict; take the PR versions.
 - Upstream issues our commits work around (drop once fixed upstream): #6006 agent evolution
