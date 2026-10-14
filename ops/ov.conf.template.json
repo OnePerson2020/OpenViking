@@ -56,7 +56,7 @@
     "session_auto_commit": {
       "enabled": true
     },
-    "extraction_output_format": "json_schema"
+    "extraction_output_format": "json"
   },
   "pdf": {
     "strategy": "mineru",

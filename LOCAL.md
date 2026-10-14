@@ -39,7 +39,11 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   orphan race, #5759 VLM deadline, #5765 pathlock polling, #5802 archive retry route,
   #5812 JSON image redaction, #5818 C++ log append, #6038 filtered path guard, #6065
   embedding attempt deadline (replaces "embedding: bound Volcengine embedding requests";
-  keep `embedding.timeout` 20 in ov.conf when adopting it). #5759 and #6065 are written
+  keep `embedding.timeout` 20 in ov.conf when adopting it). Merged upstream, drop on the next upgrade: #6054
+  (resource-ref linkify; replaces "memory: resource-ref linkify keeps Markdown line markers out
+  of the link"; its follow-up #6069, indented list markers, is still open — our commit already
+  handles indentation). Both versions still treat any "." as a sentence end (`SKILL.md 资源`),
+  not reported upstream yet. #5759 and #6065 are written
   against upstream #5950 (RetryVLM/RetryEmbedder, after v0.5.0): on an upgrade past it the
   local VLM-deadline and Volcengine-embedding commits conflict; take the PR versions.
 - Upstream issues our commits work around (drop once fixed upstream): #6006 agent evolution
@@ -130,10 +134,14 @@ release tag, and the files listed in `ops/upstream-tests.txt`.
   doubled the waste, ~13 min per call). Samples: `logs/truncated-outputs.jsonl`.
 - `memory.extraction_input_token_budget` 160000 / `extraction_read_token_budget` 16000: WM and
   fallback batch sizes derive from these (local patch).
-- `memory.*_format|transport` = `json_schema`: strict extraction (local patch; upstream
-  rejects the value, so an unpatched install fails to start).
+- `memory.extraction_output_format` = `json` since 2026-10-14 (was `json_schema`, the local
+  strict protocol; its code stays in the series until the json/json_schema A/B in
+  `~/ov-ab-20261014` is settled, then it is removed).
 - `embedding.max_retries` 6 with the bounded embedder (20 s/request): BytePlus SG stalls.
 - `embedding.dense.query_param` = vision-embedding instruction prefix on text queries (local
   patch; documents unchanged, no reindex). 90 vague queries / 300-doc pool: MRR .831 -> .906.
 - `queue_workers.session_commit.max_concurrent` 12.
+- A commit that waits for its predecessor is requeued after a 2 s pause inside the worker
+  ("diagnostics + queue: …pause before commit requeue"). Without it, each waiting message
+  cycles ~2/s (7-9% of a core, 2026-10-09). Upstream main (b8ec9d8) still requeues instantly.
 - Restart only on an idle queue (running+pending == 0), as deploy.py does.
