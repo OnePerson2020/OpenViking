@@ -219,6 +219,40 @@ async def test_phase2_cancellation_marks_archive_only_when_requested(
 
 
 @pytest.mark.asyncio
+async def test_phase2_failure_after_done_does_not_mark_archive_failed(monkeypatch):
+    session_uri = "viking://user/default/sessions/session-1"
+    archive_uri = f"{session_uri}/history/archive_001"
+    tracker = TaskTracker(_TaskStore())
+    await tracker.create(
+        "session_commit", account_id="default", user_id="default", task_id="task-1"
+    )
+    await tracker.start("task-1", account_id="default", user_id="default")
+    # Phase 2 finished and wrote .done; recording the task result then fails.
+    monkeypatch.setattr(tracker, "complete", AsyncMock(side_effect=RuntimeError("task store down")))
+    monkeypatch.setattr("openviking.service.task_tracker.get_task_tracker", lambda: tracker)
+    monkeypatch.setattr("openviking.session.session._enabled_memory_types", lambda: set())
+    files = {}
+    session = Session(
+        viking_fs=_MemoryVikingFS(files),
+        session_id="session-1",
+        session_uri=session_uri,
+    )
+
+    await session._run_memory_extraction(
+        task_id="task-1",
+        archive_uri=archive_uri,
+        messages=[Message(id="m1", role="user", parts=[TextPart("hello")])],
+        first_message_id="m1",
+        last_message_id="m1",
+        memory_policy=None,
+    )
+
+    assert f"{archive_uri}/.done" in files
+    # .done wins in terminal_state; a failure marker next to it only contradicts it.
+    assert f"{archive_uri}/.failed.json" not in files
+
+
+@pytest.mark.asyncio
 async def test_resume_queued_commit_continues_phase2(monkeypatch):
     session_uri = "viking://user/default/sessions/session-1"
     archive_uri = f"{session_uri}/history/archive_001"

@@ -2509,6 +2509,13 @@ class Session:
         """Persist a terminal failure marker for the archive."""
         if not self._viking_fs:
             return
+        if await self._archives.file_exists(archive_uri, ".done"):
+            # ``.done`` wins in terminal_state; a late failure marker (e.g. the task
+            # store failing after Phase 2 completed) would only contradict it.
+            logger.warning(
+                "Skipped failure marker for completed archive %s (stage=%s)", archive_uri, stage
+            )
+            return
         payload = {
             "stage": stage,
             "error": error,
