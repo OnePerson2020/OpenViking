@@ -56,6 +56,19 @@ def _entity_name_key(file_name: str) -> str:
     stem = file_name[:-3] if file_name.endswith(".md") else file_name
     return re.sub(r"[\s._\-]+", "_", stem.strip().lower())
 
+
+# ponytail: one global cosine threshold, calibrated 2026-10-14 on one deployment
+# (Volcengine skylark-embedding-vision): 63% of reviewed duplicate pairs score >= 0.85,
+# ~27% of ordinary new cards have a neighbour that high (mostly siblings the model
+# keeps apart). Per-embedding-model calibration if this is upstreamed.
+_SIMILAR_ENTITY_SCORE = 0.85
+
+
+def _entity_ids_compatible(a: str, b: str) -> bool:
+    """Names carrying different long numbers (job_1521824 / job_1521825) are different entities."""
+    ia, ib = set(re.findall(r"\d{4,}", a)), set(re.findall(r"\d{4,}", b))
+    return not (ia and ib and not ia & ib)
+
 # Memory extraction may rewrite an entire memory file in one response. Without an
 # explicit cap, providers fall back to a small server-side default (e.g. Ark's
 # 4096) and truncate the program mid-string, making the output unusable. This is
@@ -189,6 +202,8 @@ class ExtractLoop:
         self.ctx = ctx
         self._entity_name_indexes: Dict[str, Dict[str, str]] = {}
         self._entity_redirects: Dict[str, str] = {}  # existing card -> path the model asked for
+        self._entity_similar_offered: set = set()  # existing cards already shown as look-alikes
+        self._entity_similar_pending: List[str] = []  # notes for the next round
         self.context_provider = context_provider
         self.thinking = bool(thinking)
         self.max_output_tokens = max_output_tokens
@@ -416,10 +431,16 @@ class ExtractLoop:
                     continue
                 # Check if any write_uris target existing files that weren't read
                 refetch_uris = await self._check_unread_existing_files(final_operations)
-                if refetch_uris:
-                    tracer.info(f"Found unread existing files: {refetch_uris}, refetching...")
-                    # Add refetch results to messages and continue loop
-                    await self._add_refetch_results_to_messages(messages, refetch_uris)
+                similar_note = self._pop_similar_entity_note()
+                if refetch_uris or similar_note:
+                    if refetch_uris:
+                        tracer.info(f"Found unread existing files: {refetch_uris}, refetching...")
+                        # Add refetch results to messages and continue loop
+                        await self._add_refetch_results_to_messages(messages, refetch_uris)
+                    if similar_note and refetch_uris:
+                        messages[-1]["content"] += "\n" + similar_note
+                    elif similar_note:
+                        messages.append({"role": "user", "content": similar_note})
                     # A valid program started a new generation phase with richer context.
                     # Give that regenerated response its own format-repair opportunity.
                     self._format_retry_count = 0
@@ -995,7 +1016,9 @@ class ExtractLoop:
                     )
 
                 if not is_event:
-                    resolved_op.uris = await self._canonical_entity_uris(schema, resolved_op.uris)
+                    resolved_op.uris = await self._canonical_entity_uris(
+                        schema, resolved_op.uris, resolved_op.memory_fields
+                    )
                 upsert_operations.append(resolved_op)
 
         delete_replacements: dict[str, str] = {}
@@ -1131,14 +1154,18 @@ class ExtractLoop:
             return source_uri
         return candidate_uri if candidate_uri != source_uri else source_uri
 
-    async def _canonical_entity_uris(self, schema: Any, uris: List[str]) -> List[str]:
+    async def _canonical_entity_uris(
+        self, schema: Any, uris: List[str], fields: Optional[Dict[str, Any]] = None
+    ) -> List[str]:
         """Route a new entity card to an existing card with the same name.
 
         Entity paths are ``category/name`` and the model picks the category freely, so
         one entity forks per category, language and spelling (``开发工具/x.md``,
         ``developer_tool/x.md``, ``dev_tool/x-y.md``). An unwritten path whose name
         matches an existing card in another category is redirected to that card; the
-        unread-file refetch then shows it to the model, which merges into it.
+        unread-file refetch then shows it to the model, which merges into it. A new card
+        with no same-name match is checked against existing cards by embedding similarity;
+        look-alikes are named to the model once (no forced redirect, it decides).
         """
         if getattr(schema, "memory_type", None) != "entities" or not getattr(self, "viking_fs", None):
             return uris
@@ -1151,6 +1178,8 @@ class ExtractLoop:
                     if not await self.viking_fs.exists(uri, ctx=self.ctx):
                         index = await self._entity_name_index(root + "/memories/entities")
                         match = index.get(_entity_name_key(rel.rsplit("/", 1)[-1]))
+                        if not match:
+                            await self._note_similar_entities(root + "/memories/entities", uri, fields or {})
                 except Exception as e:  # best effort: never block the write itself
                     tracer.info(f"entity name lookup skipped for {uri}: {e}")
             if match and match != uri:
@@ -1158,6 +1187,34 @@ class ExtractLoop:
                 self._entity_redirects[match] = uri
             resolved.append(match or uri)
         return resolved
+
+    async def _note_similar_entities(self, root: str, uri: str, fields: Dict[str, Any]) -> None:
+        name = uri.rsplit("/", 1)[-1]
+        query = f"{fields.get('name') or name[:-3]}\n{str(fields.get('content') or '')[:600]}"
+        found = await self.viking_fs.find(query, target_uri=root, limit=5, ctx=self.ctx)
+        for m in getattr(found, "memories", None) or []:
+            other = m.uri.rsplit("/", 1)[-1]
+            if (
+                m.score < _SIMILAR_ENTITY_SCORE
+                or m.uri == uri
+                or other.startswith(".")
+                or m.uri in self._entity_similar_offered
+                or not _entity_ids_compatible(name, other)
+            ):
+                continue
+            self._entity_similar_offered.add(m.uri)
+            logger.warning("entity look-alike: %s ~ %s score=%.3f", uri, m.uri, m.score)
+            self._entity_similar_pending.append(
+                f"Your new entity {uri} looks similar to the existing card {m.uri}"
+                f" (\"{(m.abstract or '').strip()[:300]}\"). If it is the same entity (same"
+                " object or ID; a document, event, task or variant about it is a different"
+                " entity), write to that card instead of creating a new one; otherwise keep your"
+                " new card."
+            )
+
+    def _pop_similar_entity_note(self) -> str:
+        notes, self._entity_similar_pending = getattr(self, "_entity_similar_pending", []), []
+        return "\n".join(notes)
 
     async def _entity_name_index(self, root: str) -> Dict[str, str]:
         cache = self._entity_name_indexes

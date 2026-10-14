@@ -1126,7 +1126,35 @@ class TestCanonicalEntityUris:
         loop.viking_fs = SimpleNamespace(exists=AsyncMock(side_effect=exists), glob=AsyncMock(side_effect=glob))
         loop._entity_name_indexes = {}
         loop._entity_redirects = {}
+        loop._entity_similar_offered = set()
+        loop._entity_similar_pending = []
         return loop, Operations, Item, root
+
+    @pytest.mark.asyncio
+    async def test_new_entity_lookalike_is_named_once_without_redirect(self):
+        loop, Operations, Item, root = self._loop(["实验/exp_report_10000001.md", "工具/job_template_20000001.md"])
+        hit = lambda rel, score: SimpleNamespace(uri=f"{root}/{rel}", score=score, abstract=f"card {rel}")
+        loop.viking_fs.find = AsyncMock(return_value=SimpleNamespace(memories=[
+            hit("实验/exp_report_10000001.md", 0.91),
+            hit("工具/job_template_20000001.md", 0.95),  # sibling: different id
+            hit("x/unrelated.md", 0.60),
+        ]))
+        ops = Operations(entities=[
+            Item(category="experiment", name="exp_flight_10000001"),
+            Item(category="tool", name="job_template_20000002"),
+        ])
+
+        resolved, _ = await loop.resolve_operations(ops)
+
+        assert [op.uris for op in resolved.upsert_operations] == [
+            [f"{root}/experiment/exp_flight_10000001.md"],
+            [f"{root}/tool/job_template_20000002.md"],
+        ]
+        note = loop._pop_similar_entity_note()
+        assert f"{root}/experiment/exp_flight_10000001.md looks similar to the existing card {root}/实验/exp_report_10000001.md" in note
+        assert "job_template_20000001" not in note and "unrelated" not in note
+        await loop.resolve_operations(ops)
+        assert loop._pop_similar_entity_note() == ""  # each look-alike is named once
 
     @pytest.mark.asyncio
     async def test_new_entity_routes_to_same_name_in_other_category(self):
