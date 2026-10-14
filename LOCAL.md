@@ -37,7 +37,8 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   Working Memory leftovers after the v0.5.0 port" (incl. `memory.working_memory_transport`).
 - Open upstream PRs (drop the matching local commit once merged, then deploy): #5758
   orphan race, #5759 VLM deadline, #5765 pathlock polling, #5802 archive retry route,
-  #5812 JSON image redaction, #5818 C++ log append, #6038 filtered path guard, #6065
+  #5812 JSON image redaction, #5818 C++ log append, #6038 filtered path guard, #6073 inner period in resource-ref
+  link anchors (with #6054 merged upstream, drop both resource-ref commits), #6065
   embedding attempt deadline (replaces "embedding: bound Volcengine embedding requests";
   keep `embedding.timeout` 20 in ov.conf when adopting it). Merged upstream, drop on the next upgrade: #6054
   (resource-ref linkify; replaces "memory: resource-ref linkify keeps Markdown line markers out
