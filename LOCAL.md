@@ -46,6 +46,13 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   handles indentation). Inner "." (`SKILL.md`): fixed here, upstream #6072 / PR #6073. #5759 and #6065 are written
   against upstream #5950 (RetryVLM/RetryEmbedder, after v0.5.0): on an upgrade past it the
   local VLM-deadline and Volcengine-embedding commits conflict; take the PR versions.
+- PRs filed 2026-10-15 for local-only behaviour (drop/replace the local part once merged):
+  #6075 no upsert from a stale snapshot ("memory: improve extraction robustness" part),
+  #6077 reason commit returns once queued ("resources: queue reason commits without waiting"),
+  #6080 no .failed.json next to .done (robustness commit part), #6083 lock contention requeues +
+  2 s requeue pause ("session: requeue commits on lock contention" + "diagnostics + queue: …pause"),
+  #6086 batch large policy-less commits (upstream uses the 150k default; ours uses the input budget),
+  #6088 Volcengine query_param instruction ("embedding: Volcengine query_param …").
 - Upstream issues our commits work around (drop once fixed upstream): #6006 agent evolution
   reruns per case ("session: train agent evolution once per commit…"), #3526 entity
   duplicates across categories ("memory: route a new entity to the existing card…").
