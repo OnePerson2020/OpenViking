@@ -84,6 +84,11 @@ new writes are routed by), per space, losslessly: the largest card stays verbati
 the others have; groups the model calls different entities are skipped (`--keys K.. --same` overrides
 that for groups the user confirmed). 2026-10-13: 288 groups (94 from a manual review of fuzzy candidates),
 349 cards removed; runs in `local_patches/entity-merge/<run>/` (plan, apply log, tar backup).
+`plan --similar [--since N]` pairs cards with different names by embedding (>= 0.85, no conflicting
+long ids, the rule new writes use) and lets the model judge each pair under a strict definition
+(a document, event, analysis or variant about X is not X; 2026-10-14: 50 of 96 lenient matches kept).
+Weekly cron (Sun 04:00): `plan --similar --since 8` + `apply` into `entity-merge/sweep-<date>/`,
+log `~/.openviking/logs/entity-sweep.log`, sweep dirs older than 35 days removed.
     python3.13 ops/split_entity_history.py plan DIR KEEP_URI URI..  /  apply DIR  # oversized cards -> card + events
 
 `split_entity_history.py` turns overlapping oversized cards into one compact card: originals verbatim into one

@@ -4,6 +4,7 @@
     python3.13 ops/merge_entities.py apply DIR           # tar backup, then write merged card + delete the others
     python3.13 ops/merge_entities.py plan DIR --keys k1 k2 --same   # only these groups, user-confirmed one entity
     python3.13 ops/merge_entities.py plan DIR --manual groups.json   # reviewed groups: [[uri, uri, ...], ...]
+    python3.13 ops/merge_entities.py plan DIR --similar [--since 8]  # look-alike pairs (embedding), cards changed in N days
 
 A group = cards in one entities root (user or one peer; never across spaces) whose file names
 match after folding case and ./-/_/space, the same key extract_loop uses to route new entities.
@@ -14,6 +15,8 @@ has; the merged text then goes to that card's path); its body is replaced throug
 path: schema overview + embedding refresh). The others go through DELETE /fs, then category dirs left
 without cards are removed. A group the model judges to be different entities is skipped, and
 apply skips any group whose files changed since plan. Undo: restore the tar, then /content/reindex.
+--similar pairs cards with different names by embedding, with the rule new writes use
+(extract_loop._SIMILAR_ENTITY_SCORE, no conflicting long ids); the model still judges each pair.
 """
 import argparse, collections, concurrent.futures, hashlib, json, os, re, tarfile, time, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
@@ -35,6 +38,36 @@ def uri(path):
 
 def body(path):
     return path.read_text(encoding="utf-8").split(FIELDS, 1)[0].rstrip()
+
+
+SIMILAR = 0.85  # = extract_loop._SIMILAR_ENTITY_SCORE (calibrated 2026-10-14)
+
+
+def ids_ok(a, b):
+    ia, ib = set(re.findall(r"\d{4,}", a)), set(re.findall(r"\d{4,}", b))
+    return not (ia and ib and not ia & ib)
+
+
+def similar_pairs(since_days=None):
+    """Look-alike card pairs per entities root; queries are the cards changed in the last N days."""
+    since = time.time() - since_days * 86400 if since_days else 0
+    seen = set()
+    for root in sorted(DATA.glob("user/*/memories/entities")) + sorted(DATA.glob("user/*/peers/*/memories/entities")):
+        todo = [p for p in root.rglob("*.md") if not p.name.startswith(".") and p.stat().st_mtime >= since]
+
+        def hits(p):
+            r = api("POST", "/search/find", {"query": f"{p.stem}\n{body(p)[:600]}", "target_uri": uri(root), "limit": 6})
+            return p, [(m["uri"], m["score"]) for m in ((r.get("result") or {}).get("memories") or [])]
+        with concurrent.futures.ThreadPoolExecutor(6) as pool:
+            for p, found in pool.map(hits, todo):
+                for u, score in found:
+                    q = DATA/u[len("viking://"):]
+                    pair = frozenset((p, q))
+                    if score < SIMILAR or q == p or q.name.startswith(".") or not q.exists() \
+                            or not ids_ok(p.name, q.name) or pair in seen:
+                        continue
+                    seen.add(pair)
+                    yield sorted(pair, key=lambda x: (-len(body(x)), str(x)))
 
 
 def groups(keys=None):
@@ -61,6 +94,9 @@ does not already state: names, IDs, paths, versions, dates, counts, relations, d
 - Skip a fact only if card 1 clearly states it already; when unsure, include it.
 - If a fact conflicts with card 1, include it with its date so the conflict stays visible.
 - Write in card 1's language. Do not invent facts.
+same_entity means one and the same thing (same object or ID, possibly another name, spelling or
+language). A document, report, event, incident, analysis, run, version or variant, sub-component or
+task about that thing is a different entity, even when the cards share facts. When unsure: false.
 If they are different entities, set same_entity=false and missing_facts=[].
 Return JSON only."""
 
@@ -102,9 +138,9 @@ def api(method, path, body=None, **query):
         return {"http": e.code, "body": e.read().decode()[:500]}
 
 
-def plan(out, keys=None, same=False, manual=None):
+def plan(out, keys=None, same=False, manual=None, similar=None):
     out.mkdir(parents=True, exist_ok=True)
-    gs = list(groups(keys)) if not manual else [
+    gs = list(similar_pairs(similar or None)) if similar is not None else list(groups(keys)) if not manual else [
         sorted((DATA/u[len("viking://"):] for u in g), key=lambda p: (-len(body(p)), str(p))) for g in json.load(open(manual))]
     same = same or bool(manual)
     print(f"{len(gs)} groups, {sum(map(len, gs))} cards")
@@ -162,5 +198,10 @@ if __name__ == "__main__":
     ap.add_argument("--keys", nargs="+", help="only groups with these folded names")
     ap.add_argument("--same", action="store_true", help="user confirmed each group is one entity")
     ap.add_argument("--manual", help="JSON list of reviewed groups (lists of entity URIs); implies --same")
+    ap.add_argument("--similar", action="store_true", help="look-alike pairs by embedding instead of same-name groups")
+    ap.add_argument("--since", type=int, default=0, help="with --similar: only query cards changed in the last N days")
     a = ap.parse_args()
-    plan(Path(a.out), a.keys, a.same, a.manual) if a.cmd == "plan" else apply(Path(a.out))
+    if a.cmd == "plan":
+        plan(Path(a.out), a.keys, a.same, a.manual, a.since if a.similar else None)
+    else:
+        apply(Path(a.out))
