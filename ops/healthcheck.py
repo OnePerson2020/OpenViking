@@ -46,8 +46,15 @@ if info["healthy"]:
 # last 24 h, so a morning run also sees yesterday's daytime (rotated at midnight)
 log = OV/"logs/openviking.log"; since = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 86400))
 logs = [Path(f"{log}.{time.strftime('%Y-%m-%d', time.localtime(now - 86400))}"), log]
+# a deploy restart cuts open requests: uvicorn's "ASGI callable returned without completing
+# response" within 10 min of a deploy start (local_patches/deploys/<start>/) is expected
+deploys = [time.mktime(time.strptime(d.name, "%Y%m%d-%H%M%S")) for d in (OV/"local_patches/deploys").glob("2*-*")]
+def restart_noise(l):
+    if "ASGI callable returned without completing response" not in l: return False
+    t = time.mktime(time.strptime(l[:19], "%Y-%m-%d %H:%M:%S"))
+    return any(0 <= t - d <= 600 for d in deploys)
 errs = [l.strip()[:200] for f in logs if f.exists() for l in open(f, errors="replace")
-        if l[:19] >= since and l[:4].isdigit() and " - ERROR - " in l]
+        if l[:19] >= since and l[:4].isdigit() and " - ERROR - " in l and not restart_noise(l)]
 info["log_errors_24h"] = errs[-10:]
 if errs: issues.append(f"{len(errs)} ERROR log line(s) in 24h")
 
