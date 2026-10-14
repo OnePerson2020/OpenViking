@@ -474,16 +474,9 @@ class ArchiveRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.tracker.create.assert_not_awaited()
         self.queue_manager.enqueue.assert_not_awaited()
 
-    async def test_cancelled_task_and_applying_receipt_are_rejected(self):
+    async def test_cancelled_task_is_rejected(self):
         self.tracker.get.return_value = SimpleNamespace(status=TaskStatus.CANCELLED)
         with self.assertRaisesRegex(FailedPreconditionError, "Cancelled archives"):
-            await self._retry(self._state(), allow_ownerless_ready=True)
-
-        self.tracker.get.return_value = None
-        self.fs.files[f"{self.archive_uri}/.long-term-message-1.json"] = json.dumps(
-            {"status": "applying", "message_ids": ["message-1"]}
-        )
-        with self.assertRaisesRegex(FailedPreconditionError, "ambiguous long-term"):
             await self._retry(self._state(), allow_ownerless_ready=True)
         self.tracker.create.assert_not_awaited()
         self.queue_manager.enqueue.assert_not_awaited()
@@ -517,13 +510,13 @@ class ArchiveRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.tracker.create.assert_awaited_once()
         self.queue_manager.enqueue.assert_awaited_once()
 
-    async def test_done_receipt_is_promoted_and_failed_archive_is_enqueued(self):
+    async def test_checkpointed_failed_archive_is_enqueued(self):
         failure = {"stage": "working_memory", "error": "context limit"}
         failed_raw = json.dumps(failure)
         self.fs.files[f"{self.archive_uri}/.failed.json"] = failed_raw
         self.fs.files[f"{self.archive_uri}/memory_diff.json"] = "{}"
-        self.fs.files[f"{self.archive_uri}/.long-term-message-1.json"] = json.dumps(
-            {"status": "done", "message_ids": ["message-1"]}
+        self.fs.files[f"{self.archive_uri}/.meta.json"] = json.dumps(
+            {**self.phase1_meta, "completed_memory_steps": {"long_term": ["message-1"]}}
         )
 
         with patch(

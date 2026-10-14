@@ -194,13 +194,8 @@ class LoopTests(IsolatedAsyncioTestCase):
     async def test_budget_includes_schema(self):
         loop, model = self.make_loop()
         cfg = SimpleNamespace(memory=SimpleNamespace(extraction_input_token_budget=1))
-        with patch('openviking.session.memory.extract_loop.get_openviking_config', return_value=cfg):
+        with patch('openviking_cli.utils.config.get_openviking_config', return_value=cfg):
             with self.assertRaises(MemoryInputBudgetError): await loop._call_llm([])
-        model.get_completion_async.assert_not_called()
-
-    async def test_unsupported_backend_fails_closed(self):
-        loop, model = self.make_loop();model.supports_structured_output = False
-        with self.assertRaises(ValueError): await loop._call_llm([])
         model.get_completion_async.assert_not_called()
 
     async def test_disabled_tools_not_exposed_in_schema(self):

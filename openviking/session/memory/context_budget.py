@@ -26,6 +26,19 @@ def json_tokens(value: Any) -> int:
     return estimate_text_tokens(json.dumps(value, ensure_ascii=False, default=str))
 
 
+def check_input_budget(payload: Any) -> None:
+    """Raise before a model call whose estimated input exceeds memory.extraction_input_token_budget."""
+    from openviking_cli.utils.config import get_openviking_config
+
+    # getattr: upstream tests stub `memory` without this local field.
+    budget = getattr(get_openviking_config().memory, "extraction_input_token_budget", 48000)
+    estimated = json_tokens(payload)
+    if estimated > budget:
+        raise MemoryInputBudgetError(
+            f"Memory extraction input budget exceeded before model call: {estimated} > {budget}"
+        )
+
+
 def _text_prefix(text: str, budget: int) -> str:
     if budget <= 0:
         return ""

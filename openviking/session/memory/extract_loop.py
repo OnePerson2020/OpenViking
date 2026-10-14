@@ -134,24 +134,6 @@ def _preview_text(content: str, *, limit: int = 240) -> str:
     return text[: limit - 3] + "..."
 
 
-
-def _vlm_supports_structured_output(vlm: Any) -> bool:
-    """True when the backend that will serve this VLM accepts strict JSON schema.
-
-    0.4.23 hands extraction an account-bound proxy (AccountBoundVLM) that
-    forwards calls to the account's VLMConfig; the capability lives on the
-    concrete backend behind that config, so look through the proxy.
-    """
-    if getattr(vlm, "supports_structured_output", False) is True:
-        return True
-    settings = vlm.__dict__.get("_settings") if hasattr(vlm, "__dict__") else None
-    target = settings if settings is not None else vlm
-    get_instance = getattr(target, "get_vlm_instance", None)
-    if not callable(get_instance):
-        return False
-    return getattr(get_instance(), "supports_structured_output", False) is True
-
-
 class ExtractionOutputInvalidError(RuntimeError, ValueError):
     """Model output stayed unparseable/unsafe after every repair iteration."""
 
@@ -1381,23 +1363,9 @@ class ExtractLoop:
         if not self._disable_tools_for_iteration and self._tool_schemas:
             tools = self._tool_schemas
             tool_choice = "auto"
-        from openviking.session.memory.context_budget import MemoryInputBudgetError, json_tokens
+        from openviking.session.memory.context_budget import check_input_budget
 
-        input_budget = getattr(
-            get_openviking_config().memory,
-            "extraction_input_token_budget",
-            48000,
-        )
-        estimated_input_tokens = json_tokens({"messages": messages, "tools": tools})
-        tracer.info(
-            f"Memory extraction input budget: estimated={estimated_input_tokens} "
-            f"limit={input_budget}"
-        )
-        if estimated_input_tokens > input_budget:
-            raise MemoryInputBudgetError(
-                "Memory extraction input budget exceeded before model call: "
-                f"{estimated_input_tokens} > {input_budget}"
-            )
+        check_input_budget({"messages": messages, "tools": tools})
         with bind_telemetry_stage("memory_extract"):
             response = await self.vlm.get_completion_async(
                 messages=messages,
@@ -1505,18 +1473,11 @@ class ExtractLoop:
         from jsonschema import ValidationError as SchemaValidationError
         from pydantic import ValidationError as ModelValidationError
         from openviking.session.memory.extraction_output_protocol.strict_json_protocol import StrictActionError
-        from openviking.session.memory.context_budget import MemoryInputBudgetError, json_tokens
+        from openviking.session.memory.context_budget import check_input_budget
 
-        if not _vlm_supports_structured_output(self.vlm):
-            raise ValueError("Strict extraction requires a verified structured-output backend")
         tools = [] if self._disable_tools_for_iteration else (self._tool_schemas or [])
         fmt = self._output_protocol.response_format(self._output_context, tools)
-        budget = getattr(get_openviking_config().memory, "extraction_input_token_budget", 48000)
-        estimated = json_tokens({"messages": messages, "response_format": fmt})
-        if estimated > budget:
-            raise MemoryInputBudgetError(
-                f"Memory extraction input budget exceeded before model call: {estimated} > {budget}"
-            )
+        check_input_budget({"messages": messages, "response_format": fmt})
         # Transport/deadline/cancellation exceptions are not format retries.
         with bind_telemetry_stage("memory_extract"):
             response = await self.vlm.get_completion_async(

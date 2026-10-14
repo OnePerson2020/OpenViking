@@ -8,13 +8,11 @@ import re
 import threading
 import time
 import uuid
-from contextlib import contextmanager
 from contextvars import ContextVar
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
-_scope: ContextVar[dict[str, Any]] = ContextVar('model_diagnostic_scope', default={})
 _call: ContextVar['CallObservation | None'] = ContextVar('model_call_observation', default=None)
 _lock = threading.Lock()
 _sinks: dict[str, logging.Logger] = {}
@@ -60,27 +58,12 @@ def _emit(record: dict[str, Any], file_name: str | None = None) -> None:
         pass
 
 
-@contextmanager
-def model_call_scope(**values: Any):
-    allowed = {'session_id', 'archive_uri', 'batch', 'batch_count', 'batch_attempt',
-               'checkpoint_count', 'conversation_estimated_tokens', 'prior_wm_estimated_tokens'}
-    scope = dict(_scope.get())
-    for key, value in values.items():
-        if key in allowed:
-            scope[key] = value if isinstance(value, (int, float)) else _identifier(value)
-    token = _scope.set(scope)
-    try:
-        yield
-    finally:
-        _scope.reset(token)
-
-
 class CallObservation:
     def __init__(self, *, model: str, input_tokens: int, max_tokens: int | None,
                  tool_names: list[str], thinking: bool, timeout: float):
         self.started = time.monotonic()
         self.fields = {
-            **_scope.get(), 'call_id': uuid.uuid4().hex,
+            'call_id': uuid.uuid4().hex,
             'provider': 'volcengine', 'model': _identifier(model),
             'input_estimated_tokens': input_tokens, 'max_output_tokens': max_tokens,
             'tools': [_identifier(name) for name in tool_names],

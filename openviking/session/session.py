@@ -585,37 +585,6 @@ class Session:
 
         self._loaded = True
 
-    @staticmethod
-    def _queue_payload(item: Any) -> Dict[str, Any]:
-        """Return a QueueFS payload without making assumptions about its envelope."""
-        payload = item
-        for _ in range(6):
-            if isinstance(payload, dict) and "data" in payload:
-                payload = payload["data"]
-                continue
-            if isinstance(payload, bytes):
-                try:
-                    payload = payload.decode("utf-8")
-                except UnicodeDecodeError:
-                    return {}
-                continue
-            if isinstance(payload, list) and all(
-                type(value) is int and 0 <= value <= 255 for value in payload
-            ):
-                try:
-                    payload = bytes(payload).decode("utf-8")
-                except UnicodeDecodeError:
-                    return {}
-                continue
-            if isinstance(payload, str):
-                try:
-                    payload = json.loads(payload)
-                except (TypeError, ValueError):
-                    return {}
-                continue
-            break
-        return payload if isinstance(payload, dict) else {}
-
     async def _rebuild_pending_tokens(self) -> None:
         """Recompute ``pending_tokens`` from the current message list.
 
@@ -1758,34 +1727,6 @@ class Session:
             error="session commit cancelled",
         )
 
-    async def _archive_recovery_receipts(
-        self, archive_uri: str
-    ) -> tuple[List[Dict[str, Any]], List[str]]:
-        """Load legacy long-term receipts and flag records that are unsafe to replay."""
-        entries = await self._viking_fs.ls(archive_uri, ctx=self.ctx)
-        receipts: List[Dict[str, Any]] = []
-        unsafe: List[str] = []
-        for entry in entries:
-            name = entry.get("name") if isinstance(entry, dict) else str(entry)
-            if not name.startswith(".long-term-") or not name.endswith(".json"):
-                continue
-            try:
-                parsed = json.loads(
-                    await self._viking_fs.read_file(f"{archive_uri}/{name}", ctx=self.ctx)
-                    or "{}"
-                )
-            except Exception as exc:
-                unsafe.append(f"{name}:unreadable:{type(exc).__name__}")
-                continue
-            if not isinstance(parsed, dict):
-                unsafe.append(f"{name}:invalid")
-                continue
-            status = str(parsed.get("status") or "").lower()
-            if status != "done":
-                unsafe.append(f"{name}:{status or 'unknown'}")
-            receipts.append(parsed)
-        return receipts, unsafe
-
     async def _activate_archive_recovery(self, msg: "SessionCommitMsg") -> None:
         """Verify recovery ownership and expose a failed archive to Phase 2."""
         recovery = msg.recovery
@@ -1884,7 +1825,7 @@ class Session:
         dry-run inventory cannot be replayed after the archive changes.
         """
         from openviking.service.task_tracker import TaskStatus, get_task_tracker
-        from openviking.service.task_work_index import bind_task_context
+        from openviking.service.task_work_index import _payload_dict, bind_task_context
         from openviking.storage.queuefs import QueueManager, get_queue_manager
         from openviking.storage.queuefs.session_commit_msg import SessionCommitMsg
 
@@ -1940,7 +1881,7 @@ class Session:
             queue = get_queue_manager().get_queue(QueueManager.SESSION_COMMIT)
             queue_items = await queue.snapshot()
             for item in queue_items:
-                payload = self._queue_payload(item)
+                payload = _payload_dict(item) or {}
                 if payload.get("archive_uri") == state.archive_uri:
                     return {
                         "status": "skipped",
@@ -2007,25 +1948,10 @@ class Session:
             else:
                 raise FailedPreconditionError("Archive is not recoverable")
 
-            receipts, unsafe_receipts = await self._archive_recovery_receipts(state.archive_uri)
-            if unsafe_receipts:
-                raise FailedPreconditionError(
-                    "Archive has ambiguous long-term write receipts: "
-                    + ", ".join(unsafe_receipts[:5])
-                )
             completed_memory_steps: Dict[str, set[str]] = {}
             self._archives.merge_completed_memory_steps(
                 completed_memory_steps, meta.get("completed_memory_steps")
             )
-            for receipt in receipts:
-                message_ids = receipt.get("message_ids")
-                if not isinstance(message_ids, list) or not all(
-                    isinstance(message_id, str) for message_id in message_ids
-                ):
-                    raise FailedPreconditionError(
-                        "Archive has a completed long-term receipt without valid message IDs"
-                    )
-                completed_memory_steps.setdefault("long_term", set()).update(message_ids)
             recorded_ids = set().union(*completed_memory_steps.values()) if completed_memory_steps else set()
             if not recorded_ids.issubset(archive_message_ids):
                 raise FailedPreconditionError(
@@ -2069,19 +1995,12 @@ class Session:
                     ctx=self.ctx,
                     lease_ref=lease,
                 )
-            meta_updates: Dict[str, Any] = {"recovery": recovery_meta}
             if completed_memory_steps:
-                serialized_steps = self._archives.serialize_completed_memory_steps(
-                    completed_memory_steps
+                recovery_meta["completed_memory_steps"] = (
+                    self._archives.serialize_completed_memory_steps(completed_memory_steps)
                 )
-                recovery_meta["completed_memory_steps"] = serialized_steps
-                # Receipts written by the older resumable implementation are
-                # authoritative only after reaching status=done. Promote their
-                # message IDs to the current top-level checkpoint so Phase 2
-                # actually skips the already-applied writes.
-                meta_updates["completed_memory_steps"] = serialized_steps
             await self._merge_archive_meta(
-                state.archive_uri, meta_updates, lease_ref=lease
+                state.archive_uri, {"recovery": recovery_meta}, lease_ref=lease
             )
 
             if original_task is not None and original_task.status in (
