@@ -1120,12 +1120,15 @@ class ExtractLoop:
         if not separator or not namespace.startswith(prefix):
             return source_uri
         user_space = namespace.removeprefix(prefix)
-        candidate_uri = generate_uri(
-            memory_type=schema,
-            fields=uri_fields,
-            user_space=user_space,
-            extract_context=self._extract_context,
-        )
+        try:
+            candidate_uri = generate_uri(
+                memory_type=schema,
+                fields=uri_fields,
+                user_space=user_space,
+                extract_context=self._extract_context,
+            )
+        except ValueError:  # the new identity cannot form a path: keep the card where it is
+            return source_uri
         return candidate_uri if candidate_uri != source_uri else source_uri
 
     async def _canonical_entity_uris(self, schema: Any, uris: List[str]) -> List[str]:
