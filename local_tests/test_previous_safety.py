@@ -632,26 +632,32 @@ class ArchiveRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class QueueStatisticsTests(unittest.IsolatedAsyncioTestCase):
-    async def _invoke(self, result):
+    async def _invoke(self, processed, task=None):
         processor = SessionCommitProcessor(Mock())
-        processor._process = AsyncMock(return_value=result)
+        processor._process = AsyncMock(return_value=processed)
+        tracker = SimpleNamespace(get=AsyncMock(return_value=task))
         raw = {"data": json.dumps(commit_message().to_dict())}
-        return await processor.on_dequeue(raw)
+        with patch(
+            "openviking.storage.queuefs.session_commit_processor.get_task_tracker",
+            return_value=tracker,
+        ):
+            return await processor.on_dequeue(raw)
 
     async def test_business_failure_reports_queue_error(self):
         from openviking.storage.queuefs.process_result import ProcessOutcome
-        result = await self._invoke((True, "memory extraction failed"))
+        task = SimpleNamespace(status=TaskStatus.FAILED, error="memory extraction failed")
+        result = await self._invoke(True, task)
         self.assertIs(result.outcome, ProcessOutcome.FAILED)
         self.assertEqual(result.error, "memory extraction failed")
 
     async def test_successful_dequeue_reports_success(self):
         from openviking.storage.queuefs.process_result import ProcessOutcome
-        result = await self._invoke((True, None))
+        result = await self._invoke(True, SimpleNamespace(status=TaskStatus.COMPLETED, error=None))
         self.assertIs(result.outcome, ProcessOutcome.SUCCESS)
 
     async def test_requeued_dequeue_is_not_also_reported_successful(self):
         from openviking.storage.queuefs.process_result import ProcessOutcome
-        result = await self._invoke((False, None))
+        result = await self._invoke(False)
         self.assertIs(result.outcome, ProcessOutcome.REQUEUED)
 
 

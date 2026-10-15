@@ -47,9 +47,7 @@ class SessionCommitProcessor(DequeueHandlerBase):
         )
         return msg, ctx
 
-    async def _process(
-        self, msg: SessionCommitMsg, ctx: RequestContext
-    ) -> tuple[bool, Optional[str]]:
+    async def _process(self, msg: SessionCommitMsg, ctx: RequestContext) -> bool:
         # Bind a root observability context so Phase-2 extraction VLM/embedding
         # token events are attributed to the committing account/user rather than
         # "__unknown__" (mirrors SemanticProcessor.on_dequeue). Restore the
@@ -85,7 +83,7 @@ class SessionCommitProcessor(DequeueHandlerBase):
                     account_id=ctx.account_id,
                     user_id=ctx.user.user_id,
                 )
-                return True, error
+                return True
             try:
                 await session.load()
             except LockAcquisitionError as exc:
@@ -104,15 +102,7 @@ class SessionCommitProcessor(DequeueHandlerBase):
                     QueueManager.SESSION_COMMIT,
                     msg.to_dict(),
                 )
-                return False, None
-            task = await get_task_tracker().get(
-                msg.task_id,
-                account_id=ctx.account_id,
-                user_id=ctx.user.user_id,
-            )
-            if task is not None and task.status.value == "failed":
-                return True, task.error or "session commit failed"
-            return True, None
+            return processed
         finally:
             reset_root_observability_context(root_context_token)
 
@@ -145,7 +135,12 @@ class SessionCommitProcessor(DequeueHandlerBase):
             msg, ctx = self._parse_message(data)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             return ProcessResult.failed(str(exc))
-        processed, business_error = await self._process(msg, ctx)
-        if business_error:
-            return ProcessResult.failed(business_error)
-        return ProcessResult.success() if processed else ProcessResult.requeued()
+        if not await self._process(msg, ctx):
+            return ProcessResult.requeued()
+        # A commit that recorded its own failure is a business failure, not a success.
+        task = await get_task_tracker().get(
+            msg.task_id, account_id=ctx.account_id, user_id=ctx.user.user_id
+        )
+        if task is not None and task.status.value == "failed":
+            return ProcessResult.failed(task.error or "session commit failed")
+        return ProcessResult.success()

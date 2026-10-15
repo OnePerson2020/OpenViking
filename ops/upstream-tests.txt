@@ -1,5 +1,8 @@
 # Upstream test files deploy.py runs besides the ones our commits edit (those are automatic).
 tests/session/memory/test_extraction_output_protocol.py
+# Reach patched code (VLM retry/deadline, commit processor contract); missed until 2026-10-15.
+tests/unit/test_extra_headers_vlm.py
+tests/storage/test_session_commit_processor_identity.py
 # test_compressor_v3.py (edited by "session: train agent evolution once per commit"): these
 # fail on pristine v0.5.0 when the file runs alone (VikingFS not initialized), unrelated to us.
 --deselect=tests/session/test_compressor_v3.py::test_factory_defaults_to_v3
