@@ -14,6 +14,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openviking.models.vlm.base import ToolCall, VLMBase
 from openviking.server.identity import RequestContext
+from openviking.session.memory.context_budget import (
+    check_input_budget,
+    memory_file_field_value,
+    validate_partial_fields,
+)
 from openviking.session.memory.dataclass import (
     DeleteId,
     MemoryFile,
@@ -239,7 +244,7 @@ class ExtractLoop:
         pending_resolution_repair: Optional[Tuple[ResolvedOperations, List]] = None
 
         # 从 provider 获取 schemas（内部自动加载 registry）
-        schemas = self.context_provider.get_memory_schemas(getattr(self, "ctx", None))
+        schemas = self.context_provider.get_memory_schemas(self.ctx)
 
         # 初始化 schema 生成器（使用 schemas 而非 registry）
         output_language = self.context_provider.get_output_language()
@@ -593,7 +598,7 @@ class ExtractLoop:
     def _memory_type_for_uri(self, uri: str) -> Optional[str]:
         matches = [
             schema.memory_type
-            for schema in self.context_provider.get_memory_schemas(getattr(self, "ctx", None))
+            for schema in self.context_provider.get_memory_schemas(self.ctx)
             if self._uri_belongs_to_schema(uri, schema) is True
         ]
         unique_matches = list(dict.fromkeys(matches))
@@ -824,7 +829,7 @@ class ExtractLoop:
 
         role_scope = self._isolation_handler.get_read_scope()
         page_id_map = getattr(self._extract_context, "page_id_map", None)
-        schemas = list(self.context_provider.get_memory_schemas(getattr(self, "ctx", None)))
+        schemas = list(self.context_provider.get_memory_schemas(self.ctx))
         assigned_page_ids, page_id_assignments = self._assign_response_page_ids(
             operations,
             schemas,
@@ -921,14 +926,8 @@ class ExtractLoop:
                                 for field in schema.fields
                                 if field.merge_op == MergeOp.IMMUTABLE
                             }
-                            from openviking.session.memory.context_budget import (
-                                memory_file_field_value,
-                            )
-
                             preserved_fields = set(immutable_fields)
-                            identity_fields = getattr(schema, "identity_fields", None)
-                            if callable(identity_fields):
-                                preserved_fields.update(identity_fields(include_peer_id=False))
+                            preserved_fields.update(schema.identity_fields(include_peer_id=False))
                             for field_name in preserved_fields:
                                 old_value = memory_file_field_value(old_content, field_name)
                                 if not ImmutableOp.is_set(old_value):
@@ -1110,7 +1109,7 @@ class ExtractLoop:
         with no same-name match is checked against existing cards by embedding similarity;
         look-alikes are named to the model once (no forced redirect, it decides).
         """
-        if getattr(schema, "memory_type", None) != "entities" or not getattr(self, "viking_fs", None):
+        if schema.memory_type != "entities" or not getattr(self, "viking_fs", None):
             return uris
         resolved = []
         for uri in uris:
@@ -1160,7 +1159,7 @@ class ExtractLoop:
             )
 
     def _pop_similar_entity_note(self) -> str:
-        notes, self._entity_similar_pending = getattr(self, "_entity_similar_pending", []), []
+        notes, self._entity_similar_pending = self._entity_similar_pending, []
         return "\n".join(notes)
 
     async def _entity_name_index(self, root: str) -> Dict[str, str]:
@@ -1326,8 +1325,6 @@ class ExtractLoop:
         if not self._disable_tools_for_iteration and self._tool_schemas:
             tools = self._tool_schemas
             tool_choice = "auto"
-        from openviking.session.memory.context_budget import check_input_budget
-
         check_input_budget({"messages": messages, "tools": tools})
         with bind_telemetry_stage("memory_extract"):
             response = await self.vlm.get_completion_async(
@@ -1474,7 +1471,6 @@ class ExtractLoop:
             StrPatch,
         )
         from openviking.session.memory.merge_op.patch_handler import unescape_markers
-        from openviking.session.memory.context_budget import memory_file_field_value
 
         errors = []
         patch_op = PatchOp(FieldType.STRING)
@@ -1564,8 +1560,6 @@ class ExtractLoop:
     def _partial_operation_errors(
         self, operations: ResolvedOperations
     ) -> List[Dict[str, Any]]:
-        from openviking.session.memory.context_budget import validate_partial_fields
-
         errors: List[Dict[str, Any]] = []
         partial = getattr(self.context_provider, "partial_read_fields", {})
         for deleted in operations.delete_file_contents:
@@ -1654,7 +1648,7 @@ class ExtractLoop:
         # Add reminder message for the model
         content = "Note: The files above were automatically read because they exist and you didn't read them before deciding to write. Please consider the existing content when making write decisions. You can now output updated operations."
         for uri in refetch_uris:
-            requested = getattr(self, "_entity_redirects", {}).get(uri)
+            requested = self._entity_redirects.get(uri)
             if requested:
                 content += (
                     f"\nYour new entity {requested} was routed to the existing card {uri} because the"
