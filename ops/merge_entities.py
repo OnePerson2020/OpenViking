@@ -43,9 +43,10 @@ def body(path):
 SIMILAR = 0.85  # = extract_loop._SIMILAR_ENTITY_SCORE (calibrated 2026-10-14)
 
 
-def ids_ok(a, b):
-    ia, ib = set(re.findall(r"\d{4,}", a)), set(re.findall(r"\d{4,}", b))
-    return not (ia and ib and not ia & ib)
+def ids_ok(a, b):  # = extract_loop._entity_ids_compatible
+    date = re.compile(r"20\d{6}")
+    groups = lambda n: (set(re.findall(r"\d{3,}", n)), set(date.findall(n)), set(re.findall(r"\d{3,}", date.sub(" ", n))))
+    return not any(x and y and not x & y for x, y in zip(groups(a), groups(b)))
 
 
 def similar_pairs(since_days=None):

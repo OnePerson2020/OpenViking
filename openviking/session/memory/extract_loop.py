@@ -69,10 +69,22 @@ def _entity_name_key(file_name: str) -> str:
 _SIMILAR_ENTITY_SCORE = 0.85
 
 
+_DATE_IN_NAME = re.compile(r"20\d{6}")
+
+
 def _entity_ids_compatible(a: str, b: str) -> bool:
-    """Names carrying different long numbers (job_1521824 / job_1521825) are different entities."""
-    ia, ib = set(re.findall(r"\d{4,}", a)), set(re.findall(r"\d{4,}", b))
-    return not (ia and ib and not ia & ib)
+    """Names carrying different numbers are different entities (job_1521824 / job_1521825,
+    extract_016 / extract_017, report_20261013 / report_20261014). Dates and other numbers
+    are also compared apart, so a shared date does not make sibling ids compatible."""
+
+    def groups(name: str):
+        return (
+            set(re.findall(r"\d{3,}", name)),
+            set(_DATE_IN_NAME.findall(name)),
+            set(re.findall(r"\d{3,}", _DATE_IN_NAME.sub(" ", name))),
+        )
+
+    return not any(x and y and not x & y for x, y in zip(groups(a), groups(b)))
 
 # Memory extraction may rewrite an entire memory file in one response. Without an
 # explicit cap, providers fall back to a small server-side default (e.g. Ark's
