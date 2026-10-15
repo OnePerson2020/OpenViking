@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from openviking.models.call_diagnostics import CallObservation, attach_hooks
 from openviking.utils.exceptions import ModelCallDeadlineError
+from openviking.utils.model_retry import is_retryable_api_error
 from openviking.utils.token_estimation import estimate_text_tokens
 from openviking.models.network import (
     create_optional_async_httpx_client,
@@ -362,6 +363,8 @@ class VolcEngineVLM(OpenAIVLM):
             except Exception as e:
                 self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=e)
                 last_error = e
+                if not is_retryable_api_error(e):
+                    break
                 if attempt < self.max_retries:
                     backoff = 2**attempt
                     if time.monotonic() + backoff >= overall_deadline:
