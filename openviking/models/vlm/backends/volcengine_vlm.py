@@ -11,16 +11,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from openviking.models.call_diagnostics import CallObservation, attach_hooks
-from openviking.utils.exceptions import ModelCallDeadlineError
-from openviking.utils.model_retry import _compute_delay, is_retryable_api_error
-from openviking.utils.token_estimation import estimate_text_tokens
 from openviking.models.network import (
     create_optional_async_httpx_client,
     create_optional_sync_httpx_client,
 )
 from openviking.telemetry import tracer
+from openviking.utils.exceptions import ModelCallDeadlineError
 from openviking.utils.message_format import format_messages, sanitize_openai_messages
+from openviking.utils.model_retry import retry_async
 from openviking.utils.multimodal import redact_image_data_urls
+from openviking.utils.token_estimation import estimate_text_tokens
 from openviking_cli.utils import get_logger
 
 from ..base import ToolCall, VLMResponse
@@ -290,68 +290,48 @@ class VolcEngineVLM(OpenAIVLM):
             timeout=self.timeout,
         )
         observation.fields["output_transport"] = "tools" if tools else "text"
-        with observation:
-            return await self._complete_async_with_deadline(
-                client, kwargs, bool(tools), observation
-            )
+        attempts = 0
 
-    async def _complete_async_with_deadline(self, client, kwargs, has_tools, observation):
-        # Hard wall-clock ceiling across all retries. The SDK/httpx timeout bounds
-        # each socket read, not the request: a response that keeps trickling bytes
-        # never trips it (a fully silent server does). The retry loop could also
-        # stack (max_retries + 1) full timeouts, leaving the task "running" with
-        # the per-session commit lock held. asyncio.wait_for bounds each attempt
-        # and the shared deadline bounds the whole call to self.timeout.
-        # Upstream: volcengine/OpenViking#5759 (per-attempt bound only).
-        overall_deadline = time.monotonic() + self.timeout
-        last_error = None
-        for attempt in range(self.max_retries + 1):
-            observation.begin_attempt(attempt + 1)
-            remaining = overall_deadline - time.monotonic()
-            if remaining <= 0:
-                break
+        async def _call() -> Union[str, VLMResponse]:
+            nonlocal attempts
+            attempts += 1
+            observation.begin_attempt(attempts)
             t0 = time.perf_counter()
             try:
-                response = await asyncio.wait_for(
-                    client.chat.completions.create(**kwargs), timeout=remaining
-                )
-                elapsed = time.perf_counter() - t0
-                self._update_token_usage_from_response(response, duration_seconds=elapsed)
-                observation.complete(response)
-                result = self._build_vlm_response(response, has_tools=has_tools)
-                if has_tools:
-                    return result
-                content = self._clean_response(str(result))
-                if content:
-                    tracer.info(f"message.content={content}")
-                return content
-            except asyncio.TimeoutError as e:
-                self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=e)
-                last_error = ModelCallDeadlineError(
-                    f"VolcEngine completion exceeded {self.timeout:.0f}s deadline"
-                )
-                logger.warning(
-                    "[VolcEngineVLM] async completion timed out after "
-                    f"{time.perf_counter() - t0:.1f}s (attempt {attempt + 1}/"
-                    f"{self.max_retries + 1}); aborting deadline-bound call"
-                )
-                break
-            except Exception as e:
-                self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=e)
-                last_error = e
-                if not is_retryable_api_error(e):
-                    break
-                if attempt < self.max_retries:
-                    # Same backoff as retry_async (0.5 s doubling, 8 s cap, jitter).
-                    backoff = _compute_delay(attempt, base_delay=0.5, max_delay=8.0, jitter=True)
-                    if time.monotonic() + backoff >= overall_deadline:
-                        break
-                    await asyncio.sleep(backoff)
+                response = await client.chat.completions.create(**kwargs)
+            except Exception as error:
+                self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=error)
+                raise
+            elapsed = time.perf_counter() - t0
+            self._update_token_usage_from_response(response, duration_seconds=elapsed)
+            observation.complete(response)
+            result = self._build_vlm_response(response, has_tools=bool(tools))
+            if tools:
+                return result
+            content = self._clean_response(str(result))
+            if content:
+                tracer.info(f"message.content={content}")
+            return content
 
-        if last_error:
-            raise last_error
-        else:
-            raise RuntimeError("Unknown error in async completion")
+        # Hard wall-clock ceiling across all retries. The SDK/httpx timeout bounds
+        # each socket read, not the request: a response that keeps trickling bytes
+        # never trips it, and retries could stack (max_retries + 1) full timeouts
+        # while the session commit lock is held. Upstream: volcengine/OpenViking#5759.
+        with observation:
+            try:
+                return await asyncio.wait_for(
+                    retry_async(
+                        _call,
+                        max_retries=self.max_retries,
+                        logger=logger,
+                        operation_name="VolcEngine VLM async completion",
+                    ),
+                    timeout=self.timeout,
+                )
+            except asyncio.TimeoutError as error:
+                raise ModelCallDeadlineError(
+                    f"VolcEngine completion exceeded {self.timeout:.0f}s deadline"
+                ) from error
 
     def _detect_image_format(self, data: bytes) -> str:
         """Detect image format from magic bytes.

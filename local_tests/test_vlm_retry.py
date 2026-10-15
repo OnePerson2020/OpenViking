@@ -1,10 +1,13 @@
-"""The VLM deadline loop retries only transient errors (upstream retry classification)."""
+"""The VLM call retries only transient errors and stops at one wall-clock deadline."""
+import asyncio
+import time
 import unittest
 
 import httpx
 from volcenginesdkarkruntime import AsyncArk
 
 from openviking.models.vlm.backends.volcengine_vlm import VolcEngineVLM
+from openviking.utils.exceptions import ModelCallDeadlineError
 
 OK = {'id': 'id', 'object': 'chat.completion', 'created': 1, 'model': 'test',
       'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': 'ok'}}],
@@ -12,18 +15,19 @@ OK = {'id': 'id', 'object': 'chat.completion', 'created': 1, 'model': 'test',
 
 
 class VlmRetry(unittest.IsolatedAsyncioTestCase):
-    async def call(self, statuses):
+    async def call(self, statuses, timeout=30, delay=0.0):
         calls = []
 
-        def handler(request):
+        async def handler(request):
             calls.append(1)
+            await asyncio.sleep(delay)
             status = statuses[min(len(calls), len(statuses)) - 1]
             body = OK if status == 200 else {'error': {'code': 'InvalidParameter', 'message': 'bad'}}
             return httpx.Response(status, json=body)
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         sdk = AsyncArk(base_url='http://test', api_key='test', http_client=client, max_retries=0)
-        backend = VolcEngineVLM({'model': 'test', 'api_key': 'test', 'timeout': 30, 'max_retries': 1})
+        backend = VolcEngineVLM({'model': 'test', 'api_key': 'test', 'timeout': timeout, 'max_retries': 1})
         backend.get_async_client = lambda: sdk
         try:
             return await backend.get_completion_async('hi'), calls
@@ -41,3 +45,9 @@ class VlmRetry(unittest.IsolatedAsyncioTestCase):
         result, calls = await self.call([503, 200])
         self.assertEqual(result, 'ok')
         self.assertEqual(len(calls), 2)
+
+    async def test_deadline_bounds_all_attempts(self):
+        started = time.monotonic()
+        result, calls = await self.call([503, 503], timeout=0.3, delay=0.2)
+        self.assertIsInstance(result, ModelCallDeadlineError)
+        self.assertLess(time.monotonic() - started, 1.0)
