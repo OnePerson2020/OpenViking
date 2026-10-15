@@ -52,6 +52,9 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   2 s requeue pause ("session: requeue commits on lock contention" + "diagnostics + queue: …pause"),
   #6086 batch large policy-less commits (upstream uses the 150k default; ours uses the input budget),
   #6088 Volcengine query_param instruction ("embedding: Volcengine query_param …").
+- Cherry-picked from upstream main (drop on the next upgrade past it): #6039 compact intent
+  planner prompt (`intent_analysis.yaml` + 2 tests; recall with query expansion 6-11 s -> 3-5 s,
+  2026-10-15).
 - Upstream issues our commits work around (drop once fixed upstream): #6006 agent evolution
   reruns per case ("session: train agent evolution once per commit…"), #3526 entity
   duplicates across categories ("memory: route a new entity to the existing card…").
