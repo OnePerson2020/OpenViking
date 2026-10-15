@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from openviking.models.call_diagnostics import CallObservation, attach_hooks
 from openviking.utils.exceptions import ModelCallDeadlineError
-from openviking.utils.model_retry import is_retryable_api_error
+from openviking.utils.model_retry import _compute_delay, is_retryable_api_error
 from openviking.utils.token_estimation import estimate_text_tokens
 from openviking.models.network import (
     create_optional_async_httpx_client,
@@ -366,7 +366,8 @@ class VolcEngineVLM(OpenAIVLM):
                 if not is_retryable_api_error(e):
                     break
                 if attempt < self.max_retries:
-                    backoff = 2**attempt
+                    # Same backoff as retry_async (0.5 s doubling, 8 s cap, jitter).
+                    backoff = _compute_delay(attempt, base_delay=0.5, max_delay=8.0, jitter=True)
                     if time.monotonic() + backoff >= overall_deadline:
                         break
                     await asyncio.sleep(backoff)
