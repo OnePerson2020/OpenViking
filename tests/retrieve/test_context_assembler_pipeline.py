@@ -1116,3 +1116,23 @@ async def test_full_buckets_keep_their_quotas_when_one_bucket_scores_highest():
     )
 
     assert Counter(entry.category for entry in result.entries) == quotas
+
+
+async def test_one_resource_tree_takes_one_slot():
+    doc = "viking://resources/agent-artifacts/cc/s1/handoff.md"
+    other = "viking://resources/agent-artifacts/cc/s2/notes.md"
+    hits = [
+        _hit(f"{doc}/handoff.md", 0.74, "handoff file"),
+        _hit(f"{doc}/.abstract.md", 0.73, "handoff dir"),
+        _hit(other, 0.70, "other doc"),
+    ]
+    service = _bucket_service({"viking://resources": hits})
+
+    result = await assemble_context(
+        service=service,
+        ctx=_ctx(),
+        params=AssembleParams(query="q", quotas={"resources": 3}, peer_scope="actor"),
+    )
+
+    # the directory sits above the better-ranked file; its slot is left to other buckets
+    assert [entry.uri for entry in result.entries] == [f"{doc}/handoff.md", other]

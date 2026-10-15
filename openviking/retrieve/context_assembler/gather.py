@@ -394,6 +394,8 @@ async def gather_candidates(
         if bucket == "skills":
             candidates = _dedupe_candidates(candidates)
         candidates.sort(key=_rank_key, reverse=True)
+        if bucket == "resources":
+            candidates = _drop_nested(candidates)
         return candidates
 
     async def gather_flat() -> List[Candidate]:
@@ -444,6 +446,7 @@ async def gather_candidates(
             candidates = [c for c in candidates if c.category != "skills"]
             candidates.extend(_dedupe_candidates(skills))
         candidates.sort(key=_rank_key, reverse=True)
+        candidates = _drop_nested(candidates)
         return candidates[: max(0, limit)]
 
     if quotas is None:
@@ -516,6 +519,27 @@ async def _fill_skill_abstracts(service: Any, candidates: List[Candidate]) -> Li
 def _rank_key(candidate: Candidate) -> Tuple[float, int]:
     origin_rank = {origin: index for index, origin in enumerate(ORIGIN_ORDER)}
     return (candidate.ranked_score, -origin_rank.get(candidate.origin, len(origin_rank)))
+
+
+def _drop_nested(ranked: Sequence[Candidate]) -> List[Candidate]:
+    """One resource tree, one slot: drop a resource hit inside or above a better-ranked one.
+
+    A single-file resource is a directory holding that file, and every level carries
+    its own vector, so one document otherwise fills several slots with the same text.
+    """
+    kept: List[Candidate] = []
+    for candidate in ranked:
+        if candidate.category == "resources" and any(
+            other.category == "resources"
+            and (
+                _is_under(candidate.base_uri, other.base_uri)
+                or _is_under(other.base_uri, candidate.base_uri)
+            )
+            for other in kept
+        ):
+            continue
+        kept.append(candidate)
+    return kept
 
 
 def _dedupe_candidates(candidates: Sequence[Candidate]) -> List[Candidate]:
