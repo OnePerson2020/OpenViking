@@ -95,14 +95,12 @@ class MemoryConfig(BaseModel):
             "stateless deployments."
         ),
     )
-    extraction_output_format: Literal["json", "python", "json_schema"] = Field(
+    extraction_output_format: Literal["json", "python"] = Field(
         default="python",
         description=(
             "Final model-output protocol used by every memory extraction loop. "
             "'python' uses the restricted internal memory SDK DSL (default); "
-            "'json' preserves the legacy structured JSON protocol. "
-            "'json_schema' constrains read-only actions and final operations at the provider "
-            "and rejects malformed JSON locally without repair. Requires a verified backend."
+            "'json' preserves the legacy structured JSON protocol."
         ),
     )
     session_skill_extraction_enabled: bool = Field(

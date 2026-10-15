@@ -60,8 +60,6 @@ def build_volcengine_request_headers(
 class VolcEngineVLM(OpenAIVLM):
     """VolcEngine VLM backend with Chat Completions API support."""
 
-    supports_structured_output = True
-
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self._sync_client = None
@@ -247,11 +245,8 @@ class VolcEngineVLM(OpenAIVLM):
         tool_choice: Optional[str] = None,
         messages: Optional[List[Dict[str, Any]]] = None,
         max_tokens: Optional[int] = None,
-        response_format: Optional[Dict[str, Any]] = None,
     ) -> Union[str, VLMResponse]:
-        """Get text completion; structured requests retain finish_reason/usage."""
-        if response_format is not None and tools:
-            raise ValueError("Use either tools or response_format, not both")
+        """Get text completion asynchronously via Chat Completions API."""
         effective_thinking = self.thinking if thinking is None else thinking
         effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
         kwargs_messages = sanitize_openai_messages(
@@ -281,24 +276,12 @@ class VolcEngineVLM(OpenAIVLM):
                 f"tools: {json.dumps([t['function']['name'] for t in tools], ensure_ascii=False)}"
             )
 
-        if response_format is not None:
-            kwargs["response_format"] = response_format
-            if response_format.get("type") == "json_schema":
-                # Ark escapes newlines inside JSON strings, so raw newlines are
-                # whitespace between tokens. A single blank line between items is
-                # legitimate (stopping on it cut 2 of 49 live outputs early on
-                # 2026-10-10; reproduced by a direct probe). Every
-                # runaway loop sampled 2026-10-09/10 (13/13, ~9 min and 40k tokens
-                # each) has a trailing space or 4 newlines. Stop there; the
-                # truncated JSON is retried/salvaged.
-                kwargs["stop"] = ["\n\n\n\n", " \n"]
         client = self.get_async_client()
 
         observation = CallObservation(
             model=self.model,
             input_tokens=estimate_text_tokens(json.dumps(
-                {"messages": kwargs_messages, "tools": tools, "tool_choice": tool_choice,
-                 "response_format": response_format},
+                {"messages": kwargs_messages, "tools": tools, "tool_choice": tool_choice},
                 ensure_ascii=False, default=str,
             )),
             max_tokens=effective_max_tokens,
@@ -306,17 +289,10 @@ class VolcEngineVLM(OpenAIVLM):
             thinking=effective_thinking,
             timeout=self.timeout,
         )
-        observation.fields["output_transport"] = (
-            "json_schema" if response_format is not None else "tools" if tools else "text"
-        )
-        observation.fields["strict_schema"] = (
-            response_format.get("json_schema", {}).get("strict", False)
-            if response_format is not None else
-            bool(tools) and all(t.get("function", {}).get("strict", False) for t in tools)
-        )
+        observation.fields["output_transport"] = "tools" if tools else "text"
         with observation:
             return await self._complete_async_with_deadline(
-                client, kwargs, bool(tools) or response_format is not None, observation
+                client, kwargs, bool(tools), observation
             )
 
     async def _complete_async_with_deadline(self, client, kwargs, has_tools, observation):

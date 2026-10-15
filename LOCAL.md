@@ -25,8 +25,7 @@ Then on devbox:
 
 There is no file-level rollback across versions: undo = `deploy.py --apply --wheel <previous
 wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-wheel`). Plain
-`pip install -U openviking` would silently drop every patch, and the stock package refuses
-`extraction_output_format: json_schema`, so it would not even start.
+`pip install -U openviking` would silently drop every patch.
 
 ## Upgrade notes
 
@@ -141,9 +140,10 @@ release tag, and the files listed in `ops/upstream-tests.txt`.
   doubled the waste, ~13 min per call). Samples: `logs/truncated-outputs.jsonl`.
 - `memory.extraction_input_token_budget` 160000 / `extraction_read_token_budget` 16000: WM and
   fallback batch sizes derive from these (local patch).
-- `memory.extraction_output_format` = `json` since 2026-10-14 (was `json_schema`, the local
-  strict protocol; its code stays in the series until the json/json_schema A/B in
-  `~/ov-ab-20261014` is settled, then it is removed).
+- `memory.extraction_output_format` = `json` since 2026-10-14. The local strict `json_schema`
+  protocol (provider-constrained output, Ark stop sequences, truncation salvage) was removed
+  2026-10-15: A/B json vs json_schema 15/15 each, json dropped no data; strict only saved ~26%
+  prompt tokens and cost ~800 Ark-only lines. Last commit with it: `fb22394`.
 - `embedding.max_retries` 6 with the bounded embedder (20 s/request): BytePlus SG stalls.
 - `embedding.dense.query_param` = vision-embedding instruction prefix on text queries (local
   patch; documents unchanged, no reindex). 90 vague queries / 300-doc pool: MRR .831 -> .906.

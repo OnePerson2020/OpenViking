@@ -234,8 +234,6 @@ class ExtractLoop:
         tools_used: List[Dict[str, Any]] = []
         # Reset format retry counter for each run
         self._format_retry_count = 0
-        self._salvaged_operations = None
-        salvage_count = 0
         patch_repair_count = 0
         resolution_repair_count = 0
         pending_resolution_repair: Optional[Tuple[ResolvedOperations, List]] = None
@@ -290,7 +288,6 @@ class ExtractLoop:
             link_enabled=self._link_enabled,
             role_scope=role_scope,
             available_tools=tuple(allowed_tools),
-            memory_type_resolver=self._memory_type_for_uri,
             template_context={"language": output_language},
         )
         tracer.set("memory.extraction.output_format", output_format)
@@ -341,8 +338,6 @@ class ExtractLoop:
 
             # If last iteration, add a message telling the model to return result directly
             if is_last_iteration:
-                if self._provider_constrained:
-                    self._disable_tools_for_iteration = True
                 messages.append(
                     {
                         "role": "user",
@@ -353,13 +348,7 @@ class ExtractLoop:
             # Call LLM with tools - model decides: tool calls OR final operations.
             # The VLM backend traces the (human-readable) input and output, so we do
             # not re-dump them here (avoids duplicate, oversized span events).
-            if self._salvaged_operations is not None:
-                # Valid items kept from the last response after retries ran out;
-                # they go through the same resolution/refetch/patch checks.
-                tool_calls, operations = None, self._salvaged_operations
-                self._salvaged_operations = None
-            else:
-                tool_calls, operations = await self._call_llm(messages)
+            tool_calls, operations = await self._call_llm(messages)
 
             if tool_calls:
                 has_unknown_tool = await self._execute_tool_calls(messages, tool_calls, tools_used)
@@ -439,8 +428,6 @@ class ExtractLoop:
                     patch_repair_count += 1
                     max_iterations += 1
                     self._disable_tools_for_iteration = True
-                    if self._provider_constrained:
-                        await self._refresh_patch_fields(messages, patch_errors)
                     messages.append(
                         {
                             "role": "user",
@@ -451,12 +438,10 @@ class ExtractLoop:
                         f"Extended max_iterations to {max_iterations} for retry patch repair"
                     )
                     continue
-                if partial_errors or (patch_errors and self._provider_constrained):
+                if partial_errors:
                     # The repair attempt is spent: drop only the operations whose
                     # patch cannot apply instead of discarding the whole archive.
-                    if not self._drop_failed_patch_operations(
-                        final_operations, patch_errors + partial_errors
-                    ):
+                    if not self._drop_failed_patch_operations(final_operations, patch_errors):
                         raise ValueError(self._build_patch_repair_instruction(patch_errors))
                 break
             # If no tool calls either, continue to next iteration (don't break!)
@@ -505,21 +490,6 @@ class ExtractLoop:
                         console=True,
                     )
                     break
-                salvage = getattr(self._output_protocol, "salvage", None)
-                # A salvaged result may trigger a refetch and a fresh response that
-                # fails again; allow a few salvages, each bounded by one iteration.
-                if callable(salvage) and salvage_count < 3:
-                    salvaged, dropped = salvage(self._output_context)
-                    if salvaged is not None:
-                        salvage_count += 1
-                        self._salvaged_operations = salvaged
-                        max_iterations += 1
-                        logger.warning(
-                            "Memory extraction kept the valid items of the last response "
-                            "after %s iterations; dropped %d invalid item(s): %s",
-                            iteration, len(dropped), dropped[:20],
-                        )
-                        continue
                 raise ExtractionOutputInvalidError(
                     "Final response could not be parsed as operations: memory extraction "
                     f"output invalid after {max_iterations} iterations (failure_kind={failure_kind}): "
@@ -619,13 +589,6 @@ class ExtractLoop:
         if schema.filename_has_variables():
             return any(uri.startswith(f"{directory}/") for directory in directories)
         return any(uri == f"{directory}/{filename_template}" for directory in directories)
-
-    @property
-    def _provider_constrained(self) -> bool:
-        """The provider enforces the output schema (strict json_schema): no native tool calls."""
-        # getattr / `is True`: tests build loops via object.__new__ or with MagicMock protocols.
-        protocol = getattr(self, "_output_protocol", None)
-        return getattr(protocol, "provider_constrained", False) is True
 
     def _memory_type_for_uri(self, uri: str) -> Optional[str]:
         matches = [
@@ -878,15 +841,6 @@ class ExtractLoop:
 
             for item_index, item in enumerate(items):
                 item_dict = dict(item)
-                if self._provider_constrained:
-                    # The strict wire format emits every property. On an existing
-                    # page null means KEEP, not replace-with-null. Remove it only
-                    # at the operation boundary, after strict schema validation.
-                    requested = item_dict.get("page_id")
-                    if page_id_map is not None and page_id_map.resolve(requested):
-                        for field in schema.fields:
-                            if field.merge_op != MergeOp.IMMUTABLE and item_dict.get(field.name) is None:
-                                item_dict.pop(field.name, None)
                 item_dict["memory_type"] = memory_type
                 identity_resolution_skip = None
                 classify_identity_fields = getattr(
@@ -1366,8 +1320,6 @@ class ExtractLoop:
         Returns:
             Tuple of (tool_calls, operations) - one will be None, the other set
         """
-        if self._provider_constrained:
-            return await self._call_strict_json(messages)
         # Call LLM with tools - use tools from strategy
         tools = None
         tool_choice = None
@@ -1479,56 +1431,6 @@ class ExtractLoop:
         )
         return (None, None)
 
-    async def _call_strict_json(self, messages):
-        """Constrain both read requests and final operations, never native tool wrappers."""
-        from jsonschema import ValidationError as SchemaValidationError
-        from pydantic import ValidationError as ModelValidationError
-        from openviking.session.memory.extraction_output_protocol.strict_json_protocol import StrictActionError
-        from openviking.session.memory.context_budget import check_input_budget
-
-        tools = [] if self._disable_tools_for_iteration else (self._tool_schemas or [])
-        fmt = self._output_protocol.response_format(self._output_context, tools)
-        check_input_budget({"messages": messages, "response_format": fmt})
-        # Transport/deadline/cancellation exceptions are not format retries.
-        with bind_telemetry_stage("memory_extract"):
-            response = await self.vlm.get_completion_async(
-                messages=messages, thinking=self.thinking,
-                max_tokens=self._effective_max_output_tokens, response_format=fmt,
-            )
-        self._last_llm_failure_kind = None
-        self._last_llm_failure_content = ""
-        self._last_parse_error = None
-        try:
-            return self._output_protocol.parse_response(response, self._output_context, fmt, tools)
-        except (ValueError, TypeError, KeyError, SchemaValidationError, ModelValidationError) as exc:
-            self._last_llm_failure_kind = "parse_error"
-            # Never log invalid response bodies (or schema validation instance values).
-            if isinstance(exc, StrictActionError):
-                self._last_parse_error = str(exc)
-            elif isinstance(exc, SchemaValidationError):
-                self._last_parse_error = "STRICT_SCHEMA_MISMATCH validator=" + str(exc.validator)
-                # Required/additionalProperties may mention model-supplied keys;
-                # include only the validator's schema path, never instance data.
-                self._last_parse_error += " schema_path=" + "/".join(map(str, exc.absolute_schema_path))[:240]
-                if exc.context:
-                    # anyOf/oneOf: name the closest branch's failing location.
-                    # Instance paths are schema keys/list indexes, never values.
-                    from jsonschema.exceptions import best_match
-
-                    inner = best_match(exc.context)
-                    self._last_parse_error += (
-                        " best_validator=" + str(inner.validator)
-                        + " best_schema_path=" + "/".join(map(str, inner.absolute_schema_path))[:240]
-                        + " best_instance_path=" + "/".join(map(str, inner.absolute_path))[:160]
-                    )
-            elif isinstance(exc, json.JSONDecodeError):
-                self._last_parse_error = "STRICT_JSON_SYNTAX: return exactly one valid JSON object"
-            else:
-                self._last_parse_error = "STRICT_PARSE_ERROR type=" + type(exc).__name__
-            logger.warning("Strict extraction rejected provider=%s reason=%s",
-                           type(self.context_provider).__name__, self._last_parse_error)
-            return None, None
-
     async def _check_unread_existing_files(self, operations: ResolvedOperations) -> Dict:
         refetch_uris = {}
         for operation in operations.upsert_operations:
@@ -1561,40 +1463,6 @@ class ExtractLoop:
     def _build_final_operations_instruction(self) -> str:
         """Build schema-aware final-iteration instructions for the LLM."""
         return self._output_protocol.render_final_instruction(self._output_context)
-
-    async def _refresh_patch_fields(self, messages, errors):
-        """Bounded read-only repair context; never changes field targets automatically."""
-        from openviking.session.memory.context_budget import json_tokens, memory_file_field_value
-
-        reads = self.context_provider.read_file_contents or {}
-        seen: set = set()
-        total = 0
-        for error in errors:
-            uri, search = error.get("uri"), error.get("search")
-            for field in [error.get("field"), *error.get("found_in_other_fields", [])]:
-                if not field or uri not in reads or (uri, field) in seen:
-                    continue
-                seen.add((uri, field))
-                if len(seen) > 4:
-                    return
-                value = memory_file_field_value(reads[uri], field)
-                if not isinstance(value, str):
-                    continue
-                at = value.find(search) if isinstance(search, str) and search else -1
-                params = {"uri": uri, "field": field, "text_offset": max(0, at - 240)}
-                call_id = f"repair_{len(seen)}"
-                data = await self.context_provider.execute_tool(
-                    ToolCall(id=call_id, name="read", arguments=params)
-                )
-                rendered = self._output_protocol.render_tool_result_messages(
-                    self._output_context, call_id=call_id, tool_name="read",
-                    params=params, result=data, source="exact field retry",
-                )
-                cost = json_tokens(rendered)
-                if cost > 4000 or total + cost > 12000:
-                    continue
-                total += cost
-                messages.extend(rendered)
 
     async def _validate_patch_operations(
         self,
