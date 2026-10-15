@@ -1187,6 +1187,20 @@ class TestCanonicalEntityUris:
         assert "more specific name" in note
 
     @pytest.mark.asyncio
+    async def test_same_name_card_already_read_is_not_a_route_target(self):
+        loop, Operations, Item, root = self._loop(["开发工具/cc_switch.md"])
+        loop.context_provider.read_file_contents = {f"{root}/开发工具/cc_switch.md": MagicMock()}
+
+        resolved, _ = await loop.resolve_operations(
+            Operations(entities=[Item(category="developer_tool", name="CC-Switch")])
+        )
+
+        op = resolved.upsert_operations[0]
+        assert op.uris == [f"{root}/developer_tool/cc-switch.md"]
+        assert op.old_memory_file_content is None
+        assert loop._entity_redirects == {}
+
+    @pytest.mark.asyncio
     async def test_existing_path_is_kept(self):
         loop, Operations, Item, root = self._loop(["tool/codex.md", "cli_tool/codex.md"])
 

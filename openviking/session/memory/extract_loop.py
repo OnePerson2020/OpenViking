@@ -1162,6 +1162,10 @@ class ExtractLoop:
                         match = index.get(_entity_name_key(rel.rsplit("/", 1)[-1]))
                         if not match:
                             await self._note_similar_entities(root + "/memories/entities", uri, fields or {})
+                        elif match in self.context_provider.read_file_contents:
+                            # The model saw that card and still chose a new one; routing
+                            # here would turn its full content into an overwrite.
+                            match = None
                 except Exception as e:  # best effort: never block the write itself
                     tracer.info(f"entity name lookup skipped for {uri}: {e}")
             if match and match != uri:
