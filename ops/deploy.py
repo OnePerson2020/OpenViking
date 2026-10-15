@@ -72,7 +72,7 @@ old = [] if a.wheel else overlay(cur)  # a new wheel replaces every live file an
 edited_tests = sorted(set(git("diff", "--name-only", "--diff-filter=d", UP, a.ref, "--", "tests").split())
                       | {l for l in (FORK/"ops/upstream-tests.txt").read_text().splitlines() if l and not l.startswith("#")})
 exp = OUT/"export"; exp.mkdir()
-tarfile.open(fileobj=io.BytesIO(git("archive", a.ref, *new, "local_tests", "tests", raw=True))).extractall(exp, filter="data")
+tarfile.open(fileobj=io.BytesIO(git("archive", a.ref, *new, "local_tests", "tests", "pyproject.toml", raw=True))).extractall(exp, filter="data")
 up = OUT/"upstream"  # pristine versions of files whose patch was dropped
 for f in set(old) - set(new):
     if subprocess.run(["git", "-C", str(FORK), "cat-file", "-e", f"{UP}:{f}"]).returncode == 0:
