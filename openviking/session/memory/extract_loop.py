@@ -341,7 +341,7 @@ class ExtractLoop:
 
             # If last iteration, add a message telling the model to return result directly
             if is_last_iteration:
-                if self._output_protocol.name == "json_schema":
+                if self._provider_constrained:
                     self._disable_tools_for_iteration = True
                 messages.append(
                     {
@@ -439,7 +439,7 @@ class ExtractLoop:
                     patch_repair_count += 1
                     max_iterations += 1
                     self._disable_tools_for_iteration = True
-                    if self._output_protocol.name == 'json_schema':
+                    if self._provider_constrained:
                         await self._refresh_patch_fields(messages, patch_errors)
                     messages.append(
                         {
@@ -451,7 +451,7 @@ class ExtractLoop:
                         f"Extended max_iterations to {max_iterations} for retry patch repair"
                     )
                     continue
-                if partial_errors or (patch_errors and self._output_protocol.name == "json_schema"):
+                if partial_errors or (patch_errors and self._provider_constrained):
                     # The repair attempt is spent: drop only the operations whose
                     # patch cannot apply instead of discarding the whole archive.
                     if not self._drop_failed_patch_operations(
@@ -619,6 +619,13 @@ class ExtractLoop:
         if schema.filename_has_variables():
             return any(uri.startswith(f"{directory}/") for directory in directories)
         return any(uri == f"{directory}/{filename_template}" for directory in directories)
+
+    @property
+    def _provider_constrained(self) -> bool:
+        """The provider enforces the output schema (strict json_schema): no native tool calls."""
+        # getattr / `is True`: tests build loops via object.__new__ or with MagicMock protocols.
+        protocol = getattr(self, "_output_protocol", None)
+        return getattr(protocol, "provider_constrained", False) is True
 
     def _memory_type_for_uri(self, uri: str) -> Optional[str]:
         matches = [
@@ -871,7 +878,7 @@ class ExtractLoop:
 
             for item_index, item in enumerate(items):
                 item_dict = dict(item)
-                if getattr(self, "_output_protocol", None) is not None and self._output_protocol.name == "json_schema":
+                if self._provider_constrained:
                     # The strict wire format emits every property. On an existing
                     # page null means KEEP, not replace-with-null. Remove it only
                     # at the operation boundary, after strict schema validation.
@@ -1359,7 +1366,7 @@ class ExtractLoop:
         Returns:
             Tuple of (tool_calls, operations) - one will be None, the other set
         """
-        if getattr(self, "_output_protocol", None) is not None and self._output_protocol.name == "json_schema":
+        if self._provider_constrained:
             return await self._call_strict_json(messages)
         # Call LLM with tools - use tools from strategy
         tools = None
@@ -1556,32 +1563,38 @@ class ExtractLoop:
         return self._output_protocol.render_final_instruction(self._output_context)
 
     async def _refresh_patch_fields(self, messages, errors):
-        """Bounded read-only repair context, never change field targets automatically."""
-        from openviking.session.memory.context_budget import memory_file_field_value, json_tokens
+        """Bounded read-only repair context; never changes field targets automatically."""
+        from openviking.session.memory.context_budget import json_tokens, memory_file_field_value
+
         reads = self.context_provider.read_file_contents or {}
-        requests = []
+        seen: set = set()
+        total = 0
         for error in errors:
-            fields = [error.get('field')] + list(error.get('found_in_other_fields', []))
-            for field in fields:
-                requests.append((error.get('uri'), field, error.get('search')))
-        seen = set();total = 0
-        for uri, field, search in requests:
-            if not field or uri not in reads or (uri, field) in seen:
-                continue
-            seen.add((uri, field))
-            if len(seen) > 4: break
-            value = memory_file_field_value(reads[uri], field)
-            if not isinstance(value, str): continue
-            at = value.find(search) if isinstance(search, str) and search else -1
-            params = {'uri': uri, 'field': field, 'text_offset': max(0, at-240)}
-            data = await self.context_provider.execute_tool(ToolCall(
-                id='repair_'+str(len(seen)), name='read', arguments=params))
-            rendered = self._output_protocol.render_tool_result_messages(
-                self._output_context, call_id='repair_'+str(len(seen)), tool_name='read',
-                params=params, result=data, source='exact field retry')
-            cost = json_tokens(rendered)
-            if cost > 4000 or total + cost > 12000: continue
-            total += cost;messages.extend(rendered)
+            uri, search = error.get("uri"), error.get("search")
+            for field in [error.get("field"), *error.get("found_in_other_fields", [])]:
+                if not field or uri not in reads or (uri, field) in seen:
+                    continue
+                seen.add((uri, field))
+                if len(seen) > 4:
+                    return
+                value = memory_file_field_value(reads[uri], field)
+                if not isinstance(value, str):
+                    continue
+                at = value.find(search) if isinstance(search, str) and search else -1
+                params = {"uri": uri, "field": field, "text_offset": max(0, at - 240)}
+                call_id = f"repair_{len(seen)}"
+                data = await self.context_provider.execute_tool(
+                    ToolCall(id=call_id, name="read", arguments=params)
+                )
+                rendered = self._output_protocol.render_tool_result_messages(
+                    self._output_context, call_id=call_id, tool_name="read",
+                    params=params, result=data, source="exact field retry",
+                )
+                cost = json_tokens(rendered)
+                if cost > 4000 or total + cost > 12000:
+                    continue
+                total += cost
+                messages.extend(rendered)
 
     async def _validate_patch_operations(
         self,

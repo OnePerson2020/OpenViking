@@ -152,6 +152,7 @@ def truncated_operations(content: Any) -> dict[str, list] | None:
 
 class StrictJsonExtractionOutputProtocol(JsonExtractionOutputProtocol):
     name = 'json_schema'
+    provider_constrained = True  # ExtractLoop calls the VLM with response_format
 
     def response_format(self, context, tools):
         operations = strict_schema(context.operations_model.model_json_schema())
