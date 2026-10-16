@@ -56,7 +56,10 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   not filed. Drop it on the next upgrade past #6102 ("timed out" / TimeoutError are transient) and
   #6047 (`model_retry_scope(0)` on search/find: queries do not retry at all). Both landed 2026-10-15.
 - #6152 (2026-10-16) = "retrieve: one resource tree takes one context slot" + "retrieve: a resource
-  tree's slot shows its most specific hit" squashed; drop both local commits once it merges.
+  tree's slot shows its most specific hit" + "retrieve: resource slots do not depend on the ranking
+  order" squashed (the PR still lacks the third; update it before review); drop all three once it merges.
+- 2026-10-16 "vlm: vision completions retry transient errors; deadline aborts count as failed" and
+  "memory: ask once before forking a same-name entity card the model read": local only, not filed.
 - Cherry-picked from upstream main (drop on the next upgrade past it): #6039 compact intent
   planner prompt (`intent_analysis.yaml` + 2 tests; recall with query expansion 6-11 s -> 3-5 s,
   2026-10-15).
