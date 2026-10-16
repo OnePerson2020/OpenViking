@@ -1385,10 +1385,10 @@ class MemoryUpdater:
             except ConflictError:
                 raise
             except (NotFoundError, FileNotFoundError):
-                # A confirmed missing file may be created from the resolved
-                # operation. Transient storage failures must propagate: using
-                # a stale pre-fetched snapshot after an uncertain read could
-                # overwrite a concurrent update.
+                if source_content is not None and not is_uri_migration:
+                    raise ConflictError(
+                        f"Memory update target no longer exists: {uri}", resource=uri
+                    ) from None
                 pass
             if is_uri_migration:
                 try:
@@ -1404,6 +1404,7 @@ class MemoryUpdater:
                 old_content = source_content
 
             from openviking.session.memory.context_budget import (
+                apply_exact_string_patch,
                 memory_file_field_value,
                 validate_partial_fields,
             )
@@ -1456,16 +1457,22 @@ class MemoryUpdater:
                     # Use merge_op to process field value
                     merge_op = MergeOpFactory.from_field(field)
                     try:
+                        # A patch prepared before another writer must still match every block.
+                        if (
+                            source_content is not None
+                            and current_value != memory_file_field_value(source_content, field.name)
+                            and (
+                                hasattr(patch_value, "blocks")
+                                or isinstance(patch_value, dict) and "blocks" in patch_value
+                            )
+                        ):
+                            apply_exact_string_patch(current_value, patch_value)
                         new_value = await merge_op.apply(current_value, patch_value)
                     except Exception as e:
-                        tracer.info(
-                            f"[memory_updater] Skipping field update after merge_op failure: uri={uri}, field={field.name}, error={e}"
-                        )
-                        if current_value is None:
-                            metadata.pop(field.name, None)
-                        else:
-                            metadata[field.name] = current_value
-                        continue
+                        raise ConflictError(
+                            f"Memory field update could not be applied: {uri} field={field.name}",
+                            resource=uri,
+                        ) from e
                     metadata[field.name] = new_value
 
             # Preserve system-managed metadata from the old file that is not

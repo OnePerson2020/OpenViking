@@ -447,9 +447,10 @@ class TestMemoryUpdater:
     @pytest.mark.asyncio
     async def test_generate_overview_template_fallbacks_for_builtin_memories(self):
         registry = MemoryTypeRegistry(load_schemas=False)
-        registry.load_from_yaml("openviking/prompts/templates/memory/cases.yaml")
-        registry.load_from_yaml("openviking/prompts/templates/memory/entities.yaml")
-        registry.load_from_yaml("openviking/prompts/templates/memory/preferences.yaml")
+        templates = PromptManager._get_bundled_templates_dir() / "memory"
+        registry.load_from_yaml(str(templates / "cases.yaml"))
+        registry.load_from_yaml(str(templates / "entities.yaml"))
+        registry.load_from_yaml(str(templates / "preferences.yaml"))
 
         case_dir = "viking://user/alice/memories/cases"
         case_uri = f"{case_dir}/merged_case.md"
@@ -2333,7 +2334,7 @@ class TestConsecutivePatchesSameURI:
         assert "user_ids" not in parsed
 
     @pytest.mark.asyncio
-    async def test_apply_upsert_skips_failed_field_and_keeps_other_fields(self, monkeypatch):
+    async def test_apply_upsert_reports_failed_field_without_partial_write(self, monkeypatch):
         memory_type = "notes"
         uri = "viking://user/test/memories/notes/demo.md"
 
@@ -2396,17 +2397,12 @@ class TestConsecutivePatchesSameURI:
             uris=[uri],
         )
 
-        await updater._apply_upsert(op, MagicMock())
-
-        parsed = parse_memory_file_with_fields(store[uri])
-        assert parsed["title"] == "Updated Title"
-        assert parsed["content"] == "Original body"
-        trace_info.assert_any_call(
-            f"[memory_updater] Skipping field update after merge_op failure: uri={uri}, field=content, error=patch failed"
-        )
+        with pytest.raises(ConflictError, match="field=content"):
+            await updater._apply_upsert(op, MagicMock())
+        assert store == {}
 
     @pytest.mark.asyncio
-    async def test_apply_upsert_logs_patch_failure_from_memory_updater_only(self, monkeypatch):
+    async def test_apply_upsert_preserves_file_on_patch_failure(self, monkeypatch):
         memory_type = "notes"
         uri = "viking://user/test/memories/notes/demo.md"
 
@@ -2457,17 +2453,10 @@ class TestConsecutivePatchesSameURI:
             uris=[uri],
         )
 
-        await updater._apply_upsert(op, MagicMock())
-
-        parsed = parse_memory_file_with_fields(store[uri])
-        assert parsed["content"] == "Original body"
+        with pytest.raises(ConflictError, match="field=content"):
+            await updater._apply_upsert(op, MagicMock())
+        assert store[uri] == existing_content
         patch_warning.assert_not_called()
-        assert any(
-            "[memory_updater] Skipping field update after merge_op failure" in call.args[0]
-            and f"uri={uri}" in call.args[0]
-            and "field=content" in call.args[0]
-            for call in trace_info.call_args_list
-        )
 
     @pytest.mark.asyncio
     async def test_two_patches_same_uri_second_sees_first_patch(self):
