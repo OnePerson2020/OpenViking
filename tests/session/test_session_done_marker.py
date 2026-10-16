@@ -21,6 +21,8 @@ async def test_task_result_failure_leaves_no_done_marker(
         raise RuntimeError("synthetic task result failure")
 
     monkeypatch.setattr(tracker, "complete", failing_complete)
+    # Offline embeddings never drain the request queues; do not let Phase 2 wait on them.
+    monkeypatch.setattr("openviking.session.session._PHASE2_QUEUE_WAIT_TIMEOUT_SECONDS", 1.0)
     result = await session.commit_async()
     task_result = await _wait_for_task(result["task_id"])
 
