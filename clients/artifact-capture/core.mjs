@@ -374,12 +374,15 @@ export function createStore({ harness, conn, rootDir = join(homedir(), ".openvik
 
 export function readJsonl(path, fromLine = 0) {
   const lines = readFileSync(path, "utf8").split("\n");
-  const total = lines.length && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
+  let total = lines.length && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
   const start = fromLine > total ? 0 : fromLine; // file was rewritten: rescan
   const entries = [];
   for (let i = start; i < total; i++) {
     if (!lines[i].trim()) continue;
-    try { entries.push({ line: i, value: JSON.parse(lines[i]) }); } catch { /* partial line */ }
+    try { entries.push({ line: i, value: JSON.parse(lines[i]) }); } catch {
+      // The writer may still be appending the final record; do not commit its cursor.
+      if (i === lines.length - 1) total = i;
+    }
   }
   return { entries, total };
 }
@@ -447,6 +450,15 @@ export function scanCodex(entries, { cwd } = {}) {
       if (typeof payload.cwd === "string") currentCwd = payload.cwd;
       continue;
     }
+    if (value?.type === "event_msg" && payload.type === "item_completed"
+        && payload.item?.type === "FileChange" && payload.item.status === "completed") {
+      for (const [path, change] of Object.entries(payload.item.changes || {})) {
+        if (!["add", "update"].includes(change?.type)) continue;
+        const p = resolveAgentPath(change.move_path || path, currentCwd);
+        if (p) files.push({ path: p, origin: { line, tool: "apply_patch" } });
+      }
+      continue;
+    }
     if (value?.type !== "response_item") continue;
     if (payload.type === "message" && Array.isArray(payload.content)) {
       payload.content.forEach((part, index) => {
@@ -457,7 +469,7 @@ export function scanCodex(entries, { cwd } = {}) {
           mentioned.push(...extractMentionedPaths(part.text));
         }
       });
-    } else if ((payload.type === "custom_tool_call" || payload.type === "function_call") && payload.name === "apply_patch") {
+    } else if ((payload.type === "custom_tool_call" || payload.type === "function_call") && /(?:^|\.)apply_patch$/.test(payload.name || "")) {
       let patch = payload.input || payload.arguments || "";
       if (typeof patch === "string" && patch.trim().startsWith("{")) {
         try { const parsed = JSON.parse(patch); patch = parsed.input || parsed.patch || patch; } catch { /* raw */ }

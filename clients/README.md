@@ -8,7 +8,9 @@ What the OpenViking memory plugins do not do, kept outside the plugin directorie
   any network I/O) → `viking://resources/agent-artifacts/<harness>/<ovSessionId>/` + a link
   message in the same OV session. CC/Codex run `hook.mjs` on Stop/SubagentStop
   (`~/.claude/settings.json`, `~/.codex/hooks.json`); `backfill-codex.mjs` replays missed
-  Codex threads. Tests: `node --test artifact-capture/core.test.mjs`.
+  Codex threads. Tests: `node --test artifact-capture/*.test.mjs`.
+  Codex completed FileChange events capture edits made through exec wrappers too; unfinished
+  JSONL tails remain behind the cursor until the next hook can read them completely.
 - `pi/openviking-artifacts.ts`: the same for pi, as its own extension next to the official
   `openviking` one (message_end: stage locally; turn_end/session_start: upload).
 - `skills/ov-session-replay/`: replay past sessions L0→L3 (no upstream equivalent as of
