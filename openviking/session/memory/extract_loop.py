@@ -202,6 +202,7 @@ class ExtractLoop:
         self._entity_name_indexes: Dict[str, Dict[str, str]] = {}
         self._entity_redirects: Dict[str, str] = {}  # existing card -> path the model asked for
         self._entity_similar_offered: set = set()  # existing cards already shown as look-alikes
+        self._entity_similar_checked: set = set()  # new paths already searched (one find each)
         self._entity_similar_pending: List[str] = []  # notes for the next round
         self.context_provider = context_provider
         self.thinking = bool(thinking)
@@ -1133,7 +1134,11 @@ class ExtractLoop:
                         index = await self._entity_name_index(root + "/memories/entities")
                         match = index.get(_entity_name_key(rel.rsplit("/", 1)[-1]))
                         if not match:
-                            await self._note_similar_entities(root + "/memories/entities", uri, fields or {})
+                            if uri not in self._entity_similar_checked:
+                                self._entity_similar_checked.add(uri)
+                                await self._note_similar_entities(
+                                    root + "/memories/entities", uri, fields or {}
+                                )
                         elif match in self.context_provider.read_file_contents:
                             # The model saw that card and still chose a new one; routing
                             # here would turn its full content into an overwrite.

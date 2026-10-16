@@ -1127,6 +1127,7 @@ class TestCanonicalEntityUris:
         loop._entity_name_indexes = {}
         loop._entity_redirects = {}
         loop._entity_similar_offered = set()
+        loop._entity_similar_checked = set()
         loop._entity_similar_pending = []
         return loop, Operations, Item, root
 
@@ -1155,6 +1156,7 @@ class TestCanonicalEntityUris:
         assert "job_template_20000001" not in note and "unrelated" not in note
         await loop.resolve_operations(ops)
         assert loop._pop_similar_entity_note() == ""  # each look-alike is named once
+        assert loop.viking_fs.find.await_count == 2  # and each new path searched once
 
     @pytest.mark.asyncio
     async def test_new_entity_routes_to_same_name_in_other_category(self):
