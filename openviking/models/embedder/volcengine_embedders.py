@@ -91,6 +91,9 @@ _EMBEDDING_REQUEST_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 _EMBEDDING_LIMITS = httpx.Limits(
     max_connections=1000, max_keepalive_connections=100, keepalive_expiry=300.0
 )
+# A search waits on its query embedding; embedding.max_retries (6) of 20 s timeouts
+# would outlast every client. Queries retry once, indexing keeps the full budget.
+_QUERY_MAX_RETRIES = 1
 
 
 def _bounded_ark_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -340,6 +343,7 @@ class VolcengineDenseEmbedder(DenseEmbedderBase):
                 _embed_call,
                 logger=logger,
                 operation_name="Volcengine embedding",
+                max_retries=min(self.max_retries, _QUERY_MAX_RETRIES) if is_query else None,
             )
         except Exception as e:
             raise RuntimeError(f"Volcengine embedding failed: {str(e)}") from e
@@ -389,6 +393,7 @@ class VolcengineDenseEmbedder(DenseEmbedderBase):
                 _embed_call,
                 logger=logger,
                 operation_name="Volcengine async embedding",
+                max_retries=min(self.max_retries, _QUERY_MAX_RETRIES) if is_query else None,
             )
         except Exception as e:
             raise RuntimeError(f"Volcengine embedding failed: {str(e)}") from e

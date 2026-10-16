@@ -11,3 +11,12 @@ tests/storage/test_session_commit_processor_identity.py
 --deselect=tests/session/test_compressor_v3.py::test_train_from_extracted_cases_submits_streaming_rollout
 --deselect=tests/session/test_compressor_v3.py::test_v3_extract_uses_patch_merge_without_directory_lock
 --deselect=tests/session/test_compressor_v3.py::test_v3_extract_trains_only_canonical_case_after_patch_merge
+# Reach classify_api_error / embedder retries ("embedding: SDK request timeouts are retryable",
+# 2026-10-16). tests/utils/test_circuit_breaker.py and test_volcengine_embedder_input.py are left
+# out: 2 + 1 tests fail there on 8e7b371 too (offline env), not from our patches.
+tests/unit/test_model_retry.py
+tests/unit/test_circuit_breaker.py
+tests/unit/test_vikingbot_vlm_adapter_retry.py
+tests/storage/test_collection_schemas.py
+tests/storage/test_memory_semantic_stall.py
+tests/models

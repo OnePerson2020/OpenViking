@@ -377,7 +377,9 @@ class EmbedderBase(ABC):
         """Release resources, subclasses can override as needed"""
         pass
 
-    def _run_with_retry(self, func: Callable[[], T], *, logger=None, operation_name: str) -> T:
+    def _run_with_retry(
+        self, func: Callable[[], T], *, logger=None, operation_name: str, max_retries=None
+    ) -> T:
         def _wrapped() -> T:
             previous_started_at = self._active_call_started_at
             self._active_call_started_at = time.monotonic()
@@ -388,7 +390,7 @@ class EmbedderBase(ABC):
 
         return retry_sync(
             _wrapped,
-            max_retries=self.max_retries,
+            max_retries=self.max_retries if max_retries is None else max_retries,
             logger=logger,
             operation_name=operation_name,
         )
@@ -399,6 +401,7 @@ class EmbedderBase(ABC):
         *,
         logger=None,
         operation_name: str,
+        max_retries=None,
     ) -> T:
         async def _wrapped() -> T:
             semaphore = getattr(self, "_account_semaphore", None)
@@ -433,7 +436,7 @@ class EmbedderBase(ABC):
 
         return await retry_async(
             _wrapped,
-            max_retries=self.max_retries,
+            max_retries=self.max_retries if max_retries is None else max_retries,
             logger=logger,
             operation_name=operation_name,
         )

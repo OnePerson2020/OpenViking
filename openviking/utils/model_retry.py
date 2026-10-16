@@ -8,6 +8,8 @@ import threading
 import time
 from typing import Awaitable, Callable, TypeVar
 
+import httpx
+
 from openviking.pyagfs.exceptions import AGFSNotADirectoryError
 from openviking.utils.exceptions import AllCredentialsFailedError, ModelCallDeadlineError
 
@@ -223,6 +225,11 @@ def classify_api_error(error: Exception) -> str:
     if any(isinstance(exc, ModelCallDeadlineError) for exc in _iter_exception_chain(error)):
         # Do not let generic retries replay a storage-writing extraction step.
         return ERROR_CLASS_DEADLINE
+
+    # SDK timeouts read "Request timed out." (no "timeout" pattern) and are not
+    # TimeoutError subclasses; the httpx timeout in the chain is what they share.
+    if any(isinstance(exc, httpx.TimeoutException) for exc in _iter_exception_chain(error)):
+        return ERROR_CLASS_TRANSIENT
 
     if isinstance(error, AllCredentialsFailedError):
         classes = [ec for (_cid, ec, _exc, _idx) in error.errors if ec]
