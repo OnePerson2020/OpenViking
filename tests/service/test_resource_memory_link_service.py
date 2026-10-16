@@ -224,7 +224,7 @@ async def test_on_resource_added_bridges_reason_through_fixed_session(request_co
     )
 
     session_id = result["session_id"]
-    assert result["status"] == "success"
+    assert result["status"] == "accepted"
     assert session_id == _RESOURCE_REASON_SESSION_ID
     assert session_service.got == [
         {
@@ -285,7 +285,7 @@ async def test_on_resource_added_returns_once_reason_commit_is_queued(request_co
         timeout=3,
     )
 
-    assert result["status"] == "success"
+    assert result["status"] == "accepted"
     assert result["commit_task_id"] == "reason-task"
 
 
@@ -338,7 +338,7 @@ async def test_on_resource_added_reuses_same_reason_session(request_context):
         release.set()
         results = await asyncio.wait_for(asyncio.gather(first, second, worker), timeout=3)
 
-    assert all(result["status"] == "success" for result in results)
+    assert all(result["status"] == "accepted" for result in results)
     assert all(result["session_id"] == _RESOURCE_REASON_SESSION_ID for result in results)
     assert [call["session_id"] for call in session_service.committed] == [
         _RESOURCE_REASON_SESSION_ID

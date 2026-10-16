@@ -155,9 +155,11 @@ class ResourceMemoryLinkService:
     ) -> Dict[str, Any]:
         """Queue add-resource reason extraction as a normal session commit.
 
-        Returns once the commit is queued. Every reason commit serializes on one
-        shared session, so waiting for it here held the caller behind all earlier
-        reason commits (one stalled commit could block resource ingestion).
+        Returns ``status="accepted"`` once the commit is queued; poll
+        ``commit_task_id`` through the Task API for its result. Every reason commit
+        serializes on one shared session, so waiting for it here held the caller
+        behind all earlier reason commits (one stalled commit could block resource
+        ingestion).
         """
         reason = (reason or "").strip()
         if not reason:
@@ -209,7 +211,7 @@ class ResourceMemoryLinkService:
             )
 
         return {
-            "status": "success",
+            "status": "accepted",
             "session_id": session_id,
             "commit_task_id": commit_result.get("task_id"),
             "archive_uri": commit_result.get("archive_uri"),
