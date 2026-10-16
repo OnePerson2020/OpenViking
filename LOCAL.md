@@ -52,11 +52,9 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   2 s requeue pause ("session: requeue commits on lock contention" + "diagnostics + queue: …pause"),
   #6086 batch large policy-less commits (upstream uses the 150k default; ours uses the input budget),
   #6088 Volcengine query_param instruction ("embedding: Volcengine query_param …").
-- 2026-10-16 "embedding: SDK request timeouts are retryable; queries retry once": local only
-  (not filed). With #6065 its TimeoutError is already transient; keep `_QUERY_MAX_RETRIES`
-  (queries retry once) and the `httpx.TimeoutException` check in `classify_api_error` for the
-  SDK's own 20 s timeout. Phase 2's `_run_retryable_phase2_step` now also retries a timeout that
-  escapes a step (none in 7 days of logs: memory writes enqueue their embeddings).
+- 2026-10-16 "embedding: SDK request timeouts are retryable; queries retry once": covered upstream,
+  not filed. Drop it on the next upgrade past #6102 ("timed out" / TimeoutError are transient) and
+  #6047 (`model_retry_scope(0)` on search/find: queries do not retry at all). Both landed 2026-10-15.
 - Cherry-picked from upstream main (drop on the next upgrade past it): #6039 compact intent
   planner prompt (`intent_analysis.yaml` + 2 tests; recall with query expansion 6-11 s -> 3-5 s,
   2026-10-15).
