@@ -335,7 +335,7 @@ async def test_phase2_defers_live_predecessor_and_skips_missing_queue_work(
     )
     tracker = get_task_tracker()
     live_work = {"task-1", "task-2"}
-    monkeypatch.setattr(tracker, "has_work", live_work.__contains__)
+    monkeypatch.setattr(tracker, "has_work", AsyncMock(side_effect=live_work.__contains__))
 
     assert not await session._can_run_archive(3)
 
@@ -1945,7 +1945,11 @@ async def test_interrupted_phase1_recovers_when_root_rewrite_is_durable(
         min_raw_tail_steps=1,
     )
     await session._write_to_agfs_async(messages=[original[1]])
-    monkeypatch.setattr(get_task_tracker(), "has_work", lambda task_id: task_id == "synthetic")
+    monkeypatch.setattr(
+        get_task_tracker(),
+        "has_work",
+        AsyncMock(side_effect=lambda task_id: task_id == "synthetic"),
+    )
 
     assert await session._ensure_phase1_ready(archive_uri)
     assert (await session._read_phase1_meta(archive_uri))["status"] == "ready"
