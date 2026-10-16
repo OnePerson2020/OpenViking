@@ -1136,3 +1136,24 @@ async def test_one_resource_tree_takes_one_slot():
 
     # the directory sits above the better-ranked file; its slot is left to other buckets
     assert [entry.uri for entry in result.entries] == [f"{doc}/handoff.md", other]
+
+
+async def test_resource_tree_slot_shows_the_most_specific_hit():
+    doc = "viking://resources/entity-archive/run/LocalBridge"
+    other = "viking://resources/agent-artifacts/cc/s2/notes.md"
+    hits = [
+        _hit(f"{doc}/.abstract.md", 0.75, "archive dir"),
+        _hit(f"{doc}/routing/routing_1.md", 0.74, "routing section"),
+        _hit(f"{doc}/status/status_1.md", 0.73, "status section"),
+        _hit(other, 0.70, "other doc"),
+    ]
+    service = _bucket_service({"viking://resources": hits})
+
+    result = await assemble_context(
+        service=service,
+        ctx=_ctx(),
+        params=AssembleParams(query="q", quotas={"resources": 4}, peer_scope="actor"),
+    )
+
+    # the section replaces its directory's abstract; the tree still takes one slot
+    assert [entry.uri for entry in result.entries] == [f"{doc}/routing/routing_1.md", other]
