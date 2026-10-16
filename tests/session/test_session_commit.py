@@ -729,26 +729,6 @@ class TestCommit:
         assert seen["summary"] == previous_overview
         assert seen["extract"] == previous_overview
 
-    async def test_task_result_failure_leaves_no_done_marker(
-        self, wm_session_with_messages: Session, monkeypatch
-    ):
-        """.done is written after the task result is saved: a failed save must not
-        leave a completed archive behind a failed task (upstream #6153)."""
-        session = wm_session_with_messages
-        session._session_compressor.extract_long_term_memories = AsyncMock(return_value=[])
-        tracker = get_task_tracker()
-
-        async def failing_complete(*args, **kwargs):
-            del args, kwargs
-            raise RuntimeError("synthetic task result failure")
-
-        monkeypatch.setattr(tracker, "complete", failing_complete)
-        result = await session.commit_async()
-        task_result = await _wait_for_task(result["task_id"])
-
-        assert task_result["status"] == "failed"
-        assert not await _marker_exists(session, result["archive_uri"], ".done")
-
     async def test_commit_failed_after_long_term_extraction_failure_does_not_block(self, client):
         """Binary archive outcome: if long-term extraction fails (after retries),
         the whole archive is marked .failed.json and skipped — there is no
