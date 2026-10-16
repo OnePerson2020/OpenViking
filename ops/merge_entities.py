@@ -21,15 +21,18 @@ apply skips any group whose files changed since plan. Undo: restore the tar, the
 import argparse, collections, concurrent.futures, hashlib, json, os, re, tarfile, time, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 
+# The rules new writes use (installed overlay = deployed local), not copies.
+from openviking.session.memory.extract_loop import (  # noqa: E402
+    _SIMILAR_ENTITY_SCORE as SIMILAR,
+    _entity_ids_compatible as ids_ok,
+    _entity_name_key as key,
+)
+
 OV = Path.home()/".openviking"
 DATA = OV/"data/viking/default"
 CONF = json.load(open(OV/"ov.conf"))
 KEY = json.load(open(OV/"ovcli.conf"))["api_key"]
 FIELDS = "<!-- MEMORY_FIELDS"
-
-
-def key(name):
-    return re.sub(r"[\s._\-]+", "_", name[:-3].strip().lower())
 
 
 def uri(path):
@@ -38,15 +41,6 @@ def uri(path):
 
 def body(path):
     return path.read_text(encoding="utf-8").split(FIELDS, 1)[0].rstrip()
-
-
-SIMILAR = 0.85  # = extract_loop._SIMILAR_ENTITY_SCORE (calibrated 2026-10-14)
-
-
-def ids_ok(a, b):  # = extract_loop._entity_ids_compatible
-    date = re.compile(r"20\d{6}")
-    groups = lambda n: (set(re.findall(r"\d{3,}", n)), set(date.findall(n)), set(re.findall(r"\d{3,}", date.sub(" ", n))))
-    return not any(x and y and not x & y for x, y in zip(groups(a), groups(b)))
 
 
 def similar_pairs(since_days=None):
