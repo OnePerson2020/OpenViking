@@ -85,6 +85,12 @@ async def _measure_embedding_call_async(
 # embedding (and every commit waiting on it) for an hour. Fail fast instead and
 # let the outer retry/backoff handle transient errors.
 _EMBEDDING_REQUEST_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
+# httpx drops idle pooled connections after 5 s, so most queries paid a fresh TLS
+# handshake (0.8-5.6 s to BytePlus SG from devbox). Idle connections stay reusable
+# for at least 330 s there (2026-10-16 probe): median 1.54 -> 0.82 s, p75 3.77 -> 1.22 s.
+_EMBEDDING_LIMITS = httpx.Limits(
+    max_connections=1000, max_keepalive_connections=100, keepalive_expiry=300.0
+)
 
 
 def _bounded_ark_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -100,8 +106,9 @@ def _create_sync_ark(kwargs: Dict[str, Any]):
         client_kwargs.get("base_url"),
         timeout=60.0,
     )
-    if http_client is not None:
-        client_kwargs["http_client"] = http_client
+    client_kwargs["http_client"] = http_client or httpx.Client(
+        limits=_EMBEDDING_LIMITS, follow_redirects=True
+    )
     return volcenginesdkarkruntime.Ark(**client_kwargs)
 
 
@@ -111,8 +118,9 @@ def _create_async_ark(kwargs: Dict[str, Any]):
         client_kwargs.get("base_url"),
         timeout=60.0,
     )
-    if http_client is not None:
-        client_kwargs["http_client"] = http_client
+    client_kwargs["http_client"] = http_client or httpx.AsyncClient(
+        limits=_EMBEDDING_LIMITS, follow_redirects=True
+    )
     return volcenginesdkarkruntime.AsyncArk(**client_kwargs)
 
 
