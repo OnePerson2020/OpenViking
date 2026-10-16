@@ -66,8 +66,8 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   upgrade past #4548 drop the async_client.py part of "storage: non-blocking exact path lock; load
   session under the lock" and keep its session.py part (load under the lock).
 - #6157 (2026-10-16, follow-up to the #6077 review): memory_linking.status "accepted" for a queued
-  reason commit + en/zh docs. Upstream only; our local reason commit still returns "success"
-  (no reader).
+  reason commit + en/zh docs. MERGED as f64fb5ba; adopt on the next upgrade. Our local reason
+  commit still returns "success" (no reader).
 - 2026-10-16 "embedding: SDK request timeouts are retryable; queries retry once": covered upstream,
   not filed. Drop it on the next upgrade past #6102 ("timed out" / TimeoutError are transient) and
   #6047 (`model_retry_scope(0)` on search/find: queries do not retry at all). This changes query
@@ -85,7 +85,7 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   reruns per case ("session: train agent evolution once per commit…"), #3526 entity
   duplicates across categories ("memory: route a new entity to the existing card…").
 - Client plugins (Claude Code, Codex, pi on the Mac) are upgraded separately from the server.
-- 2026-10-16 runtime review follow-up (local only): missing update targets raise ConflictError;
+- 2026-10-16 runtime review follow-up (PR #6179): missing update targets raise ConflictError;
   stale string patches must still match every block, and field failures cannot count as edits.
   Strict ordinary-memory/trajectory/training callers propagate apply failures so the archive
   retains a visible failure instead of claiming completion. This does not make a multi-file batch
@@ -94,6 +94,15 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   capacity eviction and account deletion invalidate the restored-owner marker. Ordinary list APIs
   still refresh durable history. Waiting/terminal commit deliveries skip loading root messages;
   the durable queue, predecessor checks and 2-second requeue delay are unchanged.
+- Upstream submissions for the deployed `523bb84` patch set (2026-10-16): #6179
+  `fix/memory-write-conflict-outcomes` (`f6eda7d6`), #6180 `perf/defer-queued-session-load`
+  (`b3a43eb0`), #6181 `perf/cache-file-task-owner-load` (`46f44d75`). All three are based on
+  upstream `7c34e43c`, not the v0.5.0 overlay. #6179 complements #6075's transient-read guard;
+  #6180 is independent of #6083's requeue policy. Drop matching local changes on upgrade
+  once merged. #6136 rewrote task tracking but file-backed activity checks still reread all
+  records; #6181 adapts our optimization to its new store API, preserving directory scans
+  while loading only uncached records. Do not cherry-pick the old owner-cache implementation
+  onto the new task/work store. Client-only `clients/` fixes remain in the fork backup.
 - Artifact capture accepts completed Codex FileChange events (including wrapped exec calls and
   moves), namespaced apply_patch, and retries an unfinished JSONL tail on the next hook.
 - Pre-fork work dirs (0.4.23 port, Oct 6–9 improvements) and the only full data backup
