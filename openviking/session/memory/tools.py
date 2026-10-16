@@ -275,6 +275,7 @@ class MemoryReadTool(MemoryTool):
                 llm_result["_omitted_fields"] = list(constraints)
             else:
                 llm_result.pop("_omitted_fields", None)
+                llm_result.pop("_read_rule", None)
             # Remove links/backlinks from LLM-visible output (not needed for extraction)
             llm_result.pop("links", None)
             llm_result.pop("backlinks", None)
