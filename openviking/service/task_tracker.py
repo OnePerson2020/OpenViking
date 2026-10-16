@@ -202,6 +202,8 @@ class TaskTracker:
         # multiple TaskTracker writers must add store-level revision/CAS first.
         self._task_locks = KeyedAsyncLockPool[str]()
         self._business_locks = KeyedAsyncLockPool[tuple[str, str, str, str]]()
+        self._owner_load_locks = KeyedAsyncLockPool[tuple[str, str]]()
+        self._loaded_owners: set[tuple[str, str]] = set()
         self._store_io = StoreIOLimiter(max_concurrent_store_io)
         self._cleanup_task: Optional[asyncio.Task] = None
         self._work_index = TaskWorkIndex()
@@ -295,8 +297,9 @@ class TaskTracker:
             if len(self._tasks) > self.MAX_TASKS:
                 sorted_tasks = sorted(self._tasks.items(), key=lambda x: x[1].created_at)
                 excess = len(self._tasks) - self.MAX_TASKS
-                for tid, _ in sorted_tasks[:excess]:
+                for tid, task in sorted_tasks[:excess]:
                     self._tasks.pop(tid, None)
+                    self._loaded_owners.discard((task.account_id, task.user_id))
                     capacity_evicted.append(tid)
 
         for tid in capacity_evicted:
@@ -433,7 +436,7 @@ class TaskTracker:
         self._validate_owner(account_id, user_id)
         business_key = (account_id, user_id, task_type, resource_id)
         async with self._business_locks.acquire(business_key):
-            self._merge_loaded_tasks(await self._load_all_from_store(account_id, user_id))
+            await self._ensure_owner_loaded(account_id, user_id)
 
             tasks = self._cache_snapshot()
             has_active = any(
@@ -813,6 +816,7 @@ class TaskTracker:
     def forget_account_tasks(self, account_id: str) -> None:
         """Invalidate snapshots after executions settle and account storage is removed."""
         with self._lock:
+            self._loaded_owners = {owner for owner in self._loaded_owners if owner[0] != account_id}
             task_ids = [
                 task_id for task_id, task in self._tasks.items() if task.account_id == account_id
             ]
@@ -1065,7 +1069,7 @@ class TaskTracker:
     ) -> bool:
         """Check if there is already a running task for the given type+resource."""
         if account_id is not None:
-            self._merge_loaded_tasks(await self._load_all_from_store(account_id, user_id))
+            await self._ensure_owner_loaded(account_id, user_id)
         tasks = self._cache_snapshot()
         return any(
             t.task_type == task_type
@@ -1074,6 +1078,19 @@ class TaskTracker:
             and t.status in _ACTIVE_STATUSES
             for t in tasks
         )
+
+    async def _ensure_owner_loaded(self, account_id: str, user_id: Optional[str]) -> None:
+        # The existing single-writer tracker publishes every lifecycle change to _tasks.
+        if user_id is None:
+            self._merge_loaded_tasks(await self._load_all_from_store(account_id, user_id))
+            return
+        owner = (account_id, user_id)
+        async with self._owner_load_locks.acquire(owner):
+            with self._lock:
+                if owner in self._loaded_owners:
+                    return
+            loaded = await self._load_all_from_store(account_id, user_id)
+            self._merge_loaded_tasks(loaded, loaded_owner=owner)
 
     async def _load_for_update(
         self,
@@ -1202,13 +1219,17 @@ class TaskTracker:
         with self._lock:
             self._tasks[task.task_id] = published
 
-    def _merge_loaded_tasks(self, loaded_tasks: List[TaskRecord]) -> None:
+    def _merge_loaded_tasks(
+        self, loaded_tasks: List[TaskRecord], *, loaded_owner: Optional[tuple[str, str]] = None
+    ) -> None:
         candidates = [deepcopy(task) for task in loaded_tasks]
         with self._lock:
             for loaded in candidates:
                 cached = self._tasks.get(loaded.task_id)
                 if cached is None or loaded.updated_at > cached.updated_at:
                     self._tasks[loaded.task_id] = loaded
+            if loaded_owner is not None:
+                self._loaded_owners.add(loaded_owner)
 
     @staticmethod
     def _next_updated_at(task: TaskRecord) -> float:

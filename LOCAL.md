@@ -70,10 +70,11 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   (no reader).
 - 2026-10-16 "embedding: SDK request timeouts are retryable; queries retry once": covered upstream,
   not filed. Drop it on the next upgrade past #6102 ("timed out" / TimeoutError are transient) and
-  #6047 (`model_retry_scope(0)` on search/find: queries do not retry at all). Both landed 2026-10-15.
+  #6047 (`model_retry_scope(0)` on search/find: queries do not retry at all). This changes query
+  behaviour from one retry to zero; it is not equivalent to our current budget. Both landed 2026-10-15.
 - #6152 (2026-10-16) = "retrieve: one resource tree takes one context slot" + "retrieve: a resource
   tree's slot shows its most specific hit" + "retrieve: resource slots do not depend on the ranking
-  order" squashed (the PR still lacks the third; update it before review); drop all three once it merges.
+  order" squashed (local PR worktree includes the third at `2c8026b`); drop all three once it merges.
 - 2026-10-16 "vlm: vision completions retry transient errors; deadline aborts count as failed" and
   "memory: ask once before forking a same-name entity card the model read": local only, not filed.
 - Cherry-picked from upstream main (drop on the next upgrade past it): #6153 .done after the task
@@ -84,6 +85,17 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   reruns per case ("session: train agent evolution once per commit…"), #3526 entity
   duplicates across categories ("memory: route a new entity to the existing card…").
 - Client plugins (Claude Code, Codex, pi on the Mac) are upgraded separately from the server.
+- 2026-10-16 runtime review follow-up (local only): missing update targets raise ConflictError;
+  stale string patches must still match every block, and field failures cannot count as edits.
+  Strict ordinary-memory/trajectory/training callers propagate apply failures so the archive
+  retains a visible failure instead of claiming completion. This does not make a multi-file batch
+  atomic; already successful writes remain on disk for recovery.
+- Activity checks restore each owner's tasks once, then use the single-writer tracker's live cache;
+  capacity eviction and account deletion invalidate the restored-owner marker. Ordinary list APIs
+  still refresh durable history. Waiting/terminal commit deliveries skip loading root messages;
+  the durable queue, predecessor checks and 2-second requeue delay are unchanged.
+- Artifact capture accepts completed Codex FileChange events (including wrapped exec calls and
+  moves), namespaced apply_patch, and retries an unfinished JSONL tail on the next hook.
 - Pre-fork work dirs (0.4.23 port, Oct 6–9 improvements) and the only full data backup
   (2026-10-06, before 0.4.23) are in `local_patches/archive/`; wheels in `local_patches/build/`.
 

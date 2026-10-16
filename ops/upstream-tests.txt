@@ -20,3 +20,11 @@ tests/unit/test_vikingbot_vlm_adapter_retry.py
 tests/storage/test_collection_schemas.py
 tests/storage/test_memory_semantic_stall.py
 tests/models
+# Runtime review fixes: write conflicts, owner restore cache, and deferred Session load.
+tests/test_task_tracker.py
+tests/test_task_tracker_concurrency.py
+tests/session/memory/test_streaming_memory_updater.py
+tests/session/train/test_trajectory_analyzer_component.py
+tests/unit/session/test_session_commit_resume.py
+tests/unit/service/test_session_auto_commit.py
+tests/service/test_task_queue_middleware.py

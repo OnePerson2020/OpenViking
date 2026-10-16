@@ -85,13 +85,11 @@ class SessionCommitProcessor(DequeueHandlerBase):
                 )
                 return True
             try:
-                await session.load()
+                with bind_task_context(msg.task_id, ctx.account_id, ctx.user.user_id):
+                    processed = await session.resume_queued_commit(msg)
             except LockAcquisitionError as exc:
                 logger.warning("Session %s is locked, requeueing commit: %s", msg.session_id, exc)
                 processed = False
-            else:
-                with bind_task_context(msg.task_id, ctx.account_id, ctx.user.user_id):
-                    processed = await session.resume_queued_commit(msg)
             if not processed:
                 from openviking.storage.queuefs import QueueManager, get_queue_manager
 

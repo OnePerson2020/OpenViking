@@ -36,6 +36,7 @@ def _session():
     s._ensure_phase1_ready = AsyncMock(return_value=True)
     s._can_run_archive = AsyncMock(return_value=True)
     s._write_failed_marker = AsyncMock()
+    s.load = AsyncMock()
     return s
 
 
@@ -73,14 +74,13 @@ def test_phase2_lock_error_writes_no_failed_marker():
 
 def test_processor_requeues_when_session_load_is_locked():
     session = SimpleNamespace(exists=AsyncMock(return_value=True),
-                              load=AsyncMock(side_effect=LockAcquisitionError("busy")),
-                              resume_queued_commit=AsyncMock())
+                              resume_queued_commit=AsyncMock(side_effect=LockAcquisitionError("busy")))
     proc = SessionCommitProcessor(SimpleNamespace(session=Mock(return_value=session)))
     qm = SimpleNamespace(enqueue=AsyncMock())
     with patch("openviking.storage.queuefs.get_queue_manager", return_value=qm), \
          patch("openviking.storage.queuefs.session_commit_processor.asyncio.sleep", AsyncMock()):
         result = asyncio.run(proc.on_dequeue({"data": json.dumps(_msg().to_dict())}))
-    session.resume_queued_commit.assert_not_awaited()
+    session.resume_queued_commit.assert_awaited_once()
     qm.enqueue.assert_awaited_once()
     assert result.outcome.value == "requeued"
 
