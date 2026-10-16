@@ -68,7 +68,8 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   order" squashed (the PR still lacks the third; update it before review); drop all three once it merges.
 - 2026-10-16 "vlm: vision completions retry transient errors; deadline aborts count as failed" and
   "memory: ask once before forking a same-name entity card the model read": local only, not filed.
-- Cherry-picked from upstream main (drop on the next upgrade past it): #6039 compact intent
+- Cherry-picked from upstream main (drop on the next upgrade past it): #6153 .done after the task
+  result ("session: write .done after the task result is saved"); #6039 compact intent
   planner prompt (`intent_analysis.yaml` + 2 tests; recall with query expansion 6-11 s -> 3-5 s,
   2026-10-15).
 - Upstream issues our commits work around (drop once fixed upstream): #6006 agent evolution
