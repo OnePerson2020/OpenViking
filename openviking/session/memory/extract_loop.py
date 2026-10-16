@@ -1141,7 +1141,16 @@ class ExtractLoop:
                                 )
                         elif match in self.context_provider.read_file_contents:
                             # The model saw that card and still chose a new one; routing
-                            # here would turn its full content into an overwrite.
+                            # here would turn its full content into an overwrite. Ask once
+                            # instead of silently forking a same-name duplicate.
+                            if match not in self._entity_similar_offered:
+                                self._entity_similar_offered.add(match)
+                                self._entity_similar_pending.append(
+                                    f"Your new entity {uri} has the same name as the existing"
+                                    f" card {match}, which you already read. If it is the same"
+                                    " entity, edit that card (keep what it already says) instead"
+                                    " of creating a new one; otherwise keep your new card."
+                                )
                             match = None
                 except Exception as e:  # best effort: never block the write itself
                     tracer.info(f"entity name lookup skipped for {uri}: {e}")

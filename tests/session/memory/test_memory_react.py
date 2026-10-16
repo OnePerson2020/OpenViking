@@ -1201,6 +1201,13 @@ class TestCanonicalEntityUris:
         assert op.uris == [f"{root}/developer_tool/cc-switch.md"]
         assert op.old_memory_file_content is None
         assert loop._entity_redirects == {}
+        # the model is asked once to edit the card it read instead of forking a duplicate
+        note = loop._pop_similar_entity_note()
+        assert f"same name as the existing card {root}/开发工具/cc_switch.md" in note
+        await loop.resolve_operations(
+            Operations(entities=[Item(category="developer_tool", name="CC-Switch")])
+        )
+        assert loop._pop_similar_entity_note() == ""
 
     @pytest.mark.asyncio
     async def test_existing_path_is_kept(self):
