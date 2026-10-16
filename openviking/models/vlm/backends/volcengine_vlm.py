@@ -299,7 +299,8 @@ class VolcEngineVLM(OpenAIVLM):
             t0 = time.perf_counter()
             try:
                 response = await client.chat.completions.create(**kwargs)
-            except Exception as error:
+            # the deadline cancels the attempt: count it as a failed call too
+            except (Exception, asyncio.CancelledError) as error:
                 self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=error)
                 raise
             elapsed = time.perf_counter() - t0
@@ -534,20 +535,33 @@ class VolcEngineVLM(OpenAIVLM):
             kwargs["tool_choice"] = tool_choice or "auto"
 
         client = self.get_async_client()
-        t0 = time.perf_counter()
+
+        async def _call():
+            t0 = time.perf_counter()
+            try:
+                response = await client.chat.completions.create(**kwargs)
+            except (Exception, asyncio.CancelledError) as error:
+                self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=error)
+                raise
+            return response, time.perf_counter() - t0
+
+        # Same contract as get_completion_async: transient errors (429, timeouts) retry,
+        # the whole call is bounded by vlm.timeout. One 429 used to leave a permanent
+        # "Image summary generation failed" summary.
         try:
-            response = await asyncio.wait_for(
-                client.chat.completions.create(**kwargs), timeout=self.timeout
+            response, elapsed = await asyncio.wait_for(
+                retry_async(
+                    _call,
+                    max_retries=self.max_retries,
+                    logger=logger,
+                    operation_name="VolcEngine VLM async vision completion",
+                ),
+                timeout=self.timeout,
             )
         except asyncio.TimeoutError as error:
-            self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=error)
             raise ModelCallDeadlineError(
                 f"VolcEngine vision completion exceeded {self.timeout:.0f}s deadline"
             ) from error
-        except Exception as error:
-            self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=error)
-            raise
-        elapsed = time.perf_counter() - t0
         self._update_token_usage_from_response(response, duration_seconds=elapsed)
         result = self._build_vlm_response(response, has_tools=bool(tools))
         if tools:
