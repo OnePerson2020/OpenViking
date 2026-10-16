@@ -35,7 +35,8 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   long-term extraction falls back to budget batches…"; WM leftovers removed in "drop
   Working Memory leftovers after the v0.5.0 port" (incl. `memory.working_memory_transport`).
 - Open upstream PRs (drop the matching local commit once merged, then deploy): #5758
-  orphan race, #5759 VLM deadline, #5765 pathlock polling, #5802 archive retry route,
+  orphan race, #5759 VLM deadline, #5802 archive retry route (a third-party user posted two
+  failed archives it would recover, 2026-10-15),
   #5812 JSON image redaction, #5818 C++ log append, #6038 filtered path guard, #6073 inner period in resource-ref
   link anchors (with #6054 merged upstream, drop both resource-ref commits), #6065
   embedding attempt deadline (replaces "embedding: bound Volcengine embedding requests";
@@ -60,6 +61,13 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   2 s requeue pause ("session: requeue commits on lock contention" + "diagnostics + queue: …pause"),
   #6086 batch large policy-less commits (upstream uses the 150k default; ours uses the input budget),
   #6088 Volcengine query_param instruction ("embedding: Volcengine query_param …").
+- #5765 pathlock polling: CLOSED 2026-10-16, superseded by upstream #4548 (native async PathLock
+  acquisition; touches crates/ragfs-python, so it needs a wheel build, not an overlay). On the next
+  upgrade past #4548 drop the async_client.py part of "storage: non-blocking exact path lock; load
+  session under the lock" and keep its session.py part (load under the lock).
+- #6157 (2026-10-16, follow-up to the #6077 review): memory_linking.status "accepted" for a queued
+  reason commit + en/zh docs. Upstream only; our local reason commit still returns "success"
+  (no reader).
 - 2026-10-16 "embedding: SDK request timeouts are retryable; queries retry once": covered upstream,
   not filed. Drop it on the next upgrade past #6102 ("timed out" / TimeoutError are transient) and
   #6047 (`model_retry_scope(0)` on search/find: queries do not retry at all). Both landed 2026-10-15.
