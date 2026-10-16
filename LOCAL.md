@@ -45,10 +45,18 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
   handles indentation). Inner "." (`SKILL.md`): fixed here, upstream #6072 / PR #6073. #5759 and #6065 are written
   against upstream #5950 (RetryVLM/RetryEmbedder, after v0.5.0): on an upgrade past it the
   local VLM-deadline and Volcengine-embedding commits conflict; take the PR versions.
+  Also on the next upgrade (main as of 2026-10-16): #5772 catches _process exceptions in
+  SessionCommitProcessor.on_dequeue (conflicts with "queue: keep the upstream bool _process
+  contract…"; keep our failed-task check after theirs); #6120/#6131/#6117 rework extraction
+  prompts and session entry points (expect extract_loop/session conflicts); #6043 unifies task
+  and queue tracking.
 - PRs filed 2026-10-15 for local-only behaviour (drop/replace the local part once merged):
   #6075 no upsert from a stale snapshot ("memory: improve extraction robustness" part),
-  #6077 reason commit returns once queued ("resources: queue reason commits without waiting"),
-  #6080 no .failed.json next to .done (robustness commit part), #6083 lock contention requeues +
+  #6077 reason commit returns once queued ("resources: queue reason commits without waiting";
+  MERGED 2026-10-16 as 0230cc104, same behaviour: drop the local commit on the next upgrade past it),
+  #6080 no .failed.json next to .done (robustness commit part; CLOSED 2026-10-16 in favour of
+  upstream #6153, which writes .done after the task result is saved: on the next upgrade past
+  #6153 drop our .done guard), #6083 lock contention requeues +
   2 s requeue pause ("session: requeue commits on lock contention" + "diagnostics + queue: …pause"),
   #6086 batch large policy-less commits (upstream uses the 150k default; ours uses the input budget),
   #6088 Volcengine query_param instruction ("embedding: Volcengine query_param …").
