@@ -83,6 +83,16 @@ class MemoryConfig(BaseModel):
             "notice asking it to choose between coherent splitting and single-file compaction."
         ),
     )
+    extraction_input_token_budget: int = Field(
+        default=48000,
+        ge=16000,
+        description="Maximum estimated input tokens for one memory-extraction model call.",
+    )
+    extraction_read_token_budget: int = Field(
+        default=3000,
+        ge=512,
+        description="Maximum estimated tokens exposed by one memory read.",
+    )
     extraction_enabled: bool = Field(
         default=True,
         description=(

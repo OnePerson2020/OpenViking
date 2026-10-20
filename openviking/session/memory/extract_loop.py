@@ -14,6 +14,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openviking.models.vlm.base import ToolCall, VLMBase
 from openviking.server.identity import RequestContext
+from openviking.session.memory.context_budget import (
+    check_input_budget,
+    memory_file_field_value,
+    validate_partial_fields,
+)
 from openviking.session.memory.dataclass import (
     DeleteId,
     MemoryFile,
@@ -44,10 +49,42 @@ from openviking.session.memory.utils.json_parser import JsonUtils
 from openviking.session.memory.utils.uri import generate_uri
 from openviking.storage.viking_fs import VikingFS, get_viking_fs
 from openviking.telemetry import bind_telemetry_stage, tracer
+from openviking_cli.exceptions import NotFoundError
 from openviking_cli.utils import get_logger
 from openviking_cli.utils.config import get_openviking_config
 
 logger = get_logger(__name__)
+
+
+def _entity_name_key(file_name: str) -> str:
+    """Entity identity for dedup: case, separators (space . _ -) and the .md suffix do not count."""
+    stem = file_name[:-3] if file_name.endswith(".md") else file_name
+    return re.sub(r"[\s._\-]+", "_", stem.strip().lower())
+
+
+# ponytail: one global cosine threshold, calibrated 2026-10-14 on one deployment
+# (Volcengine skylark-embedding-vision): 63% of reviewed duplicate pairs score >= 0.85,
+# ~27% of ordinary new cards have a neighbour that high (mostly siblings the model
+# keeps apart). Per-embedding-model calibration if this is upstreamed.
+_SIMILAR_ENTITY_SCORE = 0.85
+
+
+_DATE_IN_NAME = re.compile(r"20\d{6}")
+
+
+def _entity_ids_compatible(a: str, b: str) -> bool:
+    """Names carrying different numbers are different entities (job_1521824 / job_1521825,
+    extract_016 / extract_017, report_20261013 / report_20261014). Dates and other numbers
+    are also compared apart, so a shared date does not make sibling ids compatible."""
+
+    def groups(name: str):
+        return (
+            set(re.findall(r"\d{3,}", name)),
+            set(_DATE_IN_NAME.findall(name)),
+            set(re.findall(r"\d{3,}", _DATE_IN_NAME.sub(" ", name))),
+        )
+
+    return not any(x and y and not x & y for x, y in zip(groups(a), groups(b)))
 
 # Memory extraction may rewrite an entire memory file in one response. Without an
 # explicit cap, providers fall back to a small server-side default (e.g. Ark's
@@ -114,6 +151,10 @@ def _preview_text(content: str, *, limit: int = 240) -> str:
     return text[: limit - 3] + "..."
 
 
+class ExtractionOutputInvalidError(RuntimeError, ValueError):
+    """Model output stayed unparseable/unsafe after every repair iteration."""
+
+
 class ExtractLoop:
     """
     Simplified ReAct orchestrator for memory updates.
@@ -158,6 +199,11 @@ class ExtractLoop:
         self.model = model or self.vlm.model
         self.max_iterations = max_iterations
         self.ctx = ctx
+        self._entity_name_indexes: Dict[str, Dict[str, str]] = {}
+        self._entity_redirects: Dict[str, str] = {}  # existing card -> path the model asked for
+        self._entity_similar_offered: set = set()  # existing cards already shown as look-alikes
+        self._entity_similar_checked: set = set()  # new paths already searched (one find each)
+        self._entity_similar_pending: List[str] = []  # notes for the next round
         self.context_provider = context_provider
         self.thinking = bool(thinking)
         self.max_output_tokens = max_output_tokens
@@ -367,10 +413,16 @@ class ExtractLoop:
                     continue
                 # Check if any write_uris target existing files that weren't read
                 refetch_uris = await self._check_unread_existing_files(final_operations)
-                if refetch_uris:
-                    tracer.info(f"Found unread existing files: {refetch_uris}, refetching...")
-                    # Add refetch results to messages and continue loop
-                    await self._add_refetch_results_to_messages(messages, refetch_uris)
+                similar_note = self._pop_similar_entity_note()
+                if refetch_uris or similar_note:
+                    if refetch_uris:
+                        tracer.info(f"Found unread existing files: {refetch_uris}, refetching...")
+                        # Add refetch results to messages and continue loop
+                        await self._add_refetch_results_to_messages(messages, refetch_uris)
+                    if similar_note and refetch_uris:
+                        messages[-1]["content"] += "\n" + similar_note
+                    elif similar_note:
+                        messages.append({"role": "user", "content": similar_note})
                     # A valid program started a new generation phase with richer context.
                     # Give that regenerated response its own format-repair opportunity.
                     self._format_retry_count = 0
@@ -381,6 +433,8 @@ class ExtractLoop:
 
                     continue
                 patch_errors = await self._validate_patch_operations(final_operations)
+                partial_errors = self._partial_operation_errors(final_operations)
+                patch_errors.extend(partial_errors)
                 if patch_errors and patch_repair_count == 0:
                     patch_repair_count += 1
                     max_iterations += 1
@@ -395,6 +449,11 @@ class ExtractLoop:
                         f"Extended max_iterations to {max_iterations} for retry patch repair"
                     )
                     continue
+                if partial_errors:
+                    # The repair attempt is spent: drop only the operations whose
+                    # patch cannot apply instead of discarding the whole archive.
+                    if not self._drop_failed_patch_operations(final_operations, patch_errors):
+                        raise ValueError(self._build_patch_repair_instruction(patch_errors))
                 break
             # If no tool calls either, continue to next iteration (don't break!)
             failure_kind = self._last_llm_failure_kind or "unknown"
@@ -407,7 +466,11 @@ class ExtractLoop:
                 max_iterations += 1
                 retry_reason = "refusal_text" if failure_kind == "refusal_text" else "format_retry"
                 tracer.info(f"Extended max_iterations to {max_iterations} for {retry_reason}")
-                self._add_format_error_message(messages)
+
+            # Refresh the parser feedback after EVERY invalid response, while
+            # granting only the single bounded extra attempt above. Otherwise
+            # later attempts repeat a new error without ever seeing its cause.
+            self._add_format_error_message(messages)
 
             # A failure is only terminal when no retry attempt remains after it.
             retry_remaining = iteration < max_iterations
@@ -422,11 +485,12 @@ class ExtractLoop:
                 # not the console/log stream.
                 tracer.info(failure_message)
             else:
-                # ERROR: no attempt remains to repair the invalid response.
+                # ERROR: retries exhausted; never report an invalid program as
+                # a successful empty extraction or publish a completion receipt.
                 tracer.error(failure_message)
 
-            # Preserve a valid first pass when only its resolution repair failed.
-            # Otherwise propagate failure so the archive is not marked completed.
+            # Preserve a valid first pass only for optional resolution repair.
+            # All other terminal parse failures must reach the task failure path.
             if not retry_remaining:
                 if pending_resolution_repair is not None:
                     final_operations, raw_links = pending_resolution_repair
@@ -437,10 +501,10 @@ class ExtractLoop:
                         console=True,
                     )
                     break
-                raise RuntimeError(
-                    "Final response could not be parsed as operations "
-                    f"after {max_iterations} iterations "
-                    f"(failure_kind={failure_kind})"
+                raise ExtractionOutputInvalidError(
+                    "Final response could not be parsed as operations: memory extraction "
+                    f"output invalid after {max_iterations} iterations (failure_kind={failure_kind}): "
+                    f"{parse_error or 'no valid operations returned'}"
                 )
 
             self._disable_tools_for_iteration = (
@@ -871,7 +935,7 @@ class ExtractLoop:
                             preserved_fields = set(immutable_fields)
                             preserved_fields.update(schema.identity_fields(include_peer_id=False))
                             for field_name in preserved_fields:
-                                old_value = old_content.extra_fields.get(field_name)
+                                old_value = memory_file_field_value(old_content, field_name)
                                 if not ImmutableOp.is_set(old_value):
                                     continue
                                 new_value = resolved_op.memory_fields.get(field_name)
@@ -899,6 +963,10 @@ class ExtractLoop:
                         extract_context=self._extract_context,
                     )
 
+                if not is_event:
+                    resolved_op.uris = await self._canonical_entity_uris(
+                        schema, resolved_op.uris, resolved_op.memory_fields
+                    )
                 upsert_operations.append(resolved_op)
 
         delete_replacements: dict[str, str] = {}
@@ -1033,6 +1101,100 @@ class ExtractLoop:
         except ValueError:  # the new identity cannot form a path: keep the card where it is
             return source_uri
         return candidate_uri if candidate_uri != source_uri else source_uri
+
+    async def _canonical_entity_uris(
+        self, schema: Any, uris: List[str], fields: Optional[Dict[str, Any]] = None
+    ) -> List[str]:
+        """Route a new entity card to an existing card with the same name.
+
+        Entity paths are ``category/name`` and the model picks the category freely, so
+        one entity forks per category, language and spelling (``开发工具/x.md``,
+        ``developer_tool/x.md``, ``dev_tool/x-y.md``). An unwritten path whose name
+        matches an existing card in another category is redirected to that card; the
+        unread-file refetch then shows it to the model, which merges into it. A new card
+        with no same-name match is checked against existing cards by embedding similarity;
+        look-alikes are named to the model once (no forced redirect, it decides).
+        """
+        if schema.memory_type != "entities" or not getattr(self, "viking_fs", None):
+            return uris
+        resolved = []
+        for uri in uris:
+            root, sep, rel = uri.partition("/memories/entities/")
+            match = None
+            if sep:
+                try:
+                    if not await self.viking_fs.exists(uri, ctx=self.ctx):
+                        index = await self._entity_name_index(root + "/memories/entities")
+                        match = index.get(_entity_name_key(rel.rsplit("/", 1)[-1]))
+                        if not match:
+                            if uri not in self._entity_similar_checked:
+                                self._entity_similar_checked.add(uri)
+                                await self._note_similar_entities(
+                                    root + "/memories/entities", uri, fields or {}
+                                )
+                        elif match in self.context_provider.read_file_contents:
+                            # The model saw that card and still chose a new one; routing
+                            # here would turn its full content into an overwrite. Ask once
+                            # instead of silently forking a same-name duplicate.
+                            if match not in self._entity_similar_offered:
+                                self._entity_similar_offered.add(match)
+                                self._entity_similar_pending.append(
+                                    f"Your new entity {uri} has the same name as the existing"
+                                    f" card {match}, which you already read. If it is the same"
+                                    " entity, edit that card (keep what it already says) instead"
+                                    " of creating a new one; otherwise keep your new card."
+                                )
+                            match = None
+                except Exception as e:  # best effort: never block the write itself
+                    tracer.info(f"entity name lookup skipped for {uri}: {e}")
+            if match and match != uri:
+                tracer.info(f"entity {uri} -> existing {match}")
+                self._entity_redirects[match] = uri
+            resolved.append(match or uri)
+        return resolved
+
+    async def _note_similar_entities(self, root: str, uri: str, fields: Dict[str, Any]) -> None:
+        name = uri.rsplit("/", 1)[-1]
+        query = f"{fields.get('name') or name[:-3]}\n{str(fields.get('content') or '')[:600]}"
+        found = await self.viking_fs.find(query, target_uri=root, limit=5, ctx=self.ctx)
+        for m in getattr(found, "memories", None) or []:
+            other = m.uri.rsplit("/", 1)[-1]
+            if (
+                m.score < _SIMILAR_ENTITY_SCORE
+                or m.uri == uri
+                or other.startswith(".")
+                or m.uri in self._entity_similar_offered
+                or not _entity_ids_compatible(name, other)
+            ):
+                continue
+            self._entity_similar_offered.add(m.uri)
+            logger.warning("entity look-alike: %s ~ %s score=%.3f", uri, m.uri, m.score)
+            self._entity_similar_pending.append(
+                f"Your new entity {uri} looks similar to the existing card {m.uri}"
+                f" (\"{(m.abstract or '').strip()[:300]}\"). If it is the same entity (same"
+                " object or ID; a document, event, task or variant about it is a different"
+                " entity), write to that card instead of creating a new one; otherwise keep your"
+                " new card."
+            )
+
+    def _pop_similar_entity_note(self) -> str:
+        notes, self._entity_similar_pending = self._entity_similar_pending, []
+        return "\n".join(notes)
+
+    async def _entity_name_index(self, root: str) -> Dict[str, str]:
+        cache = self._entity_name_indexes
+        if root not in cache:
+            try:
+                found = await self.viking_fs.glob("**/*.md", uri=root, ctx=self.ctx)
+            except NotFoundError:  # no entity written yet
+                found = {}
+            index: Dict[str, str] = {}
+            for uri in sorted(found.get("matches", []) if isinstance(found, dict) else found):
+                name = uri.rsplit("/", 1)[-1]
+                if not name.startswith("."):
+                    index.setdefault(_entity_name_key(name), uri)
+            cache[root] = index
+        return cache[root]
 
     def _normalize_delete_ids(self, raw_delete_ids: List[Any]) -> List[DeleteId]:
         delete_ids: List[DeleteId] = []
@@ -1182,6 +1344,7 @@ class ExtractLoop:
         if not self._disable_tools_for_iteration and self._tool_schemas:
             tools = self._tool_schemas
             tool_choice = "auto"
+        check_input_budget({"messages": messages, "tools": tools})
         with bind_telemetry_stage("memory_extract"):
             response = await self.vlm.get_completion_async(
                 messages=messages,
@@ -1334,11 +1497,16 @@ class ExtractLoop:
         for operation in operations.upsert_operations:
             if operation.old_memory_file_content is None:
                 continue
-            current_content = operation.old_memory_file_content.plain_content() or ""
             target_uri = (
                 operation.uris[0] if operation.uris else operation.old_memory_file_content.uri
             )
             for field_name, patch_value in operation.memory_fields.items():
+                current_content = memory_file_field_value(
+                    operation.old_memory_file_content, field_name
+                )
+                if current_content is not None and not isinstance(current_content, str):
+                    continue
+                current_content = current_content or ""
                 blocks = []
                 if isinstance(patch_value, StrPatch):
                     blocks = patch_value.blocks
@@ -1382,11 +1550,20 @@ class ExtractLoop:
                         for uri, memory_file in read_files.items()
                         if uri != target_uri and search in (memory_file.plain_content() or "")
                     ]
+                    schema = next((s for s in self.context_provider.get_memory_schemas(getattr(self, "ctx", None))
+                                   if s.memory_type == operation.memory_type), None)
+                    other_fields = [f.name for f in schema.fields
+                        if f.name != field_name
+                        and isinstance(memory_file_field_value(operation.old_memory_file_content, f.name), str)
+                        and effective_search
+                        and effective_search in memory_file_field_value(operation.old_memory_file_content, f.name)
+                    ] if schema is not None else []
                     errors.append(
                         {
                             "uri": target_uri,
                             "page_id": operation.page_id,
                             "field": field_name,
+                            "found_in_other_fields": other_fields,
                             "block_index": block_index,
                             "search": search,
                             "reason": reason,
@@ -1398,6 +1575,70 @@ class ExtractLoop:
         if errors:
             tracer.info(f"String patch validation failed before apply: {errors}")
         return errors
+
+    def _partial_operation_errors(
+        self, operations: ResolvedOperations
+    ) -> List[Dict[str, Any]]:
+        errors: List[Dict[str, Any]] = []
+        partial = getattr(self.context_provider, "partial_read_fields", {})
+        for deleted in operations.delete_file_contents:
+            if deleted.uri and partial.get(deleted.uri):
+                errors.append(
+                    {
+                        "uri": deleted.uri,
+                        "reason": "Cannot delete a partially read memory",
+                    }
+                )
+
+        for operation in operations.upsert_operations:
+            for uri in operation.uris:
+                constraints = partial.get(uri, {})
+                if not constraints or operation.old_memory_file_content is None:
+                    continue
+                operation.partial_read_fields = {
+                    name: list(spans) for name, spans in constraints.items()
+                }
+                for field_name in constraints:
+                    try:
+                        validate_partial_fields(
+                            operation.old_memory_file_content,
+                            operation.memory_fields,
+                            {field_name: constraints[field_name]},
+                        )
+                    except ValueError as exc:
+                        errors.append(
+                            {
+                                "uri": uri,
+                                "page_id": operation.page_id,
+                                "field": field_name,
+                                "reason": str(exc),
+                            }
+                        )
+        return errors
+
+    @staticmethod
+    def _drop_failed_patch_operations(
+        operations: ResolvedOperations, errors: List[Dict[str, Any]]
+    ) -> bool:
+        """Remove operations named by patch/partial-read errors; False if nothing survives."""
+        bad_uris = {e["uri"] for e in errors if e.get("uri")}
+        bad_page_ids = {e["page_id"] for e in errors if e.get("page_id") is not None}
+        kept = [
+            op for op in operations.upsert_operations
+            if op.page_id not in bad_page_ids and not bad_uris.intersection(op.uris or [])
+        ]
+        kept_deletes = [m for m in operations.delete_file_contents if m.uri not in bad_uris]
+        if not kept and not kept_deletes:
+            return False
+        logger.warning(
+            "Memory extraction dropped %d operation(s) whose patch could not apply: %s",
+            len(operations.upsert_operations) + len(operations.delete_file_contents)
+            - len(kept) - len(kept_deletes),
+            sorted(bad_uris)[:20],
+        )
+        operations.upsert_operations = kept
+        operations.delete_file_contents = kept_deletes
+        return True
 
     def _build_patch_repair_instruction(self, patch_errors: List[Dict[str, Any]]) -> str:
         return self._output_protocol.render_patch_repair(patch_errors)
@@ -1424,9 +1665,13 @@ class ExtractLoop:
             call_id_seq += 1
 
         # Add reminder message for the model
-        messages.append(
-            {
-                "role": "user",
-                "content": "Note: The files above were automatically read because they exist and you didn't read them before deciding to write. Please consider the existing content when making write decisions. You can now output updated operations.",
-            }
-        )
+        content = "Note: The files above were automatically read because they exist and you didn't read them before deciding to write. Please consider the existing content when making write decisions. You can now output updated operations."
+        for uri in refetch_uris:
+            requested = self._entity_redirects.get(uri)
+            if requested:
+                content += (
+                    f"\nYour new entity {requested} was routed to the existing card {uri} because the"
+                    " names match. If it is the same entity, merge into that card. If it is a"
+                    " different entity, write it under a more specific name instead."
+                )
+        messages.append({"role": "user", "content": content})

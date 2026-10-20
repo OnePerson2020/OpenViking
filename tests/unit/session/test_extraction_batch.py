@@ -8,6 +8,7 @@ import pytest
 
 from openviking.message import Message, TextPart
 from openviking.session.auto_commit_policy import DEFAULT_PENDING_TOKEN_THRESHOLD
+from openviking.session.memory.context_budget import long_term_fallback_batch_tokens
 from openviking.session.extraction_batch import (
     ExtractionBatchLimits,
     estimate_extraction_message_tokens,
@@ -76,10 +77,13 @@ def test_long_term_extraction_without_policy_batches_only_a_large_commit():
     assert long_term_extraction_batch_limits(ExtractionBatchLimits(), small).enabled is False
     assert long_term_extraction_batch_limits(policy, large) == policy
     fallback = long_term_extraction_batch_limits(ExtractionBatchLimits(), large)
-    assert fallback == ExtractionBatchLimits(max_message_tokens=DEFAULT_PENDING_TOKEN_THRESHOLD)
+    # Local: the batch is bounded by half the extraction input budget (default 48k).
+    threshold = long_term_fallback_batch_tokens()
+    assert threshold <= DEFAULT_PENDING_TOKEN_THRESHOLD
+    assert fallback == ExtractionBatchLimits(max_message_tokens=threshold)
     batches = plan_extraction_batches(large, fallback)
     assert len(batches) > 1
-    assert all(batch.estimated_tokens <= DEFAULT_PENDING_TOKEN_THRESHOLD for batch in batches)
+    assert all(batch.estimated_tokens <= threshold for batch in batches)
 
 
 def test_phase2_batches_keep_a_turn_together_when_it_fits():

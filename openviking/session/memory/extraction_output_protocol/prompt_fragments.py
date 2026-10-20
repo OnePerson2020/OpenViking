@@ -8,8 +8,13 @@ blocks contain individual contract lines; string blocks retain section spacing.
 
 READ_FORMAT_RULES = """
 ## Read Format Rules
-- The read tool accepts `uri`, optional `offset` (0-indexed), and optional `limit`.
+- The read tool accepts `uri`, optional line `offset` (0-indexed)/`limit`, and optional
+  exact-field `field`/`text_offset`.
 - Read content is returned in Claude Code format: each visible line is prefixed with `line_number<TAB>`.
+- If `_partial` is true, fields in `_omitted_fields` may only be changed with local
+  edit()/drop() operations whose exact SEARCH text was visible. Never replace a partial
+  field wholesale and never delete a partially read memory. Read another page or exact
+  field first when the needed text is not visible.
 """
 PATCH_CONTEXT_RULES = """
 ## Patch Context Rules

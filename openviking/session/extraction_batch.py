@@ -161,12 +161,14 @@ def long_term_extraction_batch_limits(
     """Policy limits, or the default auto-commit token threshold for a large commit
     without a policy (manual commits, imports), which would otherwise go to the
     model in one call however long it is."""
+    from openviking.session.memory.context_budget import long_term_fallback_batch_tokens
+
+    # Local: every extraction call must fit memory.extraction_input_token_budget.
+    threshold = min(DEFAULT_PENDING_TOKEN_THRESHOLD, long_term_fallback_batch_tokens())
     messages = list(messages)
-    if limits.enabled or (
-        estimate_extraction_message_tokens(messages) <= DEFAULT_PENDING_TOKEN_THRESHOLD
-    ):
+    if limits.enabled or estimate_extraction_message_tokens(messages) <= threshold:
         return limits
-    return ExtractionBatchLimits(max_message_tokens=DEFAULT_PENDING_TOKEN_THRESHOLD)
+    return ExtractionBatchLimits(max_message_tokens=threshold)
 
 
 __all__ = [
