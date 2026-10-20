@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0
 """VolcEngine VLM backend implementation."""
 
+import asyncio
 import base64
 import json
 import time
@@ -9,6 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from openviking.models.call_diagnostics import CallObservation, attach_hooks
 from openviking.models.model_error import model_error_boundary
 from openviking.models.network import (
     create_optional_async_httpx_client,
@@ -17,6 +19,7 @@ from openviking.models.network import (
 from openviking.telemetry import tracer
 from openviking.utils.message_format import format_messages, sanitize_openai_messages
 from openviking.utils.multimodal import redact_image_data_urls
+from openviking.utils.token_estimation import estimate_text_tokens
 from openviking_cli.utils import get_logger
 
 from ..base import ToolCall, VLMResponse
@@ -156,7 +159,10 @@ class VolcEngineVLM(OpenAIVLM):
         )
         if http_client is not None:
             kwargs["http_client"] = http_client
-        return volcenginesdkarkruntime.AsyncArk(**kwargs)
+        client = volcenginesdkarkruntime.AsyncArk(**kwargs)
+        # Hooks observe header timing / httpcore phases without consuming bodies.
+        attach_hooks(client._client)
+        return client
 
     def supports_media(
         self,
@@ -282,12 +288,30 @@ class VolcEngineVLM(OpenAIVLM):
             )
 
         client = self.get_async_client()
+        observation = CallObservation(
+            model=self.model,
+            input_tokens=estimate_text_tokens(
+                json.dumps(
+                    {"messages": kwargs_messages, "tools": tools, "tool_choice": tool_choice},
+                    ensure_ascii=False,
+                    default=str,
+                )
+            ),
+            max_tokens=effective_max_tokens,
+            tool_names=[tool.get("function", {}).get("name", "") for tool in tools or []],
+            thinking=effective_thinking,
+            timeout=self.timeout,
+        )
+        observation.fields["output_transport"] = "tools" if tools else "text"
 
         async def _call() -> Union[str, VLMResponse]:
             t0 = time.perf_counter()
             try:
-                response = await client.chat.completions.create(**kwargs)
-            except Exception as error:
+                with observation:
+                    response = await client.chat.completions.create(**kwargs)
+                    observation.complete(response)
+            # RetryVLM's per-attempt deadline cancels the call: count it as failed too.
+            except (Exception, asyncio.CancelledError) as error:
                 self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=error)
                 raise
             elapsed = time.perf_counter() - t0
@@ -508,7 +532,7 @@ class VolcEngineVLM(OpenAIVLM):
         t0 = time.perf_counter()
         try:
             response = await client.chat.completions.create(**kwargs)
-        except Exception as error:
+        except (Exception, asyncio.CancelledError) as error:
             self.record_failed_call(duration_seconds=time.perf_counter() - t0, error=error)
             raise
         elapsed = time.perf_counter() - t0
