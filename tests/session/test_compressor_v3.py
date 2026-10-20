@@ -775,22 +775,30 @@ async def test_train_from_extracted_multiple_case_memories_analyzes_bound_rollou
         ),
     )
 
+    compressor._link_case_to_training_outputs = AsyncMock()
+
     result = await compressor.train_from_extracted_cases(
         cases=[case_a, case_b],
         messages=rollout_messages,
         ctx=_ctx(),
+        case_uri_by_name={
+            "duplicate_booking": "viking://user/u/memories/cases/duplicate_booking.md",
+            "case_b": "viking://user/u/memories/cases/case_b.md",
+        },
         session_id="s1",
     )
 
+    # No evaluator: the case never reaches the analyzer, so the whole-session
+    # rollout is analyzed once and case_b is linked to the same result.
     assert result["case_count"] == 2
-    assert result["submitted"] == 2
-    assert [rollout.case.name for rollout in seen_rollouts] == [
-        "duplicate_booking",
-        "case_b",
-    ]
-    assert [rollout.messages for rollout in seen_rollouts] == [
-        rollout_messages,
-        rollout_messages,
+    assert result["submitted"] == 1
+    assert [rollout.case.name for rollout in seen_rollouts] == ["duplicate_booking"]
+    assert [rollout.messages for rollout in seen_rollouts] == [rollout_messages]
+    assert [
+        call.kwargs["case_uri"] for call in compressor._link_case_to_training_outputs.await_args_list
+    ] == [
+        "viking://user/u/memories/cases/duplicate_booking.md",
+        "viking://user/u/memories/cases/case_b.md",
     ]
 
 
@@ -1880,3 +1888,116 @@ async def test_v3_training_links_case_to_trajectory_and_experience_via_trajector
             "ctx": _ctx(),
         }
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_evaluator", [False, True])
+async def test_train_from_extracted_cases_trains_once_when_case_is_not_evaluated(
+    monkeypatch, with_evaluator
+):
+    import dataclasses
+
+    analyzed = []
+    submitted = []
+
+    class FakeTrainer:
+        policy_set = ExperienceSet(
+            root_uri="viking://user/u/memories/experiences",
+            policies=[],
+        )
+
+        async def submit_gradients(self, gradients, *, analysis=None, rollout=None, **kwargs):
+            submitted.append(rollout.case.name)
+            return RolloutTrainingResult(
+                analyses=[analysis],
+                gradients=list(gradients),
+                plan=PolicyUpdatePlan(items=[], metadata={}),
+                apply_result=PolicyApplyResult(
+                    updated_policy_set=self.policy_set,
+                    written_uris=[],
+                    errors=[],
+                ),
+                metadata={},
+            )
+
+    class FakeAnalyzer:
+        evaluator = object() if with_evaluator else None
+
+        async def analyze(self, rollout, context):
+            analyzed.append(rollout.case.name)
+            return RolloutAnalysis(
+                evaluation=None,
+                trajectories=[
+                    Trajectory(
+                        name="t1",
+                        uri="viking://user/u/memories/trajectories/t1.md",
+                        content="trajectory content",
+                        outcome="success",
+                        retrieval_anchor="",
+                    )
+                ],
+                gradients=[],
+            )
+
+    async def fake_estimate(self, *args, **kwargs):
+        from openviking.session.memory.dataclass import MemoryFile
+        from openviking.session.train import PatchSemanticGradient
+
+        return [
+            PatchSemanticGradient(
+                before_file=None,
+                after_file=MemoryFile(
+                    uri="viking://user/u/memories/experiences/e1.md",
+                    content="new exp",
+                    memory_type="experiences",
+                    extra_fields={"experience_name": "e1"},
+                ),
+                base_version=1,
+                rationale="test",
+                links=[],
+                confidence=0.9,
+                metadata={},
+            )
+        ]
+
+    monkeypatch.setattr(
+        "openviking.session.compressor_v3.get_viking_fs",
+        lambda: SimpleNamespace(ls=AsyncMock(return_value=[])),
+    )
+    monkeypatch.setattr(
+        "openviking.session.compressor_v3.get_streaming_policy_trainer",
+        AsyncMock(return_value=FakeTrainer()),
+    )
+    monkeypatch.setattr(
+        "openviking.session.train.components.gradient_estimator.ExperienceGradientEstimator.estimate",
+        fake_estimate,
+    )
+
+    compressor = SessionCompressorV3(
+        vikingdb=None,
+        rollout_analyzer=FakeAnalyzer(),
+        streaming_trainer_config=StreamingPolicyTrainerConfig(
+            max_wait_seconds=60,
+            max_gradients_per_update=8,
+        ),
+    )
+    compressor._link_case_to_training_outputs = AsyncMock()
+    cases = [dataclasses.replace(_training_case(), name=f"case_{i}") for i in range(3)]
+    result = await compressor.train_from_extracted_cases(
+        cases=cases,
+        messages=_messages(),
+        ctx=_ctx(),
+        case_uri_by_name={
+            case.name: f"viking://user/u/memories/cases/{case.name}.md" for case in cases
+        },
+        session_id="s1",
+    )
+
+    expected = ["case_0", "case_1", "case_2"] if with_evaluator else ["case_0"]
+    assert analyzed == expected
+    assert submitted == expected
+    assert result["submitted"] == len(expected)
+    linked = [
+        call.kwargs["case_uri"] for call in compressor._link_case_to_training_outputs.await_args_list
+    ]
+    assert linked == [f"viking://user/u/memories/cases/case_{i}.md" for i in range(3)]
