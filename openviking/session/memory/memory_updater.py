@@ -778,6 +778,54 @@ class MemoryReadError(Exception):
         )
 
 
+class StalePatchError(ConflictError):
+    """The target changed after the model read it and the patch no longer matches.
+
+    Raised before any write in the batch, so the step can regenerate from fresh content.
+    """
+
+    retryable = True
+
+    def __init__(self, uri: str, field_name: str, reason: str):
+        super().__init__(
+            f"Memory changed since it was read: {uri} field={field_name}: {reason}",
+            resource=uri,
+        )
+        self.resource = uri
+
+
+def _field_value(memory_file: Optional[MemoryFile], field_name: str) -> Any:
+    if memory_file is None:
+        return None
+    if field_name == "content":
+        return memory_file.plain_content()
+    return memory_file.extra_fields.get(field_name)
+
+
+def _stale_patch_conflict(previous_value: Any, current_value: Any, patch_value: Any) -> Optional[str]:
+    """Why a patch built on ``previous_value`` cannot apply to a changed ``current_value``.
+
+    Never fuzzy-apply an old patch over a concurrent writer's changes: every block must
+    still match exactly once. None when the value is unchanged or the patch still fits.
+    """
+    if previous_value == current_value:
+        return None
+    if isinstance(patch_value, dict) and "blocks" in patch_value:
+        patch_value = StrPatch.model_validate(patch_value)
+    if not isinstance(patch_value, StrPatch):
+        return None
+    remaining = current_value
+    for block in patch_value.blocks:
+        search = unescape_markers(block.search)
+        replacement = unescape_markers(block.replace)
+        if search == replacement:
+            continue
+        if not isinstance(remaining, str) or not search or remaining.count(search) != 1:
+            return "stale patch must still match exactly once"
+        remaining = remaining.replace(search, replacement, 1)
+    return None
+
+
 class MemoryUpdateError(Exception):
     """Report apply failures without treating a partial write as safe to replay."""
 
@@ -792,7 +840,7 @@ class MemoryUpdateError(Exception):
             # Link writes are best-effort and absent from the URI result lists.
             and not has_link_updates
             and all(
-                isinstance(error, MemoryReadError) and error.retryable
+                isinstance(error, (MemoryReadError, StalePatchError)) and error.retryable
                 for _uri, error in result.errors
             )
         )
@@ -999,6 +1047,14 @@ class MemoryUpdater:
 
         # Distribute resolved_links to corresponding upsert operations
         self._distribute_links_to_operations(operations)
+
+        stale = await self._preflight_stale_patches(applicable_upserts, ctx)
+        if stale is not None:
+            # Nothing is written yet: report one retryable conflict instead of applying
+            # the rest of a batch the model built on an outdated read.
+            result.add_error(stale.resource, stale)
+            tracer.info(str(stale))
+            return result
 
         # Apply unified operations - _apply_edit returns True if edited, False if written
         uri_memory_type_map = {}
@@ -1406,6 +1462,47 @@ class MemoryUpdater:
             except Exception as exc:
                 logger.warning("Failed to sync resource refs for %s: %s", uri, exc)
 
+    async def _preflight_stale_patches(
+        self, upserts: List[ResolvedOperation], ctx: RequestContext
+    ) -> Optional[StalePatchError]:
+        """Find a patch whose target changed since the model read it, before any write.
+
+        Concurrent commits edit hot files (profile, active project cards); a patch over an
+        outdated read used to fail mid-batch, after the other operations were written, so
+        the archive failed and could not be regenerated safely. Only the first edit of each
+        URI is checked: later edits build on that write and are checked when applied.
+        """
+        viking_fs = self._get_viking_fs()
+        checked: set[str] = set()
+        for resolved_op in upserts:
+            source = resolved_op.old_memory_file_content
+            if source is None or self._is_uri_migration(resolved_op):
+                continue
+            patches = {
+                name: value
+                for name, value in resolved_op.memory_fields.items()
+                if isinstance(value, StrPatch) or isinstance(value, dict) and "blocks" in value
+            }
+            if not patches:
+                continue  # whole-value updates do not depend on the text the model read
+            for uri in resolved_op.uris:
+                if uri in checked:
+                    continue
+                checked.add(uri)
+                try:
+                    fresh = MemoryFileUtils.read(await viking_fs.read_file(uri, ctx=ctx), uri=uri)
+                except Exception:
+                    continue  # missing or unreadable targets are reported by the apply path
+                for field_name, patch_value in patches.items():
+                    reason = _stale_patch_conflict(
+                        _field_value(source, field_name),
+                        _field_value(fresh, field_name),
+                        patch_value,
+                    )
+                    if reason:
+                        return StalePatchError(uri, field_name, reason)
+        return None
+
     async def _apply_upsert(
         self,
         resolved_op: ResolvedOperation,
@@ -1495,45 +1592,16 @@ class MemoryUpdater:
                     # Use merge_op to process field value
                     merge_op = MergeOpFactory.from_field(field)
                     try:
-                        previous_value = None
                         if source_content is not None:
-                            previous_value = (
-                                source_content.plain_content()
-                                if field.name == "content"
-                                else source_content.extra_fields.get(field.name)
+                            stale = _stale_patch_conflict(
+                                _field_value(source_content, field.name), current_value, patch_value
                             )
-                        if (
-                            source_content is not None
-                            and previous_value != current_value
-                            and (
-                                isinstance(patch_value, StrPatch)
-                                or isinstance(patch_value, dict)
-                                and "blocks" in patch_value
-                            )
-                        ):
-                            # Do not fuzzy-apply an old patch over a concurrent writer's changes.
-                            blocks = (
-                                patch_value
-                                if isinstance(patch_value, StrPatch)
-                                else StrPatch.model_validate(patch_value)
-                            ).blocks
-                            remaining = current_value
-                            for block in blocks:
-                                search = unescape_markers(block.search)
-                                replacement = unescape_markers(block.replace)
-                                if search == replacement:
-                                    continue
-                                if (
-                                    not isinstance(remaining, str)
-                                    or not search
-                                    or remaining.count(search) != 1
-                                ):
-                                    raise ValueError("Stale patch must still match exactly once")
-                                remaining = remaining.replace(search, replacement, 1)
+                            if stale:
+                                raise ValueError(stale)
                         new_value = await merge_op.apply(current_value, patch_value)
                     except Exception as e:
                         raise ConflictError(
-                            f"Memory field update could not be applied: {uri} field={field.name}",
+                            f"Memory field update could not be applied: {uri} field={field.name}: {e}",
                             resource=uri,
                         ) from e
                     metadata[field.name] = new_value
