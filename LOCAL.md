@@ -56,6 +56,12 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
     session load under the writers' locks, bounded reads + partial-read safety + entity routing
     (#3526; the fallback batch of #6086 is capped at half the input budget so it fits the budget
     check), agent-artifact reason skip, evolution once per commit (#6006), expansion failure log.
+  - After the port (2026-10-20): upstream #6301 cherry-picked (retry a memory step whose fresh
+    read failed before any write; drop on the next upgrade past it), plus the local "stale patch
+    preflight": since #6179 a patch over a file another commit changed after the model read it
+    failed the whole archive mid-batch (~10 archives 10-17..10-20, mostly profile.md and hot
+    project cards). The conflict is now found before any write and is retryable under #6301's
+    rule, so the step regenerates from fresh content. Candidate for an upstream PR on top of #6301.
   - Entity look-alike threshold 0.85 (extract_loop and `ops/merge_entities.py --similar`) was
     calibrated on skylark-embedding-vision; recalibrate for Qwen3-Embedding-4B.
 - Client plugins (Claude Code, Codex, pi on the Mac) are upgraded separately from the server.

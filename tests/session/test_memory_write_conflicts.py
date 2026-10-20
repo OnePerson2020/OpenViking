@@ -7,7 +7,11 @@ import pytest
 
 from openviking.session.memory.dataclass import MemoryFile, ResolvedOperation, ResolvedOperations
 from openviking.session.memory.memory_type_registry import MemoryTypeRegistry
-from openviking.session.memory.memory_updater import MemoryUpdater
+from openviking.session.memory.memory_updater import (
+    MemoryUpdateError,
+    MemoryUpdater,
+    StalePatchError,
+)
 from openviking.session.memory.merge_op.base import SearchReplaceBlock, StrPatch
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking_cli.exceptions import ConflictError, NotFoundError
@@ -254,3 +258,66 @@ async def test_strict_training_does_not_report_failed_apply_as_submitted(monkeyp
             ctx=_ctx(),
             strict_extract_errors=True,
         )
+
+
+@pytest.mark.asyncio
+async def test_stale_patch_is_found_before_any_write_and_is_retryable():
+    # A concurrent commit changed profile.md after the model read it. The batch also
+    # creates a new card: that must not be written, so the step can be regenerated.
+    profile = "viking://user/alice/memories/profile.md"
+    card = "viking://user/alice/memories/entities/tools/new_tool.md"
+    old = MemoryFile(uri=profile, content="works on alpha", memory_type="profile")
+    current = MemoryFile(uri=profile, content="works on beta", memory_type="profile")
+    fs = MemoryFS({profile: MemoryFileUtils.write(current)})
+    updater = MemoryUpdater(registry=MemoryTypeRegistry(), vikingdb=None)
+    updater._get_viking_fs = lambda: fs
+    updater._sync_resource_refs_for_result = AsyncMock()
+    updater._vectorize_memories = AsyncMock()
+    updater.generate_overview = AsyncMock()
+    new_card = ResolvedOperation(
+        memory_type="entities", uris=[card], memory_fields={"name": "new_tool", "content": "x"}
+    )
+    stale_edit = ResolvedOperation(
+        old_memory_file_content=old,
+        memory_type="profile",
+        uris=[profile],
+        memory_fields={
+            "content": StrPatch(blocks=[SearchReplaceBlock(search="alpha", replace="gamma")])
+        },
+    )
+    result = await updater.apply_operations(
+        ResolvedOperations(upsert_operations=[new_card, stale_edit], delete_file_contents=[], errors=[]),
+        SimpleNamespace(),
+    )
+    assert fs.writes == []
+    assert [uri for uri, _ in result.errors] == [profile]
+    assert isinstance(result.errors[0][1], StalePatchError)
+    assert MemoryUpdateError(result).retryable
+
+
+@pytest.mark.asyncio
+async def test_patch_over_changed_text_that_still_matches_is_applied():
+    uri = "viking://user/alice/memories/profile.md"
+    old = MemoryFile(uri=uri, content="works on alpha", memory_type="profile")
+    current = MemoryFile(uri=uri, content="works on alpha\nlikes tea", memory_type="profile")
+    fs = MemoryFS({uri: MemoryFileUtils.write(current)})
+    updater = MemoryUpdater(registry=MemoryTypeRegistry(), vikingdb=None)
+    updater._get_viking_fs = lambda: fs
+    updater._sync_resource_refs_for_result = AsyncMock()
+    updater._vectorize_memories = AsyncMock()
+    updater.generate_overview = AsyncMock()
+    edit = ResolvedOperation(
+        old_memory_file_content=old,
+        memory_type="profile",
+        uris=[uri],
+        memory_fields={
+            "content": StrPatch(blocks=[SearchReplaceBlock(search="alpha", replace="gamma")])
+        },
+    )
+    result = await updater.apply_operations(
+        ResolvedOperations(upsert_operations=[edit], delete_file_contents=[], errors=[]),
+        SimpleNamespace(),
+    )
+    assert result.errors == []
+    assert "works on gamma" in MemoryFileUtils.read(fs.files[uri], uri=uri).plain_content()
+    assert "likes tea" in MemoryFileUtils.read(fs.files[uri], uri=uri).plain_content()
