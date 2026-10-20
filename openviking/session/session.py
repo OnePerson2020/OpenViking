@@ -11,7 +11,7 @@ import hashlib
 import inspect
 import json
 import re
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import (
@@ -521,11 +521,20 @@ class Session:
         return MemoryPolicy.from_dict(policy)
 
     async def load(self) -> None:
-        """Load session data once for readers of this instance."""
-        if not self._loaded:
-            await self._reload()
-            await self._rebuild_pending_tokens()
-            self._loaded = True
+        """Load session data once for readers of this instance.
+
+        Read under the writers' locks: an unlocked read can observe a root file
+        mid-rewrite, and the strict JSONL parser then fails the reader (a queue
+        consumer would keep failing the same commit).
+        """
+        if self._loaded:
+            return
+        locked = self._viking_fs is not None
+        async with self._state_lock("messages.jsonl", ".meta.json") if locked else nullcontext():
+            if not self._loaded:
+                await self._reload()
+                await self._rebuild_pending_tokens()
+                self._loaded = True
 
     async def _reload(self) -> Optional[str]:
         """Restore live state from storage and return the original JSONL for rewriting.
