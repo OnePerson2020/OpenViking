@@ -62,8 +62,10 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
     failed the whole archive mid-batch (~10 archives 10-17..10-20, mostly profile.md and hot
     project cards). The conflict is now found before any write and is retryable under #6301's
     rule, so the step regenerates from fresh content. Candidate for an upstream PR on top of #6301.
-  - Entity look-alike threshold 0.85 (extract_loop and `ops/merge_entities.py --similar`) was
-    calibrated on skylark-embedding-vision; recalibrate for Qwen3-Embedding-4B.
+  - Entity look-alike threshold recalibrated for Qwen3-Embedding-4B on 2026-10-20: 0.85 -> 0.90
+    on the find() score (77% of reviewed duplicates surfaced, 38% of new cards get a note; at
+    0.85 it was 80% of new cards). Recalibrate after any embedding model change: data and
+    scripts in devbox `/tmp/cal` were throwaway; method in the extract_loop comment.
 - Client plugins (Claude Code, Codex, pi on the Mac) are upgraded separately from the server.
 - Pre-fork work dirs (0.4.23 port, Oct 6–9 improvements) and the only full data backup
   (2026-10-06, before 0.4.23) are in `local_patches/archive/`; wheels in `local_patches/build/`.
@@ -108,7 +110,7 @@ new writes are routed by), per space, losslessly: the largest card stays verbati
 the others have; groups the model calls different entities are skipped (`--keys K.. --same` overrides
 that for groups the user confirmed). 2026-10-13: 288 groups (94 from a manual review of fuzzy candidates),
 349 cards removed; runs in `local_patches/entity-merge/<run>/` (plan, apply log, tar backup).
-`plan --similar [--since N]` pairs cards with different names by embedding (>= 0.85, no conflicting
+`plan --similar [--since N]` pairs cards with different names by embedding (>= 0.90 since Qwen, no conflicting
 ids — numbers of 3+ digits, dates compared apart — the rule new writes use) and lets the model judge each pair under a strict definition
 (a document, event, analysis or variant about X is not X; 2026-10-14: 50 of 96 lenient matches kept).
 Weekly cron (Sun 04:00): `plan --similar --since 8` + `apply` into `entity-merge/sweep-<date>/`,
