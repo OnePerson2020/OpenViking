@@ -67,6 +67,9 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
     commit completed was rejected ("Task ... is unavailable; rejected work for Embedding", issue
     #6322): memories were written without vectors. 143 rejections 2026-10-20 14:48-19:05 here;
     the affected URIs were re-indexed after the fix.
+  - PR #6362 (carried; drop once merged): a bare OpenAIError (client configuration, e.g. missing
+    credentials) is not retried. It was UNKNOWN, so RetryVLM x Phase 2 step retry made 16 attempts
+    (~26 s) per extraction step; session-commit test teardowns went from ~26 s to < 1 s.
   - PR #6355 (tests only, carried; drop once merged): restore os.environ after every test. The
     LiteLLM provider exports OPENAI_API_KEY; leaked from tests/models into test_session_commit.py
     (in the deploy gate since #6301), it turned offline model calls into real requests and hung
