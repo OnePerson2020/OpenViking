@@ -5,7 +5,8 @@ from unittest.mock import patch
 
 from openviking.session.memory.dataclass import ResolvedOperation, ResolvedOperations
 from openviking.session.memory.extract_loop import ExtractLoop
-import openviking.session.session as session_module
+import openviking_cli.utils.config as config_module
+from openviking.session.memory.context_budget import long_term_fallback_batch_tokens
 
 
 class PatchDropTests(IsolatedAsyncioTestCase):
@@ -29,12 +30,12 @@ class PatchDropTests(IsolatedAsyncioTestCase):
 class BudgetTests(TestCase):
     def budget(self, value):
         config = SimpleNamespace(memory=SimpleNamespace(extraction_input_token_budget=value))
-        return patch.object(session_module, "get_openviking_config", return_value=config)
+        return patch.object(config_module, "get_openviking_config", return_value=config)
 
     def test_batches_follow_input_budget(self):
         with self.budget(160_000):
-            self.assertEqual(session_module._long_term_fallback_batch_tokens(), 80_000)
+            self.assertEqual(long_term_fallback_batch_tokens(), 80_000)
 
     def test_floors_keep_previous_sizes(self):
         with self.budget(16_000):
-            self.assertEqual(session_module._long_term_fallback_batch_tokens(), 48_000)
+            self.assertEqual(long_term_fallback_batch_tokens(), 48_000)

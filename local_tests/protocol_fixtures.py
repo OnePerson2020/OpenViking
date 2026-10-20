@@ -2,16 +2,12 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Tests for JSON and restricted-Python memory extraction output protocols."""
 
-import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
 
 from openviking.session.memory.dataclass import MemoryField, MemoryFile, MemoryTypeSchema
-from openviking.session.memory.extraction_output_protocol import (
-    ExtractionOutputContext,
-    create_extraction_output_protocol,
-)
+from openviking.session.memory.extraction_output_protocol import ExtractionOutputContext
 from openviking.session.memory.memory_isolation_handler import RoleScope
 from openviking.session.memory.merge_op import FieldType, MergeOp
 from openviking.session.memory.page_id_map import PageIdMap
