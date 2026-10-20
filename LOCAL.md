@@ -1,7 +1,7 @@
 # OpenViking local patch series
 
 `local` = our patches, one feature per commit, on top of the upstream release tag
-(`v0.5.0` from volcengine/OpenViking; this clone is shallow). Upstream's
+(`v0.5.1` from volcengine/OpenViking; this clone is shallow). Upstream's
 README is `README.md`; this file is ours. Fixes worth proposing upstream are
 cherry-picked from `local` onto `upstream/main` on the Mac (`~/.openviking/openviking-repo`).
 Until 2026-10-09 the series sat on a synthetic sdist import; that history is kept in
@@ -29,84 +29,39 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
 
 ## Upgrade notes
 
-- v0.5.0 (2026-10-10): 36 of 38 v0.4.23 commits carried over unchanged. Dropped: the #5591
-  backport (in v0.5.0) and "session: Working Memory budget batching, resume and deadline
-  retry" (WM is default-off since #5696 and off for our user), replaced by "session:
-  long-term extraction falls back to budget batches…"; WM leftovers removed in "drop
-  Working Memory leftovers after the v0.5.0 port" (incl. `memory.working_memory_transport`).
-- Open upstream PRs (drop the matching local commit once merged, then deploy): #5758
-  orphan race, #5759 VLM deadline, #5802 archive retry route (a third-party user posted two
-  failed archives it would recover, 2026-10-15),
-  #5812 JSON image redaction, #5818 C++ log append, #6038 filtered path guard, #6073 inner period in resource-ref
-  link anchors (with #6054 merged upstream, drop both resource-ref commits), #6065
-  embedding attempt deadline (replaces "embedding: bound Volcengine embedding requests";
-  keep `embedding.timeout` 20 in ov.conf when adopting it). Merged upstream, drop on the next upgrade: #6054
-  (resource-ref linkify; replaces "memory: resource-ref linkify keeps Markdown line markers out
-  of the link"; its follow-up #6069, indented list markers, is still open — our commit already
-  handles indentation). Inner "." (`SKILL.md`): fixed here, upstream #6072 / PR #6073. #5759 and #6065 are written
-  against upstream #5950 (RetryVLM/RetryEmbedder, after v0.5.0): on an upgrade past it the
-  local VLM-deadline and Volcengine-embedding commits conflict; take the PR versions.
-  Also on the next upgrade (main as of 2026-10-16): #5772 catches _process exceptions in
-  SessionCommitProcessor.on_dequeue (conflicts with "queue: keep the upstream bool _process
-  contract…"; keep our failed-task check after theirs); #6120/#6131/#6117 rework extraction
-  prompts and session entry points (expect extract_loop/session conflicts); #6043 unifies task
-  and queue tracking.
-- PRs filed 2026-10-15 for local-only behaviour (drop/replace the local part once merged):
-  #6075 no upsert from a stale snapshot ("memory: improve extraction robustness" part),
-  #6077 reason commit returns once queued ("resources: queue reason commits without waiting";
-  MERGED 2026-10-16 as 0230cc104, same behaviour: drop the local commit on the next upgrade past it),
-  #6080 no .failed.json next to .done (robustness commit part; CLOSED 2026-10-16 in favour of
-  upstream #6153, which writes .done after the task result is saved: on the next upgrade past
-  #6153 drop our .done guard), #6083 lock contention requeues +
-  2 s requeue pause ("session: requeue commits on lock contention" + "diagnostics + queue: …pause"),
-  #6086 batch large policy-less commits (upstream uses the 150k default; ours uses the input budget),
-  #6088 Volcengine query_param instruction ("embedding: Volcengine query_param …").
-- #5765 pathlock polling: CLOSED 2026-10-16, superseded by upstream #4548 (native async PathLock
-  acquisition; touches crates/ragfs-python, so it needs a wheel build, not an overlay). On the next
-  upgrade past #4548 drop the async_client.py part of "storage: non-blocking exact path lock; load
-  session under the lock" and keep its session.py part (load under the lock).
-- #6157 (2026-10-16, follow-up to the #6077 review): memory_linking.status "accepted" for a queued
-  reason commit + en/zh docs. MERGED as f64fb5ba; adopt on the next upgrade. Our local reason
-  commit still returns "success" (no reader).
-- 2026-10-16 "embedding: SDK request timeouts are retryable; queries retry once": covered upstream,
-  not filed. Drop it on the next upgrade past #6102 ("timed out" / TimeoutError are transient) and
-  #6047 (`model_retry_scope(0)` on search/find: queries do not retry at all). This changes query
-  behaviour from one retry to zero; it is not equivalent to our current budget. Both landed 2026-10-15.
-- #6152 (2026-10-16) = "retrieve: one resource tree takes one context slot" + "retrieve: a resource
-  tree's slot shows its most specific hit" + "retrieve: resource slots do not depend on the ranking
-  order" squashed (local PR worktree includes the third at `2c8026b`); drop all three once it merges.
-- 2026-10-16 "vlm: vision completions retry transient errors; deadline aborts count as failed" and
-  "memory: ask once before forking a same-name entity card the model read": local only, not filed.
-- Cherry-picked from upstream main (drop on the next upgrade past it): #6153 .done after the task
-  result ("session: write .done after the task result is saved" + its test file commit); #6039 compact intent
-  planner prompt (`intent_analysis.yaml` + 2 tests; recall with query expansion 6-11 s -> 3-5 s,
-  2026-10-15).
-- Upstream issues our commits work around (drop once fixed upstream): #6006 agent evolution
-  reruns per case ("session: train agent evolution once per commit…"), #3526 entity
-  duplicates across categories ("memory: route a new entity to the existing card…").
+- v0.5.1 (2026-10-20): the series was rebuilt on `v0.5.1` as one commit per feature instead
+  of replaying 110 commits (v0.5.0 series kept as branch `local-0.5.0`, last `7788de9b5`).
+  Open upstream PRs are carried as their PR commits, so a merged PR drops out cleanly.
+  - Dropped, covered by v0.5.1: #6075 stale-snapshot guard, #4548 async PathLock (our
+    async_client part), #6054 resource-ref linkify, #6077/#6157 queued reason commit, #6153
+    `.done` after the task result (and our `.failed.json`-next-to-`.done` guard), #6039 planner
+    prompt, #5950 RetryVLM/RetryEmbedder (our VLM deadline loop and vision retries), #6102 /
+    #6047 timeout classification and no query retries, #6136/#6043 task tracking.
+  - Dropped, no longer used: every Volcengine embedding patch (bounded requests, Ark
+    keep-alive, `query_param` instruction prefix = PR #6088, SDK-timeout retries). Embedding is
+    the gpubox Qwen3-Embedding-4B through `provider: openai` since 2026-10-20.
+  - Dropped as dead: tolerant QueueFS payload decoding (byte-integer `data` came from the 0.4.23
+    Go binding; ragfs serializes `data` as a string). Dropped as redundant: "a commit that failed
+    its task is a failed queue result" (an extra task read per commit; healthcheck already reports
+    failed tasks and failed archives, the queue error count would only repeat them).
+  - Carried as PR commits (drop each once merged): #5758 orphan race, #5759 VLM per-attempt
+    deadline, #5802 archive retry (adapted here: `has_work` is async and `MAX_TASKS` is gone in
+    v0.5.1; the PR branch needs the same fix), #5812 JSON image redaction, #6038 filtered path
+    guard, #6069 indented list markers, #6073 inner period, #6083 lock requeue + 2 s pause, #6086
+    fallback batches, #6152 resource tree slot, #6179 write conflicts (merged with #6075: other
+    read errors propagate), #6180 deferred session load, #6181 task listing cache (only its
+    perf commit; the task-registration commit is covered by #6122, the API test tweaks are CI-only).
+  - Local only: VLM call log (`log.model_calls_output`), C++ vectordb log file (PR #5818 fixes
+    the sink in C++, which an overlay cannot ship), MinerU error type, queue worker error log,
+    session load under the writers' locks, bounded reads + partial-read safety + entity routing
+    (#3526; the fallback batch of #6086 is capped at half the input budget so it fits the budget
+    check), agent-artifact reason skip, evolution once per commit (#6006), expansion failure log.
+  - Entity look-alike threshold 0.85 (extract_loop and `ops/merge_entities.py --similar`) was
+    calibrated on skylark-embedding-vision; recalibrate for Qwen3-Embedding-4B.
 - Client plugins (Claude Code, Codex, pi on the Mac) are upgraded separately from the server.
-- 2026-10-16 runtime review follow-up (PR #6179): missing update targets raise ConflictError;
-  stale string patches must still match every block, and field failures cannot count as edits.
-  Strict ordinary-memory/trajectory/training callers propagate apply failures so the archive
-  retains a visible failure instead of claiming completion. This does not make a multi-file batch
-  atomic; already successful writes remain on disk for recovery.
-- Activity checks restore each owner's tasks once, then use the single-writer tracker's live cache;
-  capacity eviction and account deletion invalidate the restored-owner marker. Ordinary list APIs
-  still refresh durable history. Waiting/terminal commit deliveries skip loading root messages;
-  the durable queue, predecessor checks and 2-second requeue delay are unchanged.
-- Upstream submissions for the deployed `523bb84` patch set (2026-10-16): #6179
-  `fix/memory-write-conflict-outcomes` (`f6eda7d6`), #6180 `perf/defer-queued-session-load`
-  (`b3a43eb0`), #6181 `perf/cache-file-task-owner-load` (`46f44d75`). All three are based on
-  upstream `7c34e43c`, not the v0.5.0 overlay. #6179 complements #6075's transient-read guard;
-  #6180 is independent of #6083's requeue policy. Drop matching local changes on upgrade
-  once merged. #6136 rewrote task tracking but file-backed activity checks still reread all
-  records; #6181 adapts our optimization to its new store API, preserving directory scans
-  while loading only uncached records. Do not cherry-pick the old owner-cache implementation
-  onto the new task/work store. Client-only `clients/` fixes remain in the fork backup.
-- Artifact capture accepts completed Codex FileChange events (including wrapped exec calls and
-  moves), namespaced apply_patch, and retries an unfinished JSONL tail on the next hook.
 - Pre-fork work dirs (0.4.23 port, Oct 6–9 improvements) and the only full data backup
   (2026-10-06, before 0.4.23) are in `local_patches/archive/`; wheels in `local_patches/build/`.
+  The v0.5.0-era upgrade notes are in `LOCAL.md` on branch `local-0.5.0`.
 
 ## Backup to GitHub
 
@@ -119,7 +74,7 @@ GitHub credentials):
     git -c http.proxyAuthMethod=basic -c credential.helper= \
         -c credential.helper='!gh auth git-credential' \
         push --force https://github.com/OnePerson2020/OpenViking.git \
-        devbox-fork/local:refs/heads/devbox/local-0.5.0
+        devbox-fork/local:refs/heads/devbox/local-0.5.1
 
 ## Deploy
 
@@ -186,18 +141,20 @@ release tag, and the files listed in `ops/upstream-tests.txt`.
 
 - `vlm.max_tokens` 40000, `vlm.timeout` 1800: the largest normal output in 19,839 calls was
   30,795 tokens; every `finish_reason=length` call was a runaway that fills any cap (65536 only
-  doubled the waste, ~13 min per call). Samples: `logs/truncated-outputs.jsonl`.
-- `memory.extraction_input_token_budget` 160000 / `extraction_read_token_budget` 16000: WM and
-  fallback batch sizes derive from these (local patch).
+  doubled the waste, ~13 min per call). Samples: `logs/truncated-outputs.jsonl`. Since v0.5.1
+  (#5759) the timeout bounds each RetryVLM attempt, not the whole call (local v0.5.0 had one
+  deadline over all retries): worst case is (`vlm.max_retries` + 1) x 1800 s.
+- `memory.extraction_input_token_budget` 160000 / `extraction_read_token_budget` 16000: every
+  extraction call and read is bounded by these; the policy-less fallback batch is half the input
+  budget (local patch).
 - `memory.extraction_output_format` = `json` since 2026-10-14. The local strict `json_schema`
   protocol (provider-constrained output, Ark stop sequences, truncation salvage) was removed
   2026-10-15: A/B json vs json_schema 15/15 each, json dropped no data; strict only saved ~26%
   prompt tokens and cost ~800 Ark-only lines. Last commit with it: `fb22394`.
-- `embedding.max_retries` 6 with the bounded embedder (20 s/request): BytePlus SG stalls.
-- `embedding.dense.query_param` = vision-embedding instruction prefix on text queries (local
-  patch; documents unchanged, no reindex). 90 vague queries / 300-doc pool: MRR .831 -> .906.
+- `embedding.dense`: gpubox Qwen3-Embedding-4B, `provider: openai`, `dimension` 1024,
+  `query_param: "query"` (the server prepends the Qwen retrieval instruction for queries).
 - `queue_workers.session_commit.max_concurrent` 12.
 - A commit that waits for its predecessor is requeued after a 2 s pause inside the worker
   ("diagnostics + queue: …pause before commit requeue"). Without it, each waiting message
-  cycles ~2/s (7-9% of a core, 2026-10-09). Upstream main (b8ec9d8) still requeues instantly.
+  cycles ~2/s (7-9% of a core, 2026-10-09). Upstream v0.5.1 still requeues instantly (PR #6083).
 - Restart only on an idle queue (running+pending == 0), as deploy.py does.

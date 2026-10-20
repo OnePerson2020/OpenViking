@@ -12,7 +12,7 @@ from pathlib import Path
 
 LIVE = Path.home()/".openviking/ov.conf"; TPL = Path(__file__).with_name("ov.conf.template.json")
 SECRETS = {"api_key", "root_api_key"}
-PRIVATE = re.compile(r"^ep-|bytedance\.|byted\.")
+PRIVATE = re.compile(r"^ep-|bytedance\.|byted\.|//(10|192\.168|172\.(1[6-9]|2\d|3[01]))\.")  # + private IPs
 
 def mask(o):
     if isinstance(o, dict): return {k: "<secret>" if k in SECRETS and v else mask(v) for k, v in o.items()}

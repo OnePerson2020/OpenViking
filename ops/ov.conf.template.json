@@ -5,12 +5,12 @@
   },
   "embedding": {
     "dense": {
-      "provider": "volcengine",
-      "model": "skylark-embedding-vision-251215",
+      "provider": "openai",
+      "model": "Qwen3-Embedding-4B",
       "api_key": "<secret>",
-      "api_base": "https://ark.ap-southeast.bytepluses.com/api/v3",
+      "api_base": "<private>",
       "dimension": 1024,
-      "query_param": "Target_modality: text.\nInstruction:根据问题检索相关的记忆笔记\nQuery:"
+      "query_param": "query"
     },
     "max_concurrent": 20,
     "max_retries": 6

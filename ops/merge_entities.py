@@ -168,6 +168,9 @@ def apply(out):
         target, delete = re.sub(r"\s", "_", base), [u for u in [rec["keep"], *rec["delete"]] if u != base]
         if target == base:  # replace keeps the card's metadata, refreshes overview + embedding
             w = api("POST", "/content/write", {"uri": target, "content": rec["content"] + "\n", "mode": "replace", "wait": False})
+        elif path(target).exists():  # create overwrites since v0.5.1 (#5897); never replace another card
+            log.write(json.dumps({"keep": rec["keep"], "skipped": "target exists", "target": target}, ensure_ascii=False) + "\n")
+            continue
         else:  # the HTTP API maps whitespace in paths to "_": create there with the metadata, drop the old card
             raw = path(base).read_text(encoding="utf-8")
             meta = "\n\n" + FIELDS + raw.split(FIELDS, 1)[1] if FIELDS in raw else "\n"
