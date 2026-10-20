@@ -62,6 +62,11 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
     failed the whole archive mid-batch (~10 archives 10-17..10-20, mostly profile.md and hot
     project cards). The conflict is now found before any write and is retryable under #6301's
     rule, so the step regenerates from fresh content. Candidate for an upstream PR on top of #6301.
+  - Upstream #6331 cherry-picked (drop on the next upgrade past it): v0.5.1 ran streaming-batch
+    flushes under the submitting session_commit's Task context, so vectorization enqueued after the
+    commit completed was rejected ("Task ... is unavailable; rejected work for Embedding", issue
+    #6322): memories were written without vectors. 143 rejections 2026-10-20 14:48-19:05 here;
+    the affected URIs were re-indexed after the fix.
   - PR #6355 (tests only, carried; drop once merged): restore os.environ after every test. The
     LiteLLM provider exports OPENAI_API_KEY; leaked from tests/models into test_session_commit.py
     (in the deploy gate since #6301), it turned offline model calls into real requests and hung
