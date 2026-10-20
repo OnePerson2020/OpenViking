@@ -62,11 +62,11 @@ def _entity_name_key(file_name: str) -> str:
     return re.sub(r"[\s._\-]+", "_", stem.strip().lower())
 
 
-# ponytail: one global cosine threshold, calibrated 2026-10-14 on one deployment
-# (Volcengine skylark-embedding-vision): 63% of reviewed duplicate pairs score >= 0.85,
-# ~27% of ordinary new cards have a neighbour that high (mostly siblings the model
-# keeps apart). Per-embedding-model calibration if this is upstreamed.
-_SIMILAR_ENTITY_SCORE = 0.85
+# ponytail: one global threshold on the find() score, calibrated per embedding model.
+# 2026-10-20, Qwen3-Embedding-4B (live index, 200 random cards, 75 reviewed duplicates):
+# >= 0.90 surfaces 77% of duplicates and gives 38% of ordinary new cards a look-alike
+# note (skylark-embedding-vision at 0.85 had 63% / 27%). The model judges every note.
+_SIMILAR_ENTITY_SCORE = 0.90
 
 
 _DATE_IN_NAME = re.compile(r"20\d{6}")
