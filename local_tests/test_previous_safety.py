@@ -12,7 +12,7 @@ from openviking.service.task_tracker import TaskStatus
 from openviking.session.memory.context_budget import apply_exact_string_patch, validate_partial_fields
 from openviking.session.memory.dataclass import MemoryFile, ResolvedOperation
 from openviking.session.memory.memory_type_registry import MemoryTypeRegistry as create_default_registry
-from openviking.session.memory.memory_updater import MemoryUpdater
+from openviking.session.memory.memory_updater import MemoryReadError, MemoryUpdater
 from openviking.session.memory.merge_op.base import SearchReplaceBlock, StrPatch
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking.session.archive_store import ArchiveState, ArchiveStore
@@ -297,8 +297,11 @@ class MemoryUpdaterSafetyTests(unittest.IsolatedAsyncioTestCase):
             memory_fields={"content": "replacement"},
         )
 
-        with self.assertRaisesRegex(TimeoutError, "storage unavailable"):
+        # #6301 wraps the read failure; nothing was written, so the step may regenerate.
+        with self.assertRaisesRegex(MemoryReadError, "storage unavailable") as raised:
             await updater._apply_upsert(operation, SimpleNamespace())
+        self.assertIsInstance(raised.exception.__cause__, TimeoutError)
+        self.assertTrue(raised.exception.retryable)
         self.assertFalse(fs.files)
 
 
