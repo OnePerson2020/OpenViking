@@ -10,6 +10,7 @@ a hard cap and a timeout, and fails closed to the original query.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, List, Tuple
 
 from openviking.config.vlm import VLMHandle
@@ -47,6 +48,7 @@ async def expand_queries(
         return [query], "off"
 
     timeout = timeout_s or get_openviking_config().retrieval.recall_intent_timeout_s
+    started = time.monotonic()
     try:
         if planner is None:
             raise RuntimeError("Query expansion requires an explicitly resolved query planner")
@@ -63,7 +65,11 @@ async def expand_queries(
             timeout=timeout,
         )
     except Exception as exc:
-        logger.warning("Query expansion failed; using original query: %s", exc)
+        logger.warning(
+            "Query expansion failed; using original query: error_type=%s "
+            "elapsed_s=%.3f timeout_s=%.3f detail=%r",
+            type(exc).__name__, time.monotonic() - started, timeout, str(exc),
+        )
         return [query], "failed"
 
     queries = [query]
