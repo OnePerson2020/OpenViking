@@ -32,5 +32,4 @@ tests/service/test_task_queue_middleware.py
 --deselect=tests/session/memory/test_memory_updater.py::TestMemoryUpdater::test_generate_overview_template_fallbacks_for_builtin_memories
 --deselect=tests/unit/session/test_session_commit_resume.py::test_commit_retention_boundary_and_pending_tokens_after_reload
 # A test stuck for 2 min dumps every thread stack (the 1200 s run limit only says that one hung).
-# Do not run other pytest sessions on devbox during a deploy: concurrent runs hung fixture teardown twice (2026-10-20).
 --override-ini=faulthandler_timeout=120
