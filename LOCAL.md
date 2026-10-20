@@ -62,6 +62,10 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
     failed the whole archive mid-batch (~10 archives 10-17..10-20, mostly profile.md and hot
     project cards). The conflict is now found before any write and is retryable under #6301's
     rule, so the step regenerates from fresh content. Candidate for an upstream PR on top of #6301.
+  - PR #6355 (tests only, carried; drop once merged): restore os.environ after every test. The
+    LiteLLM provider exports OPENAI_API_KEY; leaked from tests/models into test_session_commit.py
+    (in the deploy gate since #6301), it turned offline model calls into real requests and hung
+    the run at the 1200 s limit four times on 2026-10-20.
   - Entity look-alike threshold recalibrated for Qwen3-Embedding-4B on 2026-10-20: 0.85 -> 0.90
     on the find() score (77% of reviewed duplicates surfaced, 38% of new cards get a note; at
     0.85 it was 80% of new cards). Recalibrate after any embedding model change: data and
