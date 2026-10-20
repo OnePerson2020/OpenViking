@@ -74,6 +74,13 @@ def init_cpp_logging():
             )
             spd_log_format = _convert_python_format_to_spdlog(py_log_format)
 
+            if log_output not in ("stdout", "stderr"):
+                # The C++ file sink opens with truncate=true: sharing the Python log
+                # file wiped it on every start and overwrote Python lines.
+                from pathlib import Path
+
+                path = Path(log_output)
+                log_output = str(path.with_name(f"{path.stem}.vectordb{path.suffix or '.log'}"))
             init_logging(log_level, log_output, spd_log_format)
             _cpp_logging_initialized = True
         except ImportError:
