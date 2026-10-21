@@ -40,7 +40,9 @@ from openviking.session.memory.memory_updater import (
     ExtractContext,
     MemoryUpdater,
     MemoryUpdateResult,
+    rejected_before_write,
     remap_stored_links,
+    strict_apply_error,
     write_stored_links,
 )
 from openviking.session.memory.merge_op import MergeOpFactory
@@ -202,7 +204,10 @@ class StreamingMemoryUpdater:
         self._last_result = result
         scoped_result = scope_memory_update_result_to_submitter(result, request)
         if request.strict_extract_errors and scoped_result.apply_result.errors:
-            raise scoped_result.apply_result.errors[0][1]
+            raise strict_apply_error(
+                scoped_result.apply_result,
+                has_link_updates=bool(getattr(scoped_result.operations, "resolved_links", None)),
+            )
         tracer.info(
             "StreamingMemoryUpdater submit finished "
             f"batch_id={result.metadata.get('batch_id')} "
@@ -457,23 +462,53 @@ class StreamingMemoryUpdater:
         _check_template_batch_conflicts(batches, merged_batches)
         results = []
         for batch, merged_operations in zip(batches, merged_batches, strict=True):
-            apply_result = await self._apply_operations(
-                operations=merged_operations,
-                request=batch[0],
-                messages=_combined_request_messages(batch),
-            )
-            results.append(
-                StreamingMemoryUpdateResult(
+            pending = batch
+            while True:
+                apply_result = await self._apply_operations(
+                    operations=merged_operations,
+                    request=pending[0],
+                    messages=_combined_request_messages(pending),
+                )
+                part = StreamingMemoryUpdateResult(
                     operations=merged_operations,
                     apply_result=apply_result,
-                    request_count=len(batch),
+                    request_count=len(batch) if pending is batch else 0,
                     metadata={
                         "flush_reason": reason,
                         "operation_count": _operation_count(merged_operations),
                         "merge_group": _merge_group_key_label(group_key),
                     },
                 )
-            )
+                results.append(part)
+                if not rejected_before_write(apply_result) or len(pending) < 2:
+                    break
+                # The stale patch preflight rejected every request of the flush. A request
+                # that does not see the conflict in its scoped result would report success
+                # with nothing written: apply those again without the conflicting ones.
+                remaining = [
+                    request
+                    for request in pending
+                    if not scope_memory_update_result_to_submitter(
+                        part, request
+                    ).apply_result.errors
+                ]
+                if not remaining:
+                    break
+                if len(remaining) == len(pending):
+                    # Nobody owns the conflicting URI (a merge moved it): fail them all, retryably.
+                    stale = apply_result.errors[0][1]
+                    for request in pending:
+                        for uri in sorted(_request_uri_set(request)):
+                            apply_result.add_error(uri, stale)
+                    break
+                tracer.info(
+                    "StreamingMemoryUpdater re-applying requests after a stale patch "
+                    f"group={group_key} rejected={len(pending) - len(remaining)} "
+                    f"remaining={len(remaining)} errors={apply_result.errors}",
+                    console=self.config.trace_console,
+                )
+                pending = remaining
+                merged_operations = await self._merge_requests(pending)
         result = combine_streaming_memory_results(*results, fallback_request_count=len(requests))
         self._last_result = result
         apply_result = result.apply_result
