@@ -1181,6 +1181,7 @@ class Session:
         min_raw_tail_steps: int,
         agent_evolution_enabled: bool = True,
         agent_memory_skip_reason: Optional[str] = None,
+        messages_sha256: Optional[str] = None,
         lease_ref: Optional[Any] = None,
     ) -> None:
         """Persist the Phase 1 intent before any destructive root rewrite."""
@@ -1198,6 +1199,10 @@ class Session:
             "retained_message_token_budget": retained_message_token_budget,
             "min_raw_tail_steps": min_raw_tail_steps,
         }
+        if messages_sha256:
+            # Retry callers read this back via get_session_archive() instead of
+            # needing filesystem access to the raw messages.jsonl bytes.
+            payload["messages_sha256"] = messages_sha256
         await self._merge_archive_meta(
             archive_uri,
             {
@@ -1670,6 +1675,7 @@ class Session:
             )
             phase1_stage = "phase1_persist"
             try:
+                archive_content = "\n".join(m.to_jsonl() for m in messages_to_archive) + "\n"
                 archive_persist_tasks = [
                     self._write_phase1_marker(
                         archive_uri,
@@ -1684,14 +1690,14 @@ class Session:
                         min_raw_tail_steps=effective_min_tail,
                         agent_evolution_enabled=agent_evolution_enabled,
                         agent_memory_skip_reason=agent_memory_skip_reason,
+                        messages_sha256=hashlib.sha256(archive_content.encode("utf-8")).hexdigest(),
                     )
                 ]
                 if self._viking_fs:
-                    lines = [m.to_jsonl() for m in messages_to_archive]
                     archive_persist_tasks.append(
                         self._viking_fs.write_file(
                             uri=f"{archive_uri}/messages.jsonl",
-                            content="\n".join(lines) + "\n",
+                            content=archive_content,
                             ctx=self.ctx,
                         )
                     )
@@ -2047,6 +2053,10 @@ class Session:
             phase1 = meta.get("phase1")
             if not isinstance(phase1, dict) or phase1.get("status") != "ready":
                 raise FailedPreconditionError("Archive Phase 1 is not ready")
+            if phase1.get("messages_sha256") not in (None, actual_hash):
+                raise FailedPreconditionError(
+                    "Archive messages no longer match the hash recorded at archive time"
+                )
             queue_snapshot = phase1.get("queue_message")
             if not isinstance(queue_snapshot, dict):
                 raise FailedPreconditionError("Archive Phase 1 queue message is missing")
@@ -3164,31 +3174,38 @@ class Session:
         }
 
     async def get_session_archive(self, archive_id: str) -> Dict[str, Any]:
-        """Get one completed archive by archive ID."""
+        """Get one archive by archive ID.
 
-        for archive in await self._archives.completed_refs():
-            if archive["archive_id"] != archive_id:
-                continue
-
-            overview = await self._archives.read_overview(archive["archive_uri"])
-            if not overview and archive.get("enable_working_memory") is not False:
-                break
-
-            abstract = (
-                await self._archives.read_abstract(archive["archive_uri"], overview)
-                if overview
-                else ""
-            )
-            return {
-                "archive_id": archive_id,
-                "abstract": abstract,
-                "overview": overview,
-                "messages": [
-                    m.to_dict() for m in await self._archives.read_messages(archive["archive_uri"])
-                ],
-            }
-
-        raise NotFoundError(archive_id, "session archive")
+        Failed and pending archives are returned too, with ``status``,
+        ``failure`` and ``messages_sha256`` so a caller can pass the hash
+        unchanged to ``retry_archive``.
+        """
+        state = next(
+            (s for s in await self._archives.scan_states() if s.archive_id == archive_id),
+            None,
+        )
+        if state is None:
+            raise NotFoundError(archive_id, "session archive")
+        overview = abstract = ""
+        if state.state == "completed":
+            overview = await self._archives.read_overview(state.archive_uri)
+            if not overview and state.done.get("enable_working_memory") is not False:
+                raise NotFoundError(archive_id, "session archive")
+            if overview:
+                abstract = await self._archives.read_abstract(state.archive_uri, overview)
+        result: Dict[str, Any] = {
+            "archive_id": archive_id,
+            "status": state.state,
+            "abstract": abstract,
+            "overview": overview,
+            "messages_sha256": await self._archives.messages_sha256(state.archive_uri),
+            "messages": [
+                m.to_dict() for m in await self._archives.read_messages(state.archive_uri)
+            ],
+        }
+        if state.failed:
+            result["failure"] = state.failed
+        return result
 
     # ============= Internal methods =============
 

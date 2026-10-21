@@ -163,6 +163,16 @@ async def test_hash_mismatch_has_no_side_effects(env):
     env.assert_nothing_enqueued()
 
 
+async def test_bytes_must_match_archive_time_hash(env):
+    # A caller hashing tampered bytes still cannot pass the archive-time hash check.
+    env.phase1_meta["phase1"]["messages_sha256"] = "f" * 64
+    env.fs.files[f"{ARCHIVE_URI}/.meta.json"] = json.dumps(env.phase1_meta)
+    assert await env.session._archives.messages_sha256(ARCHIVE_URI) == "f" * 64
+    with pytest.raises(FailedPreconditionError, match="recorded at archive time"):
+        await env.retry(env.state(), allow_ownerless_ready=True)
+    env.assert_nothing_enqueued()
+
+
 async def test_completed_archive_cannot_be_retried(env):
     env.fs.files[f"{ARCHIVE_URI}/.done"] = "{}"
     with pytest.raises(FailedPreconditionError, match="Completed archives"):

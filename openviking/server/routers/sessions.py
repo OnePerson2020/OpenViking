@@ -531,7 +531,7 @@ async def get_session_archive(
     archive_id: str = Path(..., description="Archive ID"),
     _ctx: RequestContext = Depends(get_session_request_context),
 ):
-    """Get one completed archive for a session."""
+    """Get one archive; failed/pending archives include retry inputs."""
     from openviking_cli.exceptions import NotFoundError
 
     service = get_service()
@@ -669,7 +669,7 @@ class ArchiveRetryRequest(BaseModel):
     expected_messages_sha256: str = Field(
         ...,
         pattern=r"^[0-9a-f]{64}$",
-        description="SHA-256 of the exact archived messages.jsonl bytes.",
+        description="messages_sha256 returned by GET .../archives/{archive_id}, passed back unchanged.",
     )
     allow_ownerless_ready: bool = Field(
         default=False,
