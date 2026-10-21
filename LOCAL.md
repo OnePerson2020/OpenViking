@@ -62,6 +62,13 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
     failed the whole archive mid-batch (~10 archives 10-17..10-20, mostly profile.md and hot
     project cards). The conflict is now found before any write and is retryable under #6301's
     rule, so the step regenerates from fresh content. Candidate for an upstream PR on top of #6301.
+    Two follow-ups (2026-10-21): the strict streaming submit and strict trajectory extraction
+    raised the bare StalePatchError, which the Phase 2 retry does not trust, so nothing was
+    retried (3 archives on 10-20/21); they now raise a MemoryUpdateError when retryable. And a
+    preflight rejection of a shared flush dropped the other commits' writes silently (their
+    scoped result had no error); those requests are now applied again without the stale ones.
+    A retry re-runs the whole extraction step, so a hot file like profile.md can conflict
+    again; rebasing just the stale operation on the fresh file is the next step if it recurs.
   - Upstream #6331 cherry-picked (drop on the next upgrade past it): v0.5.1 ran streaming-batch
     flushes under the submitting session_commit's Task context, so vectorization enqueued after the
     commit completed was rejected ("Task ... is unavailable; rejected work for Embedding", issue
