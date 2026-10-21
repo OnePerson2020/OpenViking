@@ -38,6 +38,7 @@ from openviking.session.memory.memory_type_registry import (
 )
 from openviking.session.memory.memory_updater import (
     ExtractContext,
+    MemoryUpdateError,
     MemoryUpdater,
     MemoryUpdateResult,
     rejected_before_write,
@@ -186,13 +187,27 @@ class StreamingMemoryUpdater:
             raise ValueError("MemoryUpdateRequest.ctx is required")
         attach_source_to_request_operations(request)
         append_only_request, merge_request = self._split_append_only_request(request)
+        if request.strict_extract_errors and append_only_request and merge_request:
+            # Append-only cards are written at once, so a stale patch found later in the
+            # merge flush could no longer be retried: fail before writing anything.
+            # ponytail: a writer between this check and the flush still makes it terminal.
+            stale = await MemoryUpdater(
+                registry=request.memory_registry or self.registry, vikingdb=self.vikingdb
+            )._preflight_stale_patches(merge_request.operations.upsert_operations, request.ctx)
+            if stale is not None:
+                rejected = MemoryUpdateResult()
+                rejected.add_error(stale.resource, stale)
+                raise MemoryUpdateError(rejected)
         append_result = (
             await self._apply_append_only_request_now(append_only_request)
             if append_only_request is not None
             else None
         )
+        appended = append_result is not None and bool(
+            append_result.apply_result.written_uris or append_result.apply_result.edited_uris
+        )
         merge_result = (
-            await self._submit_grouped_merge_request(merge_request)
+            await self._submit_grouped_merge_request(merge_request, appended=appended)
             if merge_request is not None
             else None
         )
@@ -227,6 +242,8 @@ class StreamingMemoryUpdater:
     async def _submit_grouped_merge_request(
         self,
         request: MemoryUpdateRequest,
+        *,
+        appended: bool = False,
     ) -> StreamingMemoryUpdateResult | None:
         grouped_requests = split_request_by_merge_group(request)
         if not grouped_requests:
@@ -237,6 +254,14 @@ class StreamingMemoryUpdater:
         ]
         group_results = list(await asyncio.gather(*submissions))
         result = combine_streaming_memory_results(*group_results, fallback_request_count=1)
+        if (
+            request.strict_extract_errors
+            and not appended
+            and rejected_before_write(
+                scope_memory_update_result_to_submitter(result, request).apply_result
+            )
+        ):
+            return result  # nothing was written; the retry regenerates the links too
         await self._apply_post_group_links(request, result)
         return result
 

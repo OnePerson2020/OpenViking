@@ -837,8 +837,9 @@ class MemoryUpdateError(Exception):
         self.retryable = (
             bool(result.errors)
             and not (result.written_uris or result.edited_uris or result.deleted_uris)
-            # Link writes are best-effort and absent from the URI result lists.
-            and not has_link_updates
+            # Link writes are best-effort and absent from the URI result lists; a batch the
+            # stale patch preflight rejected wrote no links either.
+            and (not has_link_updates or rejected_before_write(result))
             and all(
                 isinstance(error, (MemoryReadError, StalePatchError)) and error.retryable
                 for _uri, error in result.errors
