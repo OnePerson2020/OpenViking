@@ -430,3 +430,157 @@ async def test_strict_trajectory_extraction_raises_retryable_error_for_stale_pat
     with pytest.raises(MemoryUpdateError) as raised:
         await analyzer.analyze(_rollout(), context)
     assert raised.value.retryable
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra", ["link", "append_only_card"])
+async def test_stale_patch_with_links_or_append_only_ops_is_retryable(monkeypatch, extra):
+    # Real long_term batches carry links and append-only cards next to the profile patch.
+    # Neither may turn a stale patch rejected before any write into a terminal failure.
+    from openviking.session.memory import streaming_memory_updater as module
+    from openviking.session.memory.dataclass import StoredLink
+    from tests.session.memory.test_streaming_memory_updater import (
+        InMemoryVikingFS,
+        _case_op,
+        _ctx,
+        _registry,
+    )
+
+    stale_uri = "viking://user/u/memories/notes/hot.md"
+    other_uri = "viking://user/u/memories/notes/other.md"
+    fields = {"note_name": "hot"}
+    old = MemoryFile(
+        uri=stale_uri, content="works on alpha", memory_type="notes", extra_fields=fields
+    )
+    current = MemoryFile(
+        uri=stale_uri, content="works on beta", memory_type="notes", extra_fields=fields
+    )
+    other = MemoryFile(
+        uri=other_uri, content="x", memory_type="notes", extra_fields={"note_name": "other"}
+    )
+    fs = InMemoryVikingFS(
+        {stale_uri: MemoryFileUtils.write(current), other_uri: MemoryFileUtils.write(other)}
+    )
+    for name in ("streaming_memory_updater", "memory_updater"):
+        monkeypatch.setattr(f"openviking.session.memory.{name}.get_viking_fs", lambda: fs)
+    monkeypatch.setattr(MemoryUpdater, "generate_overview", AsyncMock())
+    monkeypatch.setattr(MemoryUpdater, "_vectorize_memories", AsyncMock())
+    stale_edit = ResolvedOperation(
+        old_memory_file_content=old,
+        memory_type="notes",
+        uris=[stale_uri],
+        memory_fields={
+            "note_name": "hot",
+            "content": StrPatch(blocks=[SearchReplaceBlock(search="alpha", replace="gamma")]),
+        },
+    )
+    upserts, links = [stale_edit], []
+    if extra == "link":
+        links = [StoredLink(from_uri=stale_uri, to_uri=other_uri, link_type="related_to")]
+    else:
+        upserts.append(_case_op("card"))
+    before = dict(fs.files)
+    updater = module.StreamingMemoryUpdater(
+        registry=_registry(),
+        config=module.StreamingMemoryUpdaterConfig(max_operations_per_update=1),
+    )
+    try:
+        with pytest.raises(MemoryUpdateError) as raised:
+            await updater.submit(
+                module.MemoryUpdateRequest(
+                    operations=ResolvedOperations(
+                        upsert_operations=upserts,
+                        delete_file_contents=[],
+                        errors=[],
+                        resolved_links=links,
+                    ),
+                    messages=[],
+                    ctx=_ctx(),
+                    strict_extract_errors=True,
+                )
+            )
+    finally:
+        await updater.close()
+    assert raised.value.retryable
+    assert fs.files == before
+
+
+@pytest.mark.asyncio
+async def test_links_survive_a_stale_patch_after_append_only_cards_were_written(monkeypatch):
+    # A writer lands between the submit preflight and the merge flush: the card is already
+    # written, so the failure is terminal and the links must still be written.
+    from openviking.session.memory import streaming_memory_updater as module
+    from openviking.session.memory.dataclass import StoredLink
+    from tests.session.memory.test_streaming_memory_updater import (
+        InMemoryVikingFS,
+        _case_op,
+        _ctx,
+        _registry,
+    )
+
+    stale_uri = "viking://user/u/memories/notes/hot.md"
+    other_uri = "viking://user/u/memories/notes/other.md"
+    fields = {"note_name": "hot"}
+    old = MemoryFile(
+        uri=stale_uri, content="works on alpha", memory_type="notes", extra_fields=fields
+    )
+    current = MemoryFile(
+        uri=stale_uri, content="works on beta", memory_type="notes", extra_fields=fields
+    )
+    other = MemoryFile(
+        uri=other_uri, content="x", memory_type="notes", extra_fields={"note_name": "other"}
+    )
+    fs = InMemoryVikingFS(
+        {stale_uri: MemoryFileUtils.write(old), other_uri: MemoryFileUtils.write(other)}
+    )
+    for name in ("streaming_memory_updater", "memory_updater"):
+        monkeypatch.setattr(f"openviking.session.memory.{name}.get_viking_fs", lambda: fs)
+    monkeypatch.setattr(MemoryUpdater, "generate_overview", AsyncMock())
+    monkeypatch.setattr(MemoryUpdater, "_vectorize_memories", AsyncMock())
+    apply_append = module.StreamingMemoryUpdater._apply_append_only_request_now
+
+    async def append_then_concurrent_write(self, request):
+        result = await apply_append(self, request)
+        fs.files[stale_uri] = MemoryFileUtils.write(current)
+        return result
+
+    monkeypatch.setattr(
+        module.StreamingMemoryUpdater,
+        "_apply_append_only_request_now",
+        append_then_concurrent_write,
+    )
+    card = _case_op("card")
+    stale_edit = ResolvedOperation(
+        old_memory_file_content=old,
+        memory_type="notes",
+        uris=[stale_uri],
+        memory_fields={
+            "note_name": "hot",
+            "content": StrPatch(blocks=[SearchReplaceBlock(search="alpha", replace="gamma")]),
+        },
+    )
+    updater = module.StreamingMemoryUpdater(
+        registry=_registry(),
+        config=module.StreamingMemoryUpdaterConfig(max_operations_per_update=1),
+    )
+    try:
+        with pytest.raises(StalePatchError):
+            await updater.submit(
+                module.MemoryUpdateRequest(
+                    operations=ResolvedOperations(
+                        upsert_operations=[stale_edit, card],
+                        delete_file_contents=[],
+                        errors=[],
+                        resolved_links=[
+                            StoredLink(from_uri=stale_uri, to_uri=other_uri, link_type="related_to")
+                        ],
+                    ),
+                    messages=[],
+                    ctx=_ctx(),
+                    strict_extract_errors=True,
+                )
+            )
+    finally:
+        await updater.close()
+    assert card.uris[0] in fs.files
+    assert MemoryFileUtils.read(fs.files[other_uri], uri=other_uri).backlinks
