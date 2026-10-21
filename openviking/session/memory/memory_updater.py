@@ -846,6 +846,25 @@ class MemoryUpdateError(Exception):
         )
 
 
+def strict_apply_error(result: MemoryUpdateResult, *, has_link_updates: bool = False) -> Exception:
+    """The exception a strict caller raises for a failed apply.
+
+    A MemoryUpdateError when the step can be regenerated (the Phase 2 retry only trusts its
+    ``retryable``), otherwise the first error itself.
+    """
+    error = MemoryUpdateError(result, has_link_updates=has_link_updates)
+    return error if error.retryable else result.errors[0][1]
+
+
+def rejected_before_write(result: MemoryUpdateResult) -> bool:
+    """Whether the stale patch preflight rejected the whole batch, so nothing was written."""
+    return (
+        bool(result.errors)
+        and not (result.written_uris or result.edited_uris or result.deleted_uris)
+        and all(isinstance(error, StalePatchError) for _uri, error in result.errors)
+    )
+
+
 def _same_batch_delete_conflict_key(uri: str) -> str:
     """Return a conservative key for detecting same-batch upsert/delete URI conflicts.
 

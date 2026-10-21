@@ -286,7 +286,9 @@ async def test_stale_patch_is_found_before_any_write_and_is_retryable():
         },
     )
     result = await updater.apply_operations(
-        ResolvedOperations(upsert_operations=[new_card, stale_edit], delete_file_contents=[], errors=[]),
+        ResolvedOperations(
+            upsert_operations=[new_card, stale_edit], delete_file_contents=[], errors=[]
+        ),
         SimpleNamespace(),
     )
     assert fs.writes == []
@@ -321,3 +323,110 @@ async def test_patch_over_changed_text_that_still_matches_is_applied():
     assert result.errors == []
     assert "works on gamma" in MemoryFileUtils.read(fs.files[uri], uri=uri).plain_content()
     assert "likes tea" in MemoryFileUtils.read(fs.files[uri], uri=uri).plain_content()
+
+
+@pytest.mark.asyncio
+async def test_stale_patch_in_a_shared_flush_fails_only_its_own_request(monkeypatch):
+    # Two commits flush together. The stale patch preflight rejects the whole batch, but
+    # the commit that creates an unrelated card must still be written, not report success
+    # with nothing written. The stale one fails with a retryable MemoryUpdateError.
+    import asyncio
+
+    from openviking.session.memory import streaming_memory_updater as module
+    from tests.session.memory.test_streaming_memory_updater import (
+        InMemoryVikingFS,
+        _ctx,
+        _note_op,
+        _registry,
+    )
+
+    stale_uri = "viking://user/u/memories/notes/hot.md"
+    old = MemoryFile(
+        uri=stale_uri,
+        content="works on alpha",
+        memory_type="notes",
+        extra_fields={"note_name": "hot"},
+    )
+    current = MemoryFile(
+        uri=stale_uri,
+        content="works on beta",
+        memory_type="notes",
+        extra_fields={"note_name": "hot"},
+    )
+    fs = InMemoryVikingFS({stale_uri: MemoryFileUtils.write(current)})
+    for name in ("streaming_memory_updater", "memory_updater"):
+        monkeypatch.setattr(f"openviking.session.memory.{name}.get_viking_fs", lambda: fs)
+    monkeypatch.setattr(MemoryUpdater, "generate_overview", AsyncMock())
+    monkeypatch.setattr(MemoryUpdater, "_vectorize_memories", AsyncMock())
+    stale_edit = ResolvedOperation(
+        old_memory_file_content=old,
+        memory_type="notes",
+        uris=[stale_uri],
+        memory_fields={
+            "note_name": "hot",
+            "content": StrPatch(blocks=[SearchReplaceBlock(search="alpha", replace="gamma")]),
+        },
+    )
+    new_note = _note_op("fresh")
+    requests = [
+        module.MemoryUpdateRequest(
+            operations=ResolvedOperations(
+                upsert_operations=[op], delete_file_contents=[], errors=[]
+            ),
+            messages=[],
+            ctx=_ctx(),
+            strict_extract_errors=True,
+            metadata={"session_id": f"s{index}", "source_extraction_id": f"e{index}"},
+        )
+        for index, op in enumerate([stale_edit, new_note])
+    ]
+    updater = module.StreamingMemoryUpdater(
+        registry=_registry(),
+        config=module.StreamingMemoryUpdaterConfig(max_operations_per_update=2),
+    )
+    try:
+        stale_result, fresh_result = await asyncio.gather(
+            *(updater.submit(request) for request in requests), return_exceptions=True
+        )
+    finally:
+        await updater.close()
+    assert isinstance(stale_result, MemoryUpdateError), stale_result
+    assert stale_result.retryable
+    assert not isinstance(fresh_result, BaseException), fresh_result
+    assert fresh_result.apply_result.written_uris == [new_note.uris[0]]
+    assert new_note.uris[0] in fs.files
+    assert MemoryFileUtils.read(fs.files[stale_uri]).plain_content() == "works on beta"
+
+
+@pytest.mark.asyncio
+async def test_strict_trajectory_extraction_raises_retryable_error_for_stale_patch(monkeypatch):
+    from openviking.session.memory.memory_updater import MemoryUpdateResult
+    from openviking.session.train.components import trajectory_analyzer as module
+    from tests.session.train.test_trajectory_analyzer_component import (
+        FakeExtractLoop,
+        FakeVikingFS,
+        _patch_runtime_defaults,
+        _rollout,
+    )
+
+    _patch_runtime_defaults(monkeypatch)
+    monkeypatch.setattr(module, "ExtractLoop", FakeExtractLoop)
+    uri = "viking://user/u/memories/trajectories/task.md"
+    result = MemoryUpdateResult()
+    result.add_error(uri, StalePatchError(uri, "content", "stale patch must still match"))
+    monkeypatch.setattr(
+        module.TrajectoryRolloutAnalyzer,
+        "_apply_trajectory_operations",
+        AsyncMock(return_value=result),
+    )
+    resolver = SimpleNamespace(get_vlm=AsyncMock(return_value=SimpleNamespace(model="fake")))
+    analyzer = module.TrajectoryRolloutAnalyzer(viking_fs=FakeVikingFS(), vlm_resolver=resolver)
+    context = module.TrajectoryAnalyzerContext(
+        request_context=SimpleNamespace(
+            account_id="default", user=SimpleNamespace(account_id="default", user_id="u")
+        ),
+        strict_extract_errors=True,
+    )
+    with pytest.raises(MemoryUpdateError) as raised:
+        await analyzer.analyze(_rollout(), context)
+    assert raised.value.retryable

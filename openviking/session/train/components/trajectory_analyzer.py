@@ -26,7 +26,11 @@ from openviking.session.memory.experience_lineage import (
     trajectory_outcome_tag,
 )
 from openviking.session.memory.memory_isolation_handler import MemoryIsolationHandler
-from openviking.session.memory.memory_updater import ExtractContext, MemoryUpdateResult
+from openviking.session.memory.memory_updater import (
+    ExtractContext,
+    MemoryUpdateResult,
+    strict_apply_error,
+)
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking.session.skill.session_skill_context_provider import (
     SESSION_SKILL_MEMORY_TYPE,
@@ -284,7 +288,10 @@ class TrajectoryRolloutAnalyzer:
                     consumed_experience_uris=consumed_experience_uris,
                 )
             if strict_extract_errors and memory_result.errors:
-                raise memory_result.errors[0][1]
+                raise strict_apply_error(
+                    memory_result,
+                    has_link_updates=bool(getattr(traj_ops, "resolved_links", None)),
+                )
             tracer.info(
                 "[trajectory] Applied memory ops: "
                 f"written={len(memory_result.written_uris)}, "
