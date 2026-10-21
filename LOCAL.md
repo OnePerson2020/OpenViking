@@ -67,8 +67,14 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
     retried (3 archives on 10-20/21); they now raise a MemoryUpdateError when retryable. And a
     preflight rejection of a shared flush dropped the other commits' writes silently (their
     scoped result had no error); those requests are now applied again without the stale ones.
-    A retry re-runs the whole extraction step, so a hot file like profile.md can conflict
-    again; rebasing just the stale operation on the fresh file is the next step if it recurs.
+    Same day, 2 more terminal failures: real batches carry links and append-only cards next to
+    the patch. The cards were written before the merge flush and the links after its rejection,
+    so neither was retryable. Strict submits now preflight the patches before writing the cards,
+    and a rejected request skips its links (MemoryUpdateError no longer vetoes links when the
+    preflight rejected the batch). A writer landing between that preflight and the flush still
+    fails terminally. A retry re-runs the whole extraction step, so a hot file like profile.md
+    can conflict again; rebasing just the stale operation on the fresh file is the next step if
+    it recurs.
   - Upstream #6331 cherry-picked (drop on the next upgrade past it): v0.5.1 ran streaming-batch
     flushes under the submitting session_commit's Task context, so vectorization enqueued after the
     commit completed was rejected ("Task ... is unavailable; rejected work for Embedding", issue
