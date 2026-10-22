@@ -683,6 +683,21 @@ class Session:
                 return {}
         return payload if isinstance(payload, dict) else {}
 
+    @staticmethod
+    def _archive_owner_task_id(meta: Dict[str, Any]) -> str:
+        """Return the task that currently owns an archive's Phase 2 work.
+
+        Recovery hands ownership to a new task without rewriting the Phase 1
+        queue snapshot, so the latest recovery record wins.
+        """
+        recovery = meta.get("recovery")
+        if isinstance(recovery, dict) and recovery.get("task_id"):
+            return str(recovery["task_id"])
+        phase1 = meta.get("phase1")
+        queue_message = phase1.get("queue_message") if isinstance(phase1, dict) else None
+        task_id = queue_message.get("task_id") if isinstance(queue_message, dict) else None
+        return str(task_id or "")
+
     async def _rebuild_pending_tokens(self) -> None:
         """Recompute ``pending_tokens`` from the current message list.
 
@@ -2074,8 +2089,9 @@ class Session:
             queue_snapshot = phase1.get("queue_message")
             if not isinstance(queue_snapshot, dict):
                 raise FailedPreconditionError("Archive Phase 1 queue message is missing")
-            original_msg = SessionCommitMsg.from_dict(queue_snapshot)
-            original_task_id = str(original_msg.task_id or "")
+            # Supersede the current owner, which may be an earlier recovery
+            # task rather than the original Phase 1 task.
+            original_task_id = self._archive_owner_task_id(meta)
             if not original_task_id:
                 raise FailedPreconditionError("Archive Phase 1 task ID is missing")
 
@@ -3339,14 +3355,14 @@ class Session:
         if await self._archives.terminal_state(predecessor_uri) != "pending":
             return True
 
-        phase1 = await self._read_phase1_meta(predecessor_uri)
-        if not phase1:
+        meta = await self._archives.read_meta(predecessor_uri)
+        phase1 = meta.get("phase1")
+        if not isinstance(phase1, dict) or not phase1:
             return False
         if phase1.get("status") != "ready":
             return not await self._ensure_phase1_ready(predecessor_uri)
 
-        queue_message = phase1.get("queue_message")
-        task_id = queue_message.get("task_id") if isinstance(queue_message, dict) else None
+        task_id = self._archive_owner_task_id(meta)
         if not task_id:
             return False
 

@@ -46,11 +46,13 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
     failed tasks and failed archives, the queue error count would only repeat them).
   - Carried as PR commits (drop each once merged): #5758 orphan race, #5759 VLM per-attempt
     deadline, #5802 archive retry (adapted here: `has_work` is async and `MAX_TASKS` is gone in
-    v0.5.1; the PR branch needs the same fix), #5812 JSON image redaction, #6038 filtered path
-    guard, #6069 indented list markers, #6073 inner period, #6083 lock requeue + 2 s pause, #6086
-    fallback batches, #6152 resource tree slot, #6179 write conflicts (merged with #6075: other
-    read errors propagate), #6180 deferred session load, #6181 task listing cache (only its
-    perf commit; the task-registration commit is covered by #6122, the API test tweaks are CI-only).
+    v0.5.1; the PR branch needs the same fix; plus the PR's 2026-10-22 recovery-owner fix
+    `21ef0c846`, not its stored-bytes hash, since this version hashes `messages.jsonl` at
+    retry), #5812 JSON image redaction, #6038 filtered path guard, #6069 indented list markers,
+    #6073 inner period, #6083 lock requeue + 2 s pause, #6086 fallback batches, #6152 resource
+    tree slot, #6179 write conflicts (merged with #6075: other read errors propagate), #6180
+    deferred session load, #6181 task listing cache (only its perf commit; the task-registration
+    commit is covered by #6122, the API test tweaks are CI-only).
   - Local only: VLM call log (`log.model_calls_output`), C++ vectordb log file (PR #5818 fixes
     the sink in C++, which an overlay cannot ship), MinerU error type, queue worker error log,
     session load under the writers' locks, bounded reads + partial-read safety + entity routing
