@@ -25,6 +25,7 @@ class _RecoveryFS:
         self.files = {}
         self._async_agfs = SimpleNamespace(
             pathlock_acquire_tree=AsyncMock(return_value={"lease_ref": "lease"}),
+            pathlock_acquire_exact=AsyncMock(return_value={"lease_ref": "lease"}),
             pathlock_release=AsyncMock(),
         )
 
@@ -309,3 +310,54 @@ async def test_transient_storage_failure_is_not_acknowledged(env):
         with pytest.raises(OSError, match="temporary"):
             await env.session.resume_queued_commit(msg)
     env.tracker.fail.assert_not_awaited()
+
+
+async def test_ready_marker_hashes_stored_bytes_after_privacy_rewrite(env):
+    # write_file() may replace registered privacy values, so the stored bytes
+    # (what retry hashes) differ from the string the commit built.
+    built = env.fs.files[f"{ARCHIVE_URI}/messages.jsonl"]
+    env.phase1_meta["phase1"].update(
+        status="preparing", messages_sha256=hashlib.sha256(built.encode()).hexdigest()
+    )
+    env.fs.files[f"{ARCHIVE_URI}/.meta.json"] = json.dumps(env.phase1_meta)
+    stored = env.fs.files[f"{ARCHIVE_URI}/messages.jsonl"].replace(
+        "preserve me", "{{ov_privacy:ref}}"
+    )
+    env.fs.files[f"{ARCHIVE_URI}/messages.jsonl"] = stored
+    env.messages_sha256 = hashlib.sha256(stored.encode()).hexdigest()
+    await env.session._write_phase1_ready_marker(ARCHIVE_URI)
+
+    published = await env.session._archives.messages_sha256(ARCHIVE_URI)
+    assert published == env.messages_sha256
+    result = await env.retry(
+        env.state(), expected_messages_sha256=published, allow_ownerless_ready=True
+    )
+    assert result["status"] == "accepted"
+
+
+def _recovered_meta(env, task_id="recovery-task"):
+    meta = {**env.phase1_meta, "recovery": {"task_id": task_id, "previous_task_id": "task-1"}}
+    env.fs.files[f"{ARCHIVE_URI}/.meta.json"] = json.dumps(meta)
+
+
+async def test_successor_waits_for_live_recovery_owner(env):
+    _recovered_meta(env)
+    env.fs.files[ARCHIVE_URI] = ""
+    env.tracker.has_work.side_effect = lambda task_id: task_id == "recovery-task"
+    with patch("openviking.service.task_tracker.get_task_tracker", return_value=env.tracker):
+        assert await env.session._can_run_archive(2) is False
+    assert f"{ARCHIVE_URI}/.failed.json" not in env.fs.files
+    env.tracker.fail.assert_not_awaited()
+
+
+async def test_second_recovery_supersedes_previous_recovery_task(env):
+    _recovered_meta(env, "recovery-1")
+    env.tracker.get.side_effect = lambda task_id, **kw: SimpleNamespace(
+        task_id=task_id, status=TaskStatus.PENDING
+    )
+    with patch("openviking.session.session.uuid4", return_value="recovery-2"):
+        result = await env.retry(env.state(), allow_ownerless_ready=True)
+    assert result["previous_task_id"] == "recovery-1"
+    assert env.tracker.fail.await_args.args[0] == "recovery-1"
+    env.tracker.get.assert_awaited_once()
+    assert env.tracker.get.await_args.args[0] == "recovery-1"

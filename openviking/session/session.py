@@ -665,6 +665,21 @@ class Session:
                 return {}
         return payload if isinstance(payload, dict) else {}
 
+    @staticmethod
+    def _archive_owner_task_id(meta: Dict[str, Any]) -> str:
+        """Return the task that currently owns an archive's Phase 2 work.
+
+        Recovery hands ownership to a new task without rewriting the Phase 1
+        queue snapshot, so the latest recovery record wins.
+        """
+        recovery = meta.get("recovery")
+        if isinstance(recovery, dict) and recovery.get("task_id"):
+            return str(recovery["task_id"])
+        phase1 = meta.get("phase1")
+        queue_message = phase1.get("queue_message") if isinstance(phase1, dict) else None
+        task_id = queue_message.get("task_id") if isinstance(queue_message, dict) else None
+        return str(task_id or "")
+
     async def _rebuild_pending_tokens(self) -> None:
         """Recompute ``pending_tokens`` from the current message list.
 
@@ -1181,7 +1196,6 @@ class Session:
         min_raw_tail_steps: int,
         agent_evolution_enabled: bool = True,
         agent_memory_skip_reason: Optional[str] = None,
-        messages_sha256: Optional[str] = None,
         lease_ref: Optional[Any] = None,
     ) -> None:
         """Persist the Phase 1 intent before any destructive root rewrite."""
@@ -1199,10 +1213,6 @@ class Session:
             "retained_message_token_budget": retained_message_token_budget,
             "min_raw_tail_steps": min_raw_tail_steps,
         }
-        if messages_sha256:
-            # Retry callers read this back via get_session_archive() instead of
-            # needing filesystem access to the raw messages.jsonl bytes.
-            payload["messages_sha256"] = messages_sha256
         await self._merge_archive_meta(
             archive_uri,
             {
@@ -1227,6 +1237,15 @@ class Session:
                 "ready_at": get_current_timestamp(),
             }
         )
+        # Hash the stored bytes, not the pre-write string: write_file() may
+        # replace registered privacy values. Retry callers read this back via
+        # get_session_archive() instead of needing raw filesystem access.
+        try:
+            stored = await self._viking_fs.read_file(f"{archive_uri}/messages.jsonl", ctx=self.ctx)
+            phase1["messages_sha256"] = hashlib.sha256(stored.encode("utf-8")).hexdigest()
+        except Exception as exc:
+            if not _is_storage_not_found(exc):
+                raise
         await self._merge_archive_meta(archive_uri, {"phase1": phase1})
 
     async def _archive_file_exists(self, archive_uri: str, file_name: str) -> bool:
@@ -1675,7 +1694,6 @@ class Session:
             )
             phase1_stage = "phase1_persist"
             try:
-                archive_content = "\n".join(m.to_jsonl() for m in messages_to_archive) + "\n"
                 archive_persist_tasks = [
                     self._write_phase1_marker(
                         archive_uri,
@@ -1690,14 +1708,14 @@ class Session:
                         min_raw_tail_steps=effective_min_tail,
                         agent_evolution_enabled=agent_evolution_enabled,
                         agent_memory_skip_reason=agent_memory_skip_reason,
-                        messages_sha256=hashlib.sha256(archive_content.encode("utf-8")).hexdigest(),
                     )
                 ]
                 if self._viking_fs:
+                    lines = [m.to_jsonl() for m in messages_to_archive]
                     archive_persist_tasks.append(
                         self._viking_fs.write_file(
                             uri=f"{archive_uri}/messages.jsonl",
-                            content=archive_content,
+                            content="\n".join(lines) + "\n",
                             ctx=self.ctx,
                         )
                     )
@@ -2060,8 +2078,9 @@ class Session:
             queue_snapshot = phase1.get("queue_message")
             if not isinstance(queue_snapshot, dict):
                 raise FailedPreconditionError("Archive Phase 1 queue message is missing")
-            original_msg = SessionCommitMsg.from_dict(queue_snapshot)
-            original_task_id = str(original_msg.task_id or "")
+            # Supersede the current owner, which may be an earlier recovery
+            # task rather than the original Phase 1 task.
+            original_task_id = self._archive_owner_task_id(meta)
             if not original_task_id:
                 raise FailedPreconditionError("Archive Phase 1 task ID is missing")
 
@@ -3315,14 +3334,14 @@ class Session:
         if await self._archives.terminal_state(predecessor_uri) != "pending":
             return True
 
-        phase1 = await self._read_phase1_meta(predecessor_uri)
-        if not phase1:
+        meta = await self._archives.read_meta(predecessor_uri)
+        phase1 = meta.get("phase1")
+        if not isinstance(phase1, dict) or not phase1:
             return False
         if phase1.get("status") != "ready":
             return not await self._ensure_phase1_ready(predecessor_uri)
 
-        queue_message = phase1.get("queue_message")
-        task_id = queue_message.get("task_id") if isinstance(queue_message, dict) else None
+        task_id = self._archive_owner_task_id(meta)
         if not task_id:
             return False
 
