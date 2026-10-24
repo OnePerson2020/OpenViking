@@ -59,6 +59,16 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
     (#3526; the fallback batch of #6086 is capped at half the input budget so it fits the budget
     check), agent-artifact reason skip, evolution once per commit (#6006), expansion failure log, agent-memory thinking switch
     (`memory.agent_extraction_thinking`; off since 2026-10-24: same judged quality, 5x faster, no runaway output).
+  - Local only, 2026-10-25 (truncation review): user-memory prefetch searches each 5000-char
+    stretch of the batch in each of entities/cases/preferences (top 5 each) instead of one
+    5000-char query over all three (top 5), and the model gets the search tool scoped to those
+    directories (the prompt already offered read/search and allows reading only listed URIs).
+    Offline on 80 archives (`~/ov-eval-20261025/prefetch_cov.py`): existing cards production
+    updated were listed 77% -> 88% (large archives 70% -> 77%), 5 -> 18 URIs shown, 1 -> 4
+    searches; 2000-char stretches were within noise (90%). Agent-memory extraction sees 2000 head
+    + 2000 tail chars of each tool output (was the first 500). No guard stops the model reading
+    so many listed cards that the next call exceeds the input budget (p90 card <= 3k tokens,
+    ~220k headroom); watch for MemoryInputBudgetError.
   - After the port (2026-10-20): upstream #6301 cherry-picked (retry a memory step whose fresh
     read failed before any write; drop on the next upgrade past it), plus the local "stale patch
     preflight": since #6179 a patch over a file another commit changed after the model read it
