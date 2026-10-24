@@ -190,6 +190,12 @@ release tag, and the files listed in `ops/upstream-tests.txt`.
 - `embedding.dense`: gpubox Qwen3-Embedding-4B, `provider: openai`, `dimension` 1024,
   `query_param: "query"` (the server prepends the Qwen retrieval instruction for queries).
 - `queue_workers.session_commit.max_concurrent` 12.
+- `memory.session_auto_commit.enabled` true + `server.user_config_defaults.auto_commit_policy`
+  (150000 tokens / 1000 messages, 1000 is the clamp max). The switch is not a master switch:
+  a new session takes `user_config_defaults` first regardless of it, and the message-write
+  threshold check ignores it. Turning it off stops only the idle scan; to stop threshold commits,
+  remove `user_config_defaults.auto_commit_policy`. The policy is copied into each session meta
+  at creation, so existing sessions keep the old one until `PATCH /api/v1/sessions/{id}/config`.
 - A commit that waits for its predecessor is requeued after a 2 s pause inside the worker
   ("diagnostics + queue: …pause before commit requeue"). Without it, each waiting message
   cycles ~2/s (7-9% of a core, 2026-10-09). Upstream v0.5.1 still requeues instantly (PR #6083).
