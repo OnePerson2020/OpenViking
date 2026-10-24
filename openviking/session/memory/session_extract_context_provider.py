@@ -53,6 +53,19 @@ _PREFETCH_SEARCH_TOOL_FIELD_MAX_CHARS = 500
 _PREFETCH_SEARCH_SEGMENT_CHARS = 5000
 _PREFETCH_SEARCH_PER_DIR_LIMIT = 5
 _PREFETCH_SEARCH_CONCURRENCY = 8
+# Local: agent-memory extraction sees the head and the tail of each tool output, where
+# errors and results usually are; upstream kept only the first 500 chars. Batches are
+# sized on full outputs, so this cannot push a batch over the input budget.
+_TOOL_OUTPUT_HEAD_CHARS = 2000
+_TOOL_OUTPUT_TAIL_CHARS = 2000
+
+
+def _head_and_tail(text: str) -> str:
+    cut = len(text) - _TOOL_OUTPUT_HEAD_CHARS - _TOOL_OUTPUT_TAIL_CHARS
+    if cut <= 0:
+        return text
+    head, tail = text[:_TOOL_OUTPUT_HEAD_CHARS], text[-_TOOL_OUTPUT_TAIL_CHARS:]
+    return f"{head}\n... [{cut} chars omitted] ...\n{tail}"
 _RESOURCE_REASON_LANGUAGE_RE = re.compile(
     r"(?im)^\s*(?:User reason|用户说明|用户原因|用户理由)[:：]\s*(.+?)\s*$"
 )
@@ -346,7 +359,7 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
                     if part.tool_input:
                         fields.append(f"input={part.tool_input}")
                     if part.tool_output:
-                        fields.append(f"output={part.tool_output[:500]}")
+                        fields.append(f"output={_head_and_tail(part.tool_output)}")
                     if part.duration_ms is not None:
                         fields.append(f"duration_ms={part.duration_ms}")
                     if part.skill_uri:
