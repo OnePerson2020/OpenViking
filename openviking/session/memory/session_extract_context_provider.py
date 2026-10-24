@@ -6,6 +6,7 @@ Session Extract Context Provider - 会话提取 Provider 实现
 从会话消息中提取记忆的实现。
 """
 
+import asyncio
 import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -48,6 +49,10 @@ _PREFETCH_SEARCH_QUERY_MAX_CHARS = 5000
 _PREFETCH_SEARCH_TEXT_PART_MAX_CHARS = 1000
 _PREFETCH_SEARCH_ASSISTANT_TEXT_PART_MAX_CHARS = 500
 _PREFETCH_SEARCH_TOOL_FIELD_MAX_CHARS = 500
+# Local: prefetch searches each stretch of this many query chars, in each memory directory.
+_PREFETCH_SEARCH_SEGMENT_CHARS = 5000
+_PREFETCH_SEARCH_PER_DIR_LIMIT = 5
+_PREFETCH_SEARCH_CONCURRENCY = 8
 _RESOURCE_REASON_LANGUAGE_RE = re.compile(
     r"(?im)^\s*(?:User reason|用户说明|用户原因|用户理由)[:：]\s*(.+?)\s*$"
 )
@@ -84,6 +89,7 @@ class SessionExtractContextProvider(ExtractContextProvider):
         self._isolation_handler = isolation_handler
         self._read_file_contents: Dict[str, MemoryFile] = {}
         self.partial_read_fields: Dict[str, Dict[str, List[str]]] = {}
+        self._search_dirs: List[str] = []  # Local: the model's search stays in prefetch's dirs
         # 读取 eager_prefetch 配置
         config = get_openviking_config()
         self._eager_prefetch = config.memory.eager_prefetch if config.memory else False
@@ -381,44 +387,68 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
         if not isinstance(self.messages, list):
             return ""
 
-        primary_sections: List[str] = []
-        supporting_sections: List[str] = []
-
-        for msg in self.messages:
-            role = getattr(msg, "role", "")
-            speaker = getattr(msg, "peer_id", "") or role
-            parts = getattr(msg, "parts", [])
-
-            text_parts: List[str] = []
-
-            for part in parts:
-                if hasattr(part, "text") and part.text:
-                    limit = (
-                        _PREFETCH_SEARCH_TEXT_PART_MAX_CHARS
-                        if role == "user"
-                        else _PREFETCH_SEARCH_ASSISTANT_TEXT_PART_MAX_CHARS
-                    )
-                    text_parts.append(self._truncate_prefetch_query_text(part.text, limit))
-            if text_parts:
-                section = f"{speaker}: " + "\n".join(text_parts)
-                if role == "user":
-                    primary_sections.append(section)
-                else:
-                    supporting_sections.append(section)
-
-        query = "\n\n".join(primary_sections + supporting_sections)
+        query = self._join_prefetch_query(self._prefetch_query_sections())
         if not query.strip():
             query = self._assemble_conversation(self.messages)
 
         return self._truncate_prefetch_query_text(query, _PREFETCH_SEARCH_QUERY_MAX_CHARS)
 
-    def create_tool_context(self, default_search_uris=[]):
+    def _prefetch_query_sections(self) -> List[tuple]:
+        """(is_user, "speaker: text") per message with text, in conversation order."""
+        sections = []
+        for msg in self.messages if isinstance(self.messages, list) else []:
+            role = getattr(msg, "role", "")
+            limit = (
+                _PREFETCH_SEARCH_TEXT_PART_MAX_CHARS
+                if role == "user"
+                else _PREFETCH_SEARCH_ASSISTANT_TEXT_PART_MAX_CHARS
+            )
+            text_parts = [
+                self._truncate_prefetch_query_text(part.text, limit)
+                for part in getattr(msg, "parts", [])
+                if getattr(part, "text", None)
+            ]
+            if text_parts:
+                speaker = getattr(msg, "peer_id", "") or role
+                sections.append((role == "user", f"{speaker}: " + "\n".join(text_parts)))
+        return sections
+
+    @staticmethod
+    def _join_prefetch_query(sections: List[tuple]) -> str:
+        # User text first: it names the topics, assistant text only supports them.
+        user = [s for is_user, s in sections if is_user]
+        return "\n\n".join(user + [s for is_user, s in sections if not is_user])
+
+    def _prefetch_search_queries(self) -> List[str]:
+        """Local: one query per consecutive stretch of the batch that fits the query cap.
+
+        Upstream's single query (all user text first, cut at 5000 chars) covered only the
+        first few user messages of a long batch; later topics never reached the search.
+        """
+        segments: List[List[tuple]] = []
+        size = 0
+        for section in self._prefetch_query_sections():
+            if segments and size + len(section[1]) <= _PREFETCH_SEARCH_SEGMENT_CHARS:
+                segments[-1].append(section)
+                size += len(section[1]) + 2
+            else:
+                segments.append([section])
+                size = len(section[1])
+        queries = [
+            self._truncate_prefetch_query_text(
+                self._join_prefetch_query(segment), _PREFETCH_SEARCH_QUERY_MAX_CHARS
+            )
+            for segment in segments
+        ]
+        return queries or [self._build_prefetch_search_query() or "conversation"]
+
+    def create_tool_context(self, default_search_uris=None):
         extract_context = self.get_extract_context()
         tool_ctx = ToolContext(
             viking_fs=self._viking_fs,
             request_ctx=self._ctx,
             transaction_handle=self._transaction_handle,
-            default_search_uris=default_search_uris,
+            default_search_uris=default_search_uris or self._search_dirs,
             read_file_contents=self._read_file_contents,
             page_id_map=extract_context.page_id_map,
             partial_read_fields=self.partial_read_fields,
@@ -564,15 +594,28 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
         # 在每个之前 ls 的目录内执行 search（替换原来的 ls操作）
         files_to_read_from_search = []  # 收集需要读取的文件（eager_prefetch 模式）
 
-        # 批量 search：所有目录一次搜索
+        # Local: every stretch of the batch searches every directory (top-5 each). Upstream
+        # ran one search over all directories, so entities, cases and preferences shared
+        # five slots for the whole batch.
         if ls_dirs:
-            dir_list = list(ls_dirs)
-            search_query = self._build_prefetch_search_query()
-            if not search_query:
-                search_query = "conversation"
-            search_uris = await self.search_files(
-                query=search_query,
-                search_uris=dir_list,
+            dir_list = sorted(ls_dirs)
+            self._search_dirs = dir_list
+            queries = self._prefetch_search_queries()
+            semaphore = asyncio.Semaphore(_PREFETCH_SEARCH_CONCURRENCY)
+
+            async def search_one(query: str, dir_uri: str) -> List[str]:
+                async with semaphore:
+                    return await self.search_files(
+                        query=query, search_uris=[dir_uri], limit=_PREFETCH_SEARCH_PER_DIR_LIMIT
+                    )
+
+            hits = await asyncio.gather(*(search_one(q, d) for q in queries for d in dir_list))
+            search_uris = list(dict.fromkeys(uri for uris in hits for uri in uris))
+            logger.info(
+                "Prefetch search: %d queries x %d dirs -> %d memories",
+                len(queries),
+                len(dir_list),
+                len(search_uris),
             )
             result_value = search_uris
             if self._eager_prefetch:
@@ -632,7 +675,9 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
         if self._eager_prefetch:
             # eager_prefetch 模式下不提供工具，所有内容已在 prefetch 中加载
             return []
-        return ["read"]
+        # Local: search too (the prompt already offers read/search and allows reading only
+        # listed URIs), so a memory prefetch missed is still reachable.
+        return ["read", "search"]
 
     def get_memory_schemas(self, ctx: RequestContext) -> List[Any]:
         """获取需要参与的 memory schemas（内部自动加载）"""
