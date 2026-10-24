@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from pydantic_core import to_jsonable_python
+
 from openviking.session.memory.extraction_output_protocol import prompt_fragments as prompts
 from openviking.session.memory.extraction_output_protocol.base import (
     ExtractionOutputContext,
@@ -96,7 +98,7 @@ class JsonExtractionOutputProtocol(ExtractionOutputProtocol):
         )
 
     def render_patch_repair(self, patch_errors: list[dict[str, Any]]) -> str:
-        details = json.dumps(patch_errors, ensure_ascii=False, indent=2)
+        details = json.dumps(patch_errors, ensure_ascii=False, indent=2, default=to_jsonable_python)
         return (
             "The SEARCH/REPLACE or DELETE patch could not be applied to the target memory file. "
             "The SEARCH or DELETE text must be copied exactly from the read result of the file bound to that operation's page_id. "
@@ -111,7 +113,7 @@ class JsonExtractionOutputProtocol(ExtractionOutputProtocol):
         )
 
     def render_resolution_repair(self, issues: list[dict[str, Any]]) -> str:
-        details = json.dumps(issues, ensure_ascii=False, indent=2)
+        details = json.dumps(issues, ensure_ascii=False, indent=2, default=to_jsonable_python)
         return (
             "Some event operations could not resolve a safe write target. "
             "Return only corrected event operations for the failed items below; leave every "

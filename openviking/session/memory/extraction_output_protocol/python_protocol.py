@@ -13,6 +13,8 @@ import tokenize
 from dataclasses import dataclass, field
 from typing import Any, get_args, get_origin
 
+from pydantic_core import to_jsonable_python
+
 from openviking.core.peer_id import safe_peer_id
 from openviking.session.memory.dataclass import MemoryField, MemoryFile, MemoryTypeSchema
 from openviking.session.memory.extraction_output_protocol import prompt_fragments as prompts
@@ -339,7 +341,7 @@ class PythonExtractionOutputProtocol(ExtractionOutputProtocol):
         return "The model returned an empty Python program"
 
     def render_patch_repair(self, patch_errors: list[dict[str, Any]]) -> str:
-        details = json.dumps(patch_errors, ensure_ascii=False, indent=2)
+        details = json.dumps(patch_errors, ensure_ascii=False, indent=2, default=to_jsonable_python)
         return (
             "An obj.field.edit()/drop() change could not be applied to the target memory object. "
             "The search= (and drop text=) must be copied verbatim from the current field value shown "
@@ -357,7 +359,7 @@ class PythonExtractionOutputProtocol(ExtractionOutputProtocol):
         )
 
     def render_resolution_repair(self, issues: list[dict[str, Any]]) -> str:
-        details = json.dumps(issues, ensure_ascii=False, indent=2)
+        details = json.dumps(issues, ensure_ascii=False, indent=2, default=to_jsonable_python)
         return (
             "Some sdk.create_events(...) calls could not resolve a safe write target. "
             "Re-emit ONLY corrected create_events() calls for the failed items below; do not "
