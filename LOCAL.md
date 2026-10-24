@@ -57,7 +57,8 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
     the sink in C++, which an overlay cannot ship), MinerU error type, queue worker error log,
     session load under the writers' locks, bounded reads + partial-read safety + entity routing
     (#3526; the fallback batch of #6086 is capped at half the input budget so it fits the budget
-    check), agent-artifact reason skip, evolution once per commit (#6006), expansion failure log.
+    check), agent-artifact reason skip, evolution once per commit (#6006), expansion failure log, agent-memory thinking switch
+    (`memory.agent_extraction_thinking`; off since 2026-10-24: same judged quality, 5x faster, no runaway output).
   - After the port (2026-10-20): upstream #6301 cherry-picked (retry a memory step whose fresh
     read failed before any write; drop on the next upgrade past it), plus the local "stale patch
     preflight": since #6179 a patch over a file another commit changed after the model read it

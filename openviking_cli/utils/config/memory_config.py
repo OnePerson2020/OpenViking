@@ -93,6 +93,13 @@ class MemoryConfig(BaseModel):
         ge=512,
         description="Maximum estimated tokens exposed by one memory read.",
     )
+    agent_extraction_thinking: bool = Field(
+        default=True,
+        description=(
+            "Local: allow model thinking in agent-memory extraction (trajectories, experiences), "
+            "which requests it. False runs those calls without thinking."
+        ),
+    )
     extraction_enabled: bool = Field(
         default=True,
         description=(

@@ -208,6 +208,12 @@ class ExtractLoop:
         self._entity_similar_pending: List[str] = []  # notes for the next round
         self.context_provider = context_provider
         self.thinking = thinking
+        # Local: memory.agent_extraction_thinking=false turns off the thinking the agent-memory
+        # callers (session/train) request; None still defers to the backend.
+        if thinking and not getattr(
+            get_openviking_config().memory, "agent_extraction_thinking", True
+        ):
+            self.thinking = False
         self.max_output_tokens = max_output_tokens
         # Resolved in run() via _resolve_effective_max_output_tokens(); default to
         # the extraction floor so a direct _call_llm() before run() stays safe.
