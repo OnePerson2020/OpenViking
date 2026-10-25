@@ -56,15 +56,20 @@ _PREFETCH_SEARCH_CONCURRENCY = 8
 # Local: agent-memory extraction sees the head and the tail of each tool output, where
 # errors and results usually are; upstream kept only the first 500 chars. Batches are
 # sized on full outputs, so this cannot push a batch over the input budget.
-_TOOL_OUTPUT_HEAD_CHARS = 2000
-_TOOL_OUTPUT_TAIL_CHARS = 2000
+# Tool inputs (Bash heredocs, Write bodies) get the same cut; they were sent whole.
+_TOOL_OUTPUT_HEAD_CHARS = 500
+_TOOL_OUTPUT_TAIL_CHARS = 1500
+_TOOL_INPUT_HEAD_CHARS = 500
+_TOOL_INPUT_TAIL_CHARS = 500
 
 
-def _head_and_tail(text: str) -> str:
-    cut = len(text) - _TOOL_OUTPUT_HEAD_CHARS - _TOOL_OUTPUT_TAIL_CHARS
+def _head_and_tail(
+    text: str, head_chars: int = _TOOL_OUTPUT_HEAD_CHARS, tail_chars: int = _TOOL_OUTPUT_TAIL_CHARS
+) -> str:
+    cut = len(text) - head_chars - tail_chars
     if cut <= 0:
         return text
-    head, tail = text[:_TOOL_OUTPUT_HEAD_CHARS], text[-_TOOL_OUTPUT_TAIL_CHARS:]
+    head, tail = text[:head_chars], text[-tail_chars:]
     return f"{head}\n... [{cut} chars omitted] ...\n{tail}"
 _RESOURCE_REASON_LANGUAGE_RE = re.compile(
     r"(?im)^\s*(?:User reason|用户说明|用户原因|用户理由)[:：]\s*(.+?)\s*$"
@@ -357,7 +362,11 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
                     if part.tool_status:
                         fields.append(f"status={part.tool_status}")
                     if part.tool_input:
-                        fields.append(f"input={part.tool_input}")
+                        fields.append(
+                            "input=" + _head_and_tail(
+                                str(part.tool_input), _TOOL_INPUT_HEAD_CHARS, _TOOL_INPUT_TAIL_CHARS
+                            )
+                        )
                     if part.tool_output:
                         fields.append(f"output={_head_and_tail(part.tool_output)}")
                     if part.duration_ms is not None:

@@ -69,6 +69,13 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
     + 2000 tail chars of each tool output (was the first 500). No guard stops the model reading
     so many listed cards that the next call exceeds the input budget (p90 card <= 3k tokens,
     ~220k headroom); watch for MemoryInputBudgetError.
+  - Local only, 2026-10-25 (extraction token amplification): model-calls rows carry `step`
+    (ExtractLoop provider class, `working_memory`, else the telemetry stage), so tokens split
+    per step. Agent-memory extraction now sees tool outputs as 500 head + 1500 tail chars (was
+    2000 + 2000) and tool inputs as 500 + 500 (were sent whole; Bash heredocs, Write bodies).
+    Replay of 24 10k-50k archives (`~/ov-ab-20261025/RESULTS.md`): first-call input trajectory
+    -23%, experience -15%, user memory unchanged; judged experience quality not worse (majority
+    7:2 / 9:1 vs a 5:3 rerun noise floor, n~10). Overall saving ~7-8% of extraction tokens.
   - After the port (2026-10-20): upstream #6301 cherry-picked (retry a memory step whose fresh
     read failed before any write; drop on the next upgrade past it), plus the local "stale patch
     preflight": since #6179 a patch over a file another commit changed after the model read it
