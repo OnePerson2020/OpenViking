@@ -5,7 +5,7 @@
 
 import asyncio
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -81,7 +81,15 @@ def _configure_test_env(monkeypatch, tmp_path):
     monkeypatch.setenv(OPENVIKING_CONFIG_ENV, str(config_path))
     OpenVikingConfigSingleton.reset_instance()
 
-    with patch("openviking.utils.agfs_utils.create_agfs_client", return_value=mock_agfs):
+    # MockLocalAGFS cannot dequeue QueueFS entries, and the startup system-asset sync
+    # (#6374) waits for its ContentWrite task: initialize() would never return.
+    with (
+        patch("openviking.utils.agfs_utils.create_agfs_client", return_value=mock_agfs),
+        patch(
+            "openviking.system_assets.sync.SystemAssetSynchronizer.sync",
+            AsyncMock(return_value=0),
+        ),
+    ):
         yield
 
     OpenVikingConfigSingleton.reset_instance()
