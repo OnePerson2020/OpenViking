@@ -8,12 +8,14 @@ import re
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from contextvars import ContextVar
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
 _call: ContextVar['CallObservation | None'] = ContextVar('model_call_observation', default=None)
+_step: ContextVar[str | None] = ContextVar('model_call_step', default=None)
 _lock = threading.Lock()
 _sinks: dict[str, logging.Logger] = {}
 
@@ -58,6 +60,26 @@ def _emit(record: dict[str, Any], file_name: str | None = None) -> None:
         pass
 
 
+@contextmanager
+def call_step(name: str):
+    """Label model calls in this context (e.g. which extraction step made them)."""
+    token = _step.set(_identifier(name))
+    try:
+        yield
+    finally:
+        _step.reset(token)
+
+
+def _current_step() -> str | None:
+    if _step.get() is not None:
+        return _step.get()
+    try:
+        from openviking.telemetry import get_current_telemetry_stage
+        return _identifier(get_current_telemetry_stage())
+    except Exception:
+        return None
+
+
 class CallObservation:
     def __init__(self, *, model: str, input_tokens: int, max_tokens: int | None,
                  tool_names: list[str], thinking: bool, timeout: float):
@@ -68,6 +90,7 @@ class CallObservation:
             'input_estimated_tokens': input_tokens, 'max_output_tokens': max_tokens,
             'tools': [_identifier(name) for name in tool_names],
             'thinking': thinking, 'stream': False, 'timeout_s': timeout,
+            'step': _current_step(),
         }
         try:
             from openviking.service.task_work_index import get_task_context

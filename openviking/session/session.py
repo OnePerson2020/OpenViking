@@ -83,6 +83,7 @@ from openviking.session.working_memory import (
 )
 from openviking.storage.abstract_overview import render_abstract_overview
 from openviking.storage.errors import LockAcquisitionError
+from openviking.models.call_diagnostics import call_step
 from openviking.telemetry import get_current_telemetry, tracer
 from openviking.utils.model_retry import is_retryable_api_error, retry_async
 from openviking.utils.time_utils import get_current_timestamp
@@ -2646,17 +2647,18 @@ class Session:
                             extraction_messages,
                             extraction_batch_limits,
                         )
-                        if checkpoint_requests or len(summary_batches) <= 1:
-                            generated = await self._generate_archive_summary_async(
-                                extraction_messages,
-                                **summary_kwargs,
-                            )
-                        else:
-                            generated = await self._generate_archive_summary_with_batching(
-                                summary_batches,
-                                limits=extraction_batch_limits,
-                                **summary_kwargs,
-                            )
+                        with call_step("working_memory"):
+                            if checkpoint_requests or len(summary_batches) <= 1:
+                                generated = await self._generate_archive_summary_async(
+                                    extraction_messages,
+                                    **summary_kwargs,
+                                )
+                            else:
+                                generated = await self._generate_archive_summary_with_batching(
+                                    summary_batches,
+                                    limits=extraction_batch_limits,
+                                    **summary_kwargs,
+                                )
                         summary_result = (
                             generated
                             if isinstance(generated, _ArchiveSummaryResult)

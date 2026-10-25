@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from openviking.models.call_diagnostics import call_step
 from openviking.models.vlm.base import ToolCall, VLMBase
 from openviking.server.identity import RequestContext
 from openviking.session.memory.context_budget import (
@@ -1402,7 +1403,7 @@ class ExtractLoop:
             tools = self._tool_schemas
             tool_choice = "auto"
         check_input_budget({"messages": messages, "tools": tools})
-        with bind_telemetry_stage("memory_extract"):
+        with bind_telemetry_stage("memory_extract"), call_step(type(self.context_provider).__name__):
             response = await self.vlm.get_completion_async(
                 messages=messages,
                 tools=tools,
