@@ -172,6 +172,14 @@ async def service(
         "openviking.utils.agfs_utils.create_agfs_client",
         lambda *args, **kwargs: mock_agfs,
     )
+    # MockLocalAGFS cannot dequeue QueueFS entries, and the startup system-asset sync
+    # (#6374) waits for its ContentWrite task: initialize() would never return.
+    async def skip_system_asset_sync(self, ctx):
+        return 0
+
+    monkeypatch.setattr(
+        "openviking.system_assets.sync.SystemAssetSynchronizer.sync", skip_system_asset_sync
+    )
     OpenVikingConfigSingleton.reset_instance()
     OpenVikingConfigSingleton.initialize(
         config_dict={
