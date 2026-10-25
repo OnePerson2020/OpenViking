@@ -14,18 +14,16 @@ What the OpenViking memory plugins do not do, kept outside the plugin directorie
 - `pi/openviking-artifacts.ts`: the same for pi, as its own extension next to the official
   `openviking` one (message_end: stage locally; turn_end/session_start: upload).
 - `recall-gate/`: Claude Code UserPromptSubmit gate. One bjev call (LocalBridge `/v1/systemone`,
-  1 s timeout) scores whether the prompt needs memory and whether it can be read without the
-  earlier turns. Below 0.15 need: no recall. Context-dependent with need >= 0.4: the plugin's
-  `auto-recall.mjs` with its query-expansion planner, which reads the session. Otherwise, or on
-  any bjev failure: the same script with `OPENVIKING_RECALL_QUERY_EXPANSION=off`, recalling on
-  the prompt as written. Needs `plugin.claude_code.autoRecall: false` in ovcli.conf so the
-  plugin's own hook stands down; the gate re-enables it per call with `OPENVIKING_AUTO_RECALL=1`.
-  Prompts the plugin's `recallQueryFilters` drop skip before bjev; ovcli.conf drops teammate
-  messages and task notifications with `d/^<(agent-message|task-notification)\b/`. Decisions:
+  1.5 s timeout) scores whether the prompt needs memory. Below 0.15 need: no recall. Otherwise,
+  or on any bjev failure: the plugin's `auto-recall.mjs`, with its query-expansion planner.
+  Needs `plugin.claude_code.autoRecall: false` in ovcli.conf so the plugin's own hook stands
+  down; the gate re-enables it per call with `OPENVIKING_AUTO_RECALL=1`. Prompts the plugin's
+  `recallQueryFilters` drop skip before bjev; ovcli.conf drops teammate messages and task
+  notifications with `d/^<(agent-message|task-notification)\b/`. Decisions:
   `~/.openviking/logs/recall-gate.log`. Test: `node --test recall-gate/*.test.mjs`; re-tune with
   `node recall-gate/eval.mjs`. Plugin surfaces it relies on (install.sh checks them): `scripts/
   auto-recall.mjs`, `scripts/config.mjs` `loadConfig`, `scripts/shared/input-filters.mjs`, and the
-  `OPENVIKING_AUTO_RECALL` / `OPENVIKING_RECALL_QUERY_EXPANSION` env overrides.
+  `OPENVIKING_AUTO_RECALL` env override.
 - `skills/ov-session-replay/`: replay past sessions L0→L3 (no upstream equivalent as of
   v0.5.0), linked into the CC/Codex/pi skill dirs.
 

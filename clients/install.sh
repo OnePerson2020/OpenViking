@@ -30,6 +30,6 @@ grep -q "recall-gate/hook.mjs" "$HOME/.claude/settings.json" 2>/dev/null && echo
 # recall-gate drives the plugin through these; an upgrade that moves them breaks the gate silently
 R=$(jq -r '.plugins["openviking-memory@openviking"][0].installPath // empty' "$HOME/.claude/plugins/installed_plugins.json" 2>/dev/null)/scripts
 for f in auto-recall.mjs config.mjs shared/input-filters.mjs; do [ -f "$R/$f" ] || echo "MISSING plugin $R/$f: recall-gate needs updating"; done
-grep -q OPENVIKING_RECALL_QUERY_EXPANSION "$R/shared/config-schema.mjs" 2>/dev/null && grep -q OPENVIKING_AUTO_RECALL "$R/shared/config-schema.mjs" \
+grep -q OPENVIKING_AUTO_RECALL "$R/shared/config-schema.mjs" 2>/dev/null \
   && echo "ok   plugin still has the auto-recall.mjs / filter / env surfaces recall-gate uses" \
-  || echo "MISSING OPENVIKING_AUTO_RECALL / OPENVIKING_RECALL_QUERY_EXPANSION in the plugin: recall-gate needs updating"
+  || echo "MISSING OPENVIKING_AUTO_RECALL in the plugin: recall-gate needs updating"
