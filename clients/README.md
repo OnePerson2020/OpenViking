@@ -5,7 +5,7 @@ What the OpenViking memory plugins do not do, kept outside the plugin directorie
 
 - `artifact-capture/`: images and files an agent produced or attached, for Claude Code,
   Codex and pi → local blob + manifest (`~/.openviking/artifact-capture/`, durable before
-  any network I/O) → `viking://resources/agent-artifacts/<harness>/<ovSessionId>/` + a link
+  any network I/O; the blob is deleted once linked) → `viking://resources/agent-artifacts/<harness>/<ovSessionId>/` + a link
   message in the same OV session. CC/Codex run `hook.mjs` on Stop/SubagentStop
   (`~/.claude/settings.json`, `~/.codex/hooks.json`); `backfill-codex.mjs` replays missed
   Codex threads. Tests: `node --test artifact-capture/*.test.mjs`.
