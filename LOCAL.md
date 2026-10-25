@@ -1,7 +1,7 @@
 # OpenViking local patch series
 
 `local` = our patches, one feature per commit, on top of the upstream release tag
-(`v0.5.1` from volcengine/OpenViking; this clone is shallow). Upstream's
+(`v0.5.2` from volcengine/OpenViking; this clone is shallow). Upstream's
 README is `README.md`; this file is ours. Fixes worth proposing upstream are
 cherry-picked from `local` onto `upstream/main` on the Mac (`~/.openviking/openviking-repo`).
 Until 2026-10-09 the series sat on a synthetic sdist import; that history is kept in
@@ -29,6 +29,21 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
 
 ## Upgrade notes
 
+- v0.5.2 (2026-10-25): `local` rebased from v0.5.1 onto `v0.5.2` (v0.5.1 series kept as branch
+  `local-0.5.1`). None of our open PRs is merged yet; all are still carried.
+  - Dropped, covered by v0.5.2: the #6301 and #6331 cherry-picks; evolution once per commit
+    (#6006 workaround; #6273 groups cases by evaluator feedback, so without an evaluator one
+    analysis and one training cover every case); #6180 deferred session load (#6332 removed the
+    Phase 2 `session.load()` altogether, and carrying #6180 would have put one back).
+  - Reworked for #6398 (fresh-read failures retried in place, no step retry for any
+    `MemoryUpdateError`): the stale-patch preflight keeps `MemoryUpdateError.retryable` and
+    `has_link_updates`, now true only when every error is a `StalePatchError` and nothing was
+    written; a failed fresh read is no longer a reason to regenerate the step.
+  - Reworked for #6104 (`thinking: Optional[bool]`, None = backend default):
+    `memory.agent_extraction_thinking=false` only turns off an explicit `thinking=True`.
+  - Kept although related: session load under the writers' locks (Phase 2 no longer loads,
+    other readers still do); the strict experience-write check now follows #6273's
+    `_train_commit_analysis`.
 - v0.5.1 (2026-10-20): the series was rebuilt on `v0.5.1` as one commit per feature instead
   of replaying 110 commits (v0.5.0 series kept as branch `local-0.5.0`, last `7788de9b5`).
   Open upstream PRs are carried as their PR commits, so a merged PR drops out cleanly.
