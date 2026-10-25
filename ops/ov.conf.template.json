@@ -23,7 +23,19 @@
     "max_retries": 5,
     "timeout": 1800.0,
     "api_key": "<secret>",
-    "max_tokens": 40000
+    "max_tokens": 40000,
+    "credentials": [
+      {
+        "id": "ds-psqxp",
+        "model": "<private>",
+        "api_key": "<secret>"
+      },
+      {
+        "id": "ds-5vbf7",
+        "model": "<private>",
+        "api_key": "<secret>"
+      }
+    ]
   },
   "server": {
     "host": "::",
@@ -31,6 +43,12 @@
     "root_api_key": "<secret>",
     "agent_evolution": {
       "enabled": true
+    },
+    "user_config_defaults": {
+      "auto_commit_policy": {
+        "pending_token_threshold": 150000,
+        "message_count_threshold": 1000
+      }
     }
   },
   "log": {
@@ -51,12 +69,13 @@
   },
   "memory": {
     "eager_prefetch": false,
-    "extraction_input_token_budget": 160000,
+    "extraction_input_token_budget": 400000,
     "extraction_read_token_budget": 16000,
     "session_auto_commit": {
       "enabled": true
     },
-    "extraction_output_format": "json"
+    "extraction_output_format": "json",
+    "agent_extraction_thinking": false
   },
   "pdf": {
     "strategy": "mineru",
@@ -68,14 +87,5 @@
       "api_key": "<secret>",
       "api_key_type": "user"
     }
-  },
-  "query_planner": {
-    "provider": "volcengine",
-    "model": "<private>",
-    "api_base": "<private>",
-    "temperature": 0.0,
-    "max_retries": 5,
-    "timeout": 300.0,
-    "api_key": "<secret>"
   }
 }

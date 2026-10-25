@@ -190,15 +190,23 @@ release tag, and the files listed in `ops/upstream-tests.txt`.
   doubled the waste, ~13 min per call). Samples: `logs/truncated-outputs.jsonl`. Since v0.5.1
   (#5759) the timeout bounds each RetryVLM attempt, not the whole call (local v0.5.0 had one
   deadline over all retries): worst case is (`vlm.max_retries` + 1) x 1800 s.
-- `memory.extraction_input_token_budget` 160000 / `extraction_read_token_budget` 16000: every
-  extraction call and read is bounded by these; the policy-less fallback batch is half the input
-  budget (local patch).
+- `vlm.credentials`: two DeepSeek V4.1 Flash credentials, tried in order (primary first); since
+  they are set, the top-level `vlm.model`/`api_key` are not called. DeepSeek replaced Doubao
+  2.1-turbo after the 2026-10-21 A/B on 24 archives.
+- `memory.extraction_input_token_budget` 400000 (160000 until 2026-10-24) /
+  `extraction_read_token_budget` 16000: every extraction call and read is bounded by these; the
+  policy-less fallback batch is half the input budget (local patch), so 200k stays above the
+  150k server commit threshold.
 - `memory.extraction_output_format` = `json` since 2026-10-14. The local strict `json_schema`
   protocol (provider-constrained output, Ark stop sequences, truncation salvage) was removed
   2026-10-15: A/B json vs json_schema 15/15 each, json dropped no data; strict only saved ~26%
   prompt tokens and cost ~800 Ark-only lines. Last commit with it: `fb22394`.
 - `embedding.dense`: gpubox Qwen3-Embedding-4B, `provider: openai`, `dimension` 1024,
   `query_param: "query"` (the server prepends the Qwen retrieval instruction for queries).
+- No `query_planner` since 2026-10-24 (user request): intent analysis falls back to `vlm`, i.e.
+  the DeepSeek credentials in order, without thinking (the analyzer passes none and `vlm.thinking`
+  is unset). Planner-shaped calls (1-2k input, no tools) took ~4-6 s, ~2.7 s on the old endpoint;
+  `retrieval.recall_intent_timeout_s` 20 bounds them. Backup: `~/.openviking/ov.conf.bak.noplanner.*`.
 - `queue_workers.session_commit.max_concurrent` 12.
 - `memory.session_auto_commit.enabled` true + `server.user_config_defaults.auto_commit_policy`
   (150000 tokens / 1000 messages, 1000 is the clamp max). The switch is not a master switch:
