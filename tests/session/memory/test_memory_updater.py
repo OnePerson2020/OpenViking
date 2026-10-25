@@ -1250,36 +1250,37 @@ class TestMemoryUpdater:
         updater._apply_delete.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_apply_operations_rejects_case_only_uri_rename(self):
+    async def test_apply_operations_updates_in_place_on_case_only_uri_rename(self):
+        # Templates lower-case names: updating a card created with capitals must not
+        # become a case-only rename (not portable) that fails the whole batch.
         source_uri = "viking://user/u/memories/entities/person/Alice.md"
         target_uri = "viking://user/u/memories/entities/person/alice.md"
         old_file = MemoryFile(uri=source_uri, memory_type="entities", content="source")
-        mock_viking_fs = MagicMock()
-        mock_viking_fs.read_file = AsyncMock()
         updater = MemoryUpdater(registry=MagicMock())
-        updater._get_viking_fs = MagicMock(return_value=mock_viking_fs)
-        updater._apply_upsert = AsyncMock()
+        updater._get_viking_fs = MagicMock(return_value=MagicMock())
+        updater._apply_upsert = AsyncMock(return_value=True)
         updater._apply_delete = AsyncMock()
+        updater._sync_resource_refs_for_result = AsyncMock()
+        updater._vectorize_memories = AsyncMock()
+        updater.generate_overview = AsyncMock()
+        operation = ResolvedOperation(
+            old_memory_file_content=old_file,
+            memory_fields={"name": "alice"},
+            memory_type="entities",
+            uris=[target_uri],
+        )
         operations = ResolvedOperations(
-            upsert_operations=[
-                ResolvedOperation(
-                    old_memory_file_content=old_file,
-                    memory_fields={"name": "alice"},
-                    memory_type="entities",
-                    uris=[target_uri],
-                )
-            ],
+            upsert_operations=[operation],
             delete_file_contents=[],
             errors=[],
         )
 
         result = await updater.apply_operations(operations, MagicMock())
 
-        assert len(result.errors) == 1
-        assert isinstance(result.errors[0][1], ConflictError)
-        assert "Case-only" in str(result.errors[0][1])
-        mock_viking_fs.read_file.assert_not_awaited()
-        updater._apply_upsert.assert_not_awaited()
+        assert not any("Case-only" in str(error) for _uri, error in result.errors)
+        assert operation.uris == [source_uri]
+        assert operations.delete_file_contents == []
+        updater._apply_upsert.assert_awaited_once()
         updater._apply_delete.assert_not_awaited()
 
     @pytest.mark.asyncio

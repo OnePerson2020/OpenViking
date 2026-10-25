@@ -1011,6 +1011,7 @@ class MemoryUpdater:
                 result.add_error("unknown", ValueError(error))
             return result
 
+        self._keep_case_only_renames(operations)
         migration_errors = self._materialize_uri_migrations(operations)
         if migration_errors:
             for source_uri, error in migration_errors:
@@ -1318,6 +1319,25 @@ class MemoryUpdater:
             and operation.uris
             and any(uri != old_file.uri for uri in operation.uris)
         )
+
+    @staticmethod
+    def _keep_case_only_renames(operations: ResolvedOperations) -> None:
+        """Update in place when the new URI differs from the old one only in letter case.
+
+        URI templates lower-case names, so updating a card created with capitals became a
+        case-only rename, which case-insensitive filesystems cannot do; it failed the archive.
+        """
+        for operation in operations.upsert_operations:
+            old_file = operation.old_memory_file_content
+            if old_file is None or not old_file.uri:
+                continue
+            source_key = _same_batch_delete_conflict_key(old_file.uri)
+            operation.uris = list(
+                dict.fromkeys(
+                    old_file.uri if _same_batch_delete_conflict_key(uri) == source_key else uri
+                    for uri in operation.uris
+                )
+            )
 
     @classmethod
     def _materialize_uri_migrations(
