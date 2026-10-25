@@ -91,6 +91,12 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
     Replay of 24 10k-50k archives (`~/ov-ab-20261025/RESULTS.md`): first-call input trajectory
     -23%, experience -15%, user memory unchanged; judged experience quality not worse (majority
     7:2 / 9:1 vs a 5:3 rerun noise floor, n~10). Overall saving ~7-8% of extraction tokens.
+    Experience extraction runs one ExtractLoop per trajectory, each resending instruction +
+    the whole conversation (~110k tokens); all were started at once, so the shared prefix was
+    not cached yet (26% cached; calls started after the first finished: 69%). Experience was
+    52% of uncached extraction input (6 h after step labels). The first trajectory now runs
+    alone, the rest in parallel after it; same prompts and results, one extra call latency
+    (~10-20 s) per archive with 2+ trajectories. Upstream's all-parallel test adjusted.
   - After the port (2026-10-20): upstream #6301 cherry-picked (retry a memory step whose fresh
     read failed before any write; drop on the next upgrade past it), plus the local "stale patch
     preflight": since #6179 a patch over a file another commit changed after the model read it

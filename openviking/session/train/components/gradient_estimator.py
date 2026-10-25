@@ -83,8 +83,12 @@ class ExperienceGradientEstimator:
                 experience_set=experience_set,
             )
 
-        gradient_batches = await asyncio.gather(
-            *(estimate_one(trajectory) for trajectory in analysis.trajectories)
+        # Every call shares the instruction + conversation prefix; run the first alone so
+        # the provider caches it, then the rest in parallel (all-at-once hit ~26% cache).
+        trajectories = list(analysis.trajectories)
+        gradient_batches = [await estimate_one(trajectories[0])] if trajectories else []
+        gradient_batches += await asyncio.gather(
+            *(estimate_one(trajectory) for trajectory in trajectories[1:])
         )
         return [gradient for batch in gradient_batches for gradient in batch]
 

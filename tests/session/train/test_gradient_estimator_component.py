@@ -168,15 +168,16 @@ async def test_experience_gradient_estimator_uses_policy_version_for_newer_old_f
 @pytest.mark.asyncio
 async def test_experience_gradient_estimator_runs_trajectory_extracts_in_parallel():
     analysis = _analysis()
-    analysis.trajectories.append(
-        Trajectory(
-            name="booking_duplicate_second",
-            uri="viking://user/u/memories/trajectories/booking_duplicate_second.md",
-            content="second trajectory content",
-            outcome="success",
-            retrieval_anchor="Stage: final",
+    for suffix in ("second", "third"):
+        analysis.trajectories.append(
+            Trajectory(
+                name=f"booking_duplicate_{suffix}",
+                uri=f"viking://user/u/memories/trajectories/booking_duplicate_{suffix}.md",
+                content=f"{suffix} trajectory content",
+                outcome="success",
+                retrieval_anchor="Stage: final",
+            )
         )
-    )
 
     class ParallelProbeEstimator(ExperienceGradientEstimator):
         def __init__(self):
@@ -186,9 +187,11 @@ async def test_experience_gradient_estimator_runs_trajectory_extracts_in_paralle
             self.all_started = asyncio.Event()
 
         async def _run_extract_loop(self, trajectory, context):
+            if trajectory is analysis.trajectories[0]:
+                return None  # runs alone first to warm the prompt cache
             self.active += 1
             self.max_active = max(self.max_active, self.active)
-            if self.active == len(analysis.trajectories):
+            if self.active == len(analysis.trajectories) - 1:
                 self.all_started.set()
             try:
                 await asyncio.wait_for(self.all_started.wait(), timeout=0.2)
@@ -199,7 +202,7 @@ async def test_experience_gradient_estimator_runs_trajectory_extracts_in_paralle
     estimator = ParallelProbeEstimator()
 
     assert await estimator.estimate(analysis, _experience_set(), _context()) == []
-    assert estimator.max_active == len(analysis.trajectories)
+    assert estimator.max_active == len(analysis.trajectories) - 1
 
 
 @pytest.mark.asyncio
