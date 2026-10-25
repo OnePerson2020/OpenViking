@@ -6,7 +6,7 @@
 //
 //   transcript -> artifacts (image blocks, files written by the agent, local
 //   artifact paths mentioned in the turn) -> local blob + manifest (durable
-//   before any network I/O) -> OV resource under
+//   before any network I/O; deleted once linked) -> OV resource under
 //   viking://resources/agent-artifacts/<harness>/<ovSessionId>/ -> a link
 //   message in the same OV session so replay and extraction can find it.
 //
@@ -228,27 +228,25 @@ export function createStore({ harness, conn, rootDir = join(homedir(), ".openvik
   const cursorsDir = join(dir, "cursors");
   for (const path of [rootDir, dir, blobsDir, recordsDir, cursorsDir]) privateDir(path);
 
-  const blobPath = (sha, ext) => join(blobsDir, `${sha}.${ext || "bin"}`);
+  // Each record owns its blob, named by the record key, so drain can delete it once the record
+  // is linked without checking whether another record still needs the same bytes. Records
+  // staged before that (no `blob` field) share `<sha256>.<ext>` blobs.
+  const blobPath = (record) => join(blobsDir, record.blob || `${record.sha256}.${record.ext || "bin"}`);
   const recordPath = (key) => join(recordsDir, `${key}.json`);
 
-  function putBlob(bytes, ext) {
-    const sha = sha256(bytes);
-    const path = blobPath(sha, ext);
-    if (!existsSync(path)) atomicWrite(path, bytes);
-    return sha;
-  }
-
   /** Idempotent: one record per (session, artifact identity, content hash). */
-  function addRecord(record) {
-    const key = sha256(JSON.stringify([record.ovSessionId, record.kind, record.identity, record.sha256]));
+  function addRecord(bytes, record) {
+    const sha = sha256(bytes);
+    const key = sha256(JSON.stringify([record.ovSessionId, record.kind, record.identity, sha]));
     if (existsSync(recordPath(key))) return false;
-    atomicWrite(recordPath(key), JSON.stringify({ version: 1, harness, status: "pending", ...record }));
+    const blob = `${key}.${record.ext || "bin"}`;
+    atomicWrite(join(blobsDir, blob), bytes); // before the record: a record never lacks its blob
+    atomicWrite(recordPath(key), JSON.stringify({ version: 1, harness, status: "pending", ...record, sha256: sha, blob }));
     return true;
   }
 
   function addImage({ ovSessionId, role, mime, bytes, ext, identity, origin }) {
-    const sha = putBlob(bytes, ext);
-    return addRecord({ ovSessionId, kind: "image", role, mime, ext, sha256: sha, identity, origin,
+    return addRecord(bytes, { ovSessionId, kind: "image", role, mime, ext, identity, origin,
       name: `${origin?.label || "image"}.${ext}` });
   }
 
@@ -259,8 +257,7 @@ export function createStore({ harness, conn, rootDir = join(homedir(), ".openvik
     if (!st.isFile() || st.size <= 0 || st.size > MAX_FILE_BYTES) return false;
     const bytes = readFileSync(path);
     const ext = extname(path).slice(1).toLowerCase() || "bin";
-    const sha = putBlob(bytes, ext);
-    return addRecord({ ovSessionId, kind: "file", role, ext, sha256: sha, identity: path, origin,
+    return addRecord(bytes, { ovSessionId, kind: "file", role, ext, identity: path, origin,
       path, size: st.size, mtime: st.mtime.toISOString(), name: sanitizeName(path) });
   }
 
@@ -305,7 +302,7 @@ export function createStore({ harness, conn, rootDir = join(homedir(), ".openvik
       for (const [key, record] of records()) {
         if (record.status === "linked") continue;
         try {
-          const blob = blobPath(record.sha256, record.ext);
+          const blob = blobPath(record);
           if (sha256(readFileSync(blob)) !== record.sha256) throw new Error("stored blob hash mismatch");
           // the record's own harness: any hook drains the shared store (a Codex hook drained pi records)
           const sessionDir = `${ARTIFACT_ROOT}/${record.harness || harness}/${record.ovSessionId}`;
@@ -354,6 +351,8 @@ export function createStore({ harness, conn, rootDir = join(homedir(), ".openvik
           record.status = "linked";
           record.linkedAt = new Date().toISOString();
           atomicWrite(recordPath(key), JSON.stringify(record));
+          // The server has it now; the local copy only existed for retries.
+          if (record.blob) try { unlinkSync(blob); } catch { /* already gone */ }
           linked++;
         } catch (error) {
           failed++;

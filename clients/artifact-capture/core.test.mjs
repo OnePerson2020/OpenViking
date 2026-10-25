@@ -138,3 +138,25 @@ test("an original over the batch-write limit is skipped, not retried forever", a
   assert.ok(!calls.some((c) => c[0] === "original"));
   assert.match(calls.find((c) => c[0] === "message")[2], /original_skipped/);
 });
+
+test("a linked record's blob is deleted; a record with the same bytes still pending keeps its own", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ac-"));
+  const file = join(root, "shot.png");
+  writeFileSync(file, Buffer.from(PNG_1PX, "base64"));
+  const store = createStore({ harness: "claude-code", conn: { url: "http://x" }, rootDir: join(root, "store") });
+  assert.ok(store.addFile({ ovSessionId: "cc-a", role: "assistant", path: file, origin: {} }));
+  assert.ok(store.addFile({ ovSessionId: "cc-b", role: "assistant", path: file, origin: {} }));
+  const blobs = () => readdirSync(join(store.directory, "blobs"));
+  assert.equal(blobs().length, 2);
+  let down = "cc-b";
+  const client = {
+    uploadResource: async (_blob, { to }) => to,
+    writeOriginal: async (uri) => uri,
+    addMessage: async (sid) => { if (sid === down) throw new Error("server busy"); },
+  };
+  assert.deepEqual(await store.drain(client), { linked: 1, failed: 1 });
+  assert.equal(blobs().length, 1);
+  down = null;
+  assert.deepEqual(await store.drain(client), { linked: 1, failed: 0 });
+  assert.deepEqual(blobs(), []);
+});
