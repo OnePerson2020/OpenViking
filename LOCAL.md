@@ -140,7 +140,8 @@ wheel> --ref local-OLD` (the previous wheel path is in `local_patches/deployed-w
 ## Backup to GitHub
 
 Remote `github` here is volcengine upstream (fetch only). The backup is branch
-`devbox/local-<ver>` on OnePerson2020/OpenViking, pushed from the Mac (devbox has no
+`devbox/local-<ver>` on OnePerson2020/OpenViking (`<ver>` = the upstream release `local`
+sits on, e.g. `0.5.2`; one branch per release), pushed from the Mac (devbox has no
 GitHub credentials):
 
     cd ~/.openviking/openviking-repo   # remote devbox-fork = devbox:.openviking/local_patches/ov-fork
@@ -148,7 +149,7 @@ GitHub credentials):
     git -c http.proxyAuthMethod=basic -c credential.helper= \
         -c credential.helper='!gh auth git-credential' \
         push --force https://github.com/OnePerson2020/OpenViking.git \
-        devbox-fork/local:refs/heads/devbox/local-0.5.1
+        devbox-fork/local:refs/heads/devbox/local-<ver>
 
 ## Deploy
 
